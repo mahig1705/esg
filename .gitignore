@@ -1,0 +1,50 @@
+# Ignore environment variables
+.env
+
+# Python virtual environment
+venv/
+env/
+ENV/
+.venv/
+MajorProject/venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Cache directory
+cache/
+utils/cache/
+
+# ChromaDB directories (vector databases)
+chroma_db/
+
+# Reports and generated outputs
+reports/
+*.log
+
+# Test files and outputs
+test_*.py
+test_*.txt
+test_*.json
+tests/
+
+# Development documentation
+*_INTEGRATION*.md
+*_IMPLEMENTATION*.md
+*_GUIDE*.md
+*_COMPLETE*.md
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
