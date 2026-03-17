@@ -141,78 +141,8 @@ KNOWN_GREENWASHING_CASES: Dict[str, List[Dict]] = {
             "severity": "high",
             "regulatory_body": "InfluenceMap"
         }
-    ],
-    "jpmorgan chase": [
-        {
-            "year": 2024,
-            "description": "JPMorgan Chase withdrew from the Net Zero Banking Alliance (NZBA) in January 2024, contradicting its stated commitment to net-zero by 2050",
-            "source": "Net Zero Banking Alliance / Reuters",
-            "source_url": "https://www.reuters.com/business/finance/jpmorgan-withdraws-net-zero-banking-alliance-2024-01",
-            "severity": "HIGH",
-            "regulatory_body": "NZBA",
-            "contradiction_text": "Left the primary net-zero banking coalition while publicly claiming Paris Agreement alignment",
-        },
-        {
-            "year": 2024,
-            "description": "JPMorgan left Climate Action 100+ investor initiative in February 2024",
-            "source": "Financial Times",
-            "source_url": "https://www.ft.com/content/jpmorgan-climate-action-100",
-            "severity": "HIGH",
-            "regulatory_body": "Climate Action 100+",
-            "contradiction_text": "Exited the world's largest investor-led climate engagement initiative",
-        },
-        {
-            "year": 2024,
-            "description": "JPMorgan shifted 2030 emissions reduction targets from absolute cuts to cost-based carbon intensity metrics - a weaker standard",
-            "source": "Bloomberg / JPMorgan 2024 Climate Report",
-            "severity": "HIGH",
-            "regulatory_body": "Internal",
-            "contradiction_text": "Replaced absolute emission reduction commitments with intensity-based targets that allow total financed emissions to grow",
-        },
-        {
-            "year": 2023,
-            "description": "Rainforest Action Network Banking on Climate Chaos report ranked JPMorgan #1 global fossil fuel financier - $429 billion financed since Paris Agreement (2016-2023)",
-            "source": "Banking on Climate Chaos 2023 - RAN / BankTrack / Sierra Club",
-            "source_url": "https://www.bankingonclimatechaos.org",
-            "severity": "HIGH",
-            "regulatory_body": "RAN / BankTrack / Sierra Club",
-            "contradiction_text": "Largest fossil fuel financier globally while claiming sustainable low-carbon economy alignment",
-        },
-        {
-            "year": 2023,
-            "description": "JPMorgan financed $38.1 billion in fossil fuel expansion projects in 2022 alone, per Banking on Climate Chaos report",
-            "source": "Banking on Climate Chaos 2023",
-            "severity": "HIGH",
-            "regulatory_body": "RAN / BankTrack",
-            "contradiction_text": "Continued large-scale fossil fuel expansion financing contradicts Paris-aligned pathway claim",
-        },
     ]
 }
-
-COMPANY_ALIASES = {
-    "JPMC": "JPMorgan Chase",
-    "JPM": "JPMorgan Chase",
-    "J.P. Morgan": "JPMorgan Chase",
-    "JP Morgan": "JPMorgan Chase",
-    "JPMorgan": "JPMorgan Chase",
-    "Shell PLC": "Shell",
-    "Shell plc": "Shell",
-    "BP plc": "BP",
-    "BP PLC": "BP",
-}
-
-
-def resolve_company_alias(company_name: str) -> str:
-    if not company_name:
-        return company_name
-    if company_name in COMPANY_ALIASES:
-        return COMPANY_ALIASES[company_name]
-    company_lower = company_name.lower().strip()
-    for key, canonical in COMPANY_ALIASES.items():
-        key_lower = key.lower()
-        if key_lower == company_lower or key_lower in company_lower or company_lower in key_lower:
-            return canonical
-    return company_name
 
 def get_known_contradictions(company_name: str, claim_text: str) -> List[Dict]:
     """
@@ -220,8 +150,7 @@ def get_known_contradictions(company_name: str, claim_text: str) -> List[Dict]:
     Returns list of matching contradiction dicts.
     Matching is case-insensitive on company name and regex on claim text.
     """
-    canonical = resolve_company_alias(company_name)
-    company_key = canonical.lower().strip()
+    company_key = company_name.lower().strip()
     # fuzzy match: check if any key is a substring of company name or vice versa
     matched_key = None
     for key in KNOWN_GREENWASHING_CASES:
@@ -233,11 +162,7 @@ def get_known_contradictions(company_name: str, claim_text: str) -> List[Dict]:
     cases = KNOWN_GREENWASHING_CASES[matched_key]
     matched = []
     for case in cases:
-        claim_pattern = case.get("claim_pattern")
-        include_case = True
-        if claim_pattern:
-            include_case = bool(re.search(claim_pattern, claim_text or "", re.IGNORECASE))
-        if include_case:
+        if re.search(case["claim_pattern"], claim_text, re.IGNORECASE):
             matched.append({
                 **case,
                 "confidence": "HIGH",

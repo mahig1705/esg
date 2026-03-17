@@ -254,21 +254,17 @@ class ContradictionAnalyzer:
         if not company:
             return []
         try:
-            canonical_company = resolve_company_alias(company)
-            return get_known_contradictions(canonical_company, claim_text) or []
+            return get_known_contradictions(company, claim_text) or []
         except Exception:
             return []
 
 # === Enhanced Contradiction Analysis ===
 try:
-    from data.known_cases import get_known_contradictions, resolve_company_alias
+    from data.known_cases import get_known_contradictions
 except ImportError:
     def _fallback_get_known_contradictions(company_name: str, claim_text: str) -> list:
         return []
     get_known_contradictions = _fallback_get_known_contradictions
-
-    def resolve_company_alias(company_name: str) -> str:
-        return company_name
 
 import requests
 import hashlib

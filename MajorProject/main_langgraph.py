@@ -17,35 +17,6 @@ if sys.version_info < (3, 11):
 
 load_dotenv()
 
-try:
-    from core.supervisor_agent import resolve_industry
-except Exception:
-    _FALLBACK_INDUSTRY_KEYWORDS = {
-        "Banking": [
-            "bank", "jpmorgan", "jpmc", "jpm", "goldman", "citigroup",
-            "citibank", "wells fargo", "barclays", "hsbc", "morgan stanley",
-            "financial services", "investment bank",
-        ],
-        "Energy": ["shell", "bp", "exxon", "chevron", "totalenergies", "oil", "gas"],
-        "Technology": ["microsoft", "apple", "google", "alphabet", "meta", "amazon"],
-        "Automotive": ["tesla", "toyota", "volkswagen", "ford", "general motors"],
-        "Healthcare": ["pfizer", "johnson", "roche", "novartis", "astrazeneca"],
-    }
-
-    def resolve_industry(company_name: str, user_provided_industry: str = None) -> str:
-        if (
-            user_provided_industry
-            and user_provided_industry.strip().lower() not in ("", "general", "unknown")
-        ):
-            return user_provided_industry
-
-        company_lower = str(company_name or "").lower()
-        for detected_industry, keywords in _FALLBACK_INDUSTRY_KEYWORDS.items():
-            if any(keyword in company_lower for keyword in keywords):
-                return detected_industry
-
-        return user_provided_industry or "General"
-
 # Check which orchestration to use
 USE_LANGGRAPH = os.getenv("USE_LANGGRAPH", "true").lower() == "true"
 
@@ -91,7 +62,8 @@ class ESGGreenwashingDetectorLangGraph:
         """
         
         # Auto-detect industry
-        industry = resolve_industry(company_name, industry)
+        if not industry:
+            industry = self._detect_industry(company_name)
         
         print("\n" + "="*80)
         print(f"🔍 ANALYZING: {company_name}")
@@ -136,9 +108,17 @@ class ESGGreenwashingDetectorLangGraph:
         print("⏳ Estimated time: 60-120 seconds (live API calls)")
         print("─" * 80)
         
-        # Execute workflow
+        # Execute workflow (with hard timeout to prevent indefinite hangs)
+        import concurrent.futures
+        WORKFLOW_TIMEOUT = int(os.getenv("ESG_WORKFLOW_TIMEOUT", "600"))  # default 10 min
         try:
-            result = self.workflow.invoke(initial_state, config)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
+                _future = _executor.submit(self.workflow.invoke, initial_state, config)
+                try:
+                    result = _future.result(timeout=WORKFLOW_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    print(f"\n⚠️  Workflow timed out after {WORKFLOW_TIMEOUT}s. Cancelling...")
+                    raise TimeoutError(f"Analysis timed out after {WORKFLOW_TIMEOUT // 60} minutes")
             
             print("\n" + "="*80)
             print("✅ LANGGRAPH ANALYSIS COMPLETE")
@@ -171,10 +151,6 @@ class ESGGreenwashingDetectorLangGraph:
     
     def _detect_industry(self, company_name: str) -> str:
         """Auto-detect industry from company name"""
-        resolved = resolve_industry(company_name, None)
-        if resolved:
-            return resolved
-
         industry_map = {
             # Energy
             "bp": "Energy", "shell": "Energy", "exxon": "Energy", 
@@ -502,8 +478,6 @@ def run_esg_analysis(company: str, claim: str, industry: str) -> dict:
     print(f"🏭 INDUSTRY: {industry}")
     print(f"{'='*80}\n")
     
-    industry = resolve_industry(company, industry)
-
     # Initialize state
     initial_state = {
         "company": company,
@@ -533,20 +507,33 @@ def run_esg_analysis(company: str, claim: str, industry: str) -> dict:
         app = build_phase2_graph()
         print("✅ Workflow ready\n")
         
-        # Run the graph
+        # Run the graph (with timeout to prevent indefinite hangs)
+        import concurrent.futures
+        WORKFLOW_TIMEOUT = int(os.getenv("ESG_WORKFLOW_TIMEOUT", "600"))
         print("🚀 Starting agent execution...\n")
         final_state = None
-        
-        for step_output in app.stream(initial_state):
-            # Track progress
-            if isinstance(step_output, dict):
-                for node_name, node_output in step_output.items():
-                    if node_name != "__end__":
-                        print(f"   ⚙️  {node_name}")
-                final_state = node_output
-        
+
+        def _run_stream():
+            _final = None
+            for step_output in app.stream(initial_state):
+                if isinstance(step_output, dict):
+                    for node_name, node_output in step_output.items():
+                        if node_name != "__end__":
+                            print(f"   ⚙️  {node_name}")
+                    _final = node_output
+            return _final
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
+            _future = _executor.submit(_run_stream)
+            try:
+                final_state = _future.result(timeout=WORKFLOW_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                print(f"\n⚠️  Workflow timed out after {WORKFLOW_TIMEOUT}s.")
+                raise TimeoutError(f"Analysis timed out after {WORKFLOW_TIMEOUT // 60} minutes")
+
         if final_state is None:
             final_state = initial_state
+
         
         print("\n✅ All agents completed!\n")
         

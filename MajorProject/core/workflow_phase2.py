@@ -27,7 +27,8 @@ from core.agent_wrappers import (
     report_downloader_node,
     report_parser_node,
     report_claim_extraction_node,
-    temporal_consistency_node
+    temporal_consistency_node,
+    esg_mismatch_node
 )
 from core.professional_report_generator import professional_report_generation_node as report_generation_node
 from core.debate_orchestrator import debate_node
@@ -136,6 +137,7 @@ def build_phase2_graph():
     workflow.add_node("std_regulatory", regulatory_scanning_node)  # NEW: Regulatory scanning
     workflow.add_node("std_climatebert", climatebert_analysis_node)  # NEW: ClimateBERT NLP
     workflow.add_node("std_contradiction", contradiction_analysis_node)
+    workflow.add_node("std_mismatch", esg_mismatch_node)  # NEW: ESG Mismatch Detector
     workflow.add_node("std_temporal", temporal_analysis_node)
     workflow.add_node("std_peer", peer_comparison_node)
     workflow.add_node("std_credibility", credibility_analysis_node)
@@ -163,6 +165,7 @@ def build_phase2_graph():
     workflow.add_node("deep_regulatory", regulatory_scanning_node)  # NEW: Regulatory scanning
     workflow.add_node("deep_climatebert", climatebert_analysis_node)  # NEW: ClimateBERT NLP
     workflow.add_node("deep_contradiction", contradiction_analysis_node)
+    workflow.add_node("deep_mismatch", esg_mismatch_node)  # NEW: ESG Mismatch Detector
     workflow.add_node("deep_temporal", temporal_analysis_node)
     workflow.add_node("deep_peer", peer_comparison_node)
     workflow.add_node("deep_credibility", credibility_analysis_node)
@@ -213,7 +216,8 @@ def build_phase2_graph():
     workflow.add_edge("std_greenwishing", "std_regulatory")  # NEW: Regulatory
     workflow.add_edge("std_regulatory", "std_climatebert")  # NEW: ClimateBERT
     workflow.add_edge("std_climatebert", "std_contradiction")
-    workflow.add_edge("std_contradiction", "std_temporal")
+    workflow.add_edge("std_contradiction", "std_mismatch")  # NEW: ESG Mismatch
+    workflow.add_edge("std_mismatch", "std_temporal")
     workflow.add_edge("std_temporal", "std_peer")
     workflow.add_edge("std_peer", "std_credibility")
     workflow.add_edge("std_credibility", "std_sentiment")
@@ -238,7 +242,8 @@ def build_phase2_graph():
     workflow.add_edge("deep_greenwishing", "deep_regulatory")  # NEW: Regulatory
     workflow.add_edge("deep_regulatory", "deep_climatebert")  # NEW: ClimateBERT
     workflow.add_edge("deep_climatebert", "deep_contradiction")
-    workflow.add_edge("deep_contradiction", "deep_temporal")
+    workflow.add_edge("deep_contradiction", "deep_mismatch")  # NEW: ESG Mismatch
+    workflow.add_edge("deep_mismatch", "deep_temporal")
     workflow.add_edge("deep_temporal", "deep_peer")
     workflow.add_edge("deep_peer", "deep_credibility")
     workflow.add_edge("deep_credibility", "deep_sentiment")

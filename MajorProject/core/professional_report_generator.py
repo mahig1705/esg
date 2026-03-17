@@ -1,16 +1,17 @@
 import os
 import json
 import re
+import time
 import textwrap
+import traceback as _tb
 from datetime import datetime
 from typing import Dict, Any, List, Tuple
+from core.safe_utils import safe_get, safe_number, parse_source_name
 
-from ml_models.score_calibrator import linguistic_greenwashing_score
-from ml_models.model_evaluator import run_full_evaluation
-from ml_models.score_calibrator import run_calibration
-from agents.contradiction_analyzer import analyze_contradictions
-from agents.regulatory_scanner import compute_compliance_score, detect_regulation_gaps
-from agents.industry_comparator import IndustryComparator
+# NOTE: Heavy ML/agent modules are intentionally NOT imported at module level here.
+# They were previously triggering 80+ second re-initialization on every node call.
+# If needed, import them lazily inside the specific functions that use them.
+
 
 """
 Professional ESG Report Generator
@@ -186,18 +187,27 @@ class ProfessionalReportGenerator:
         Reads the multi-agent analysis state, builds a structured internal
         representation, runs quality checks, then renders a human-readable
         report with explicit sections, citations, and score derivations.
+
+        Wrapped in structured error handling so crashes never surface raw
+        tracebacks to end users.
         """
+        _start_time = time.time()
+        stages_completed = []
+        stages_failed = []
+        warnings = []
+        generation_status = "success"
 
         try:
+            stages_completed.append("structured_build")
             structured = self._build_structured_report(state)
             quality = ReportQualityChecker().evaluate(state, structured)
             structured.setdefault("metadata", {})["quality_warnings"] = quality["quality_warnings"]
             structured["metadata"]["report_confidence_level"] = quality["report_confidence_level"]
 
             analysis_timestamp = structured["metadata"]["timestamp_dt"]
-            company = structured["company"]["name"]
-            industry = structured["company"].get("industry", "Unknown")
-            claim = structured["company"].get("claim", "No claim provided")
+            company = safe_get(structured, "company", "name", default="Unknown")
+            industry = safe_get(structured, "company", "industry", default="Unknown")
+            claim = safe_get(structured, "company", "claim", default="No claim provided")
 
             node_order = state.get("node_execution_order") or []
             if isinstance(node_order, list) and node_order:
@@ -209,14 +219,15 @@ class ProfessionalReportGenerator:
             if len(workflow_display) > 300:
                 workflow_display = workflow_display[:297] + "..."
 
-            scores = structured["scores"]
-            evidence_struct = structured["evidence"]
-            peers_struct = structured["peers"]
-            calibration = structured["calibration"]
-            pillars = structured["pillars"]
-            agents = structured["agents"]
-            limitations = structured["limitations"]
+            scores = structured.get("scores", {})
+            evidence_struct = structured.get("evidence", {})
+            peers_struct = structured.get("peers", {})
+            calibration = structured.get("calibration", {})
+            pillars = structured.get("pillars", {})
+            agents = structured.get("agents", {})
+            limitations = structured.get("limitations", {})
 
+            stages_completed.append("executive_summary")
             executive_summary_block = self._render_section1_executive_summary(
                 company,
                 industry,
@@ -236,12 +247,29 @@ class ProfessionalReportGenerator:
                 workflow_display,
                 quality,
             )
+
+            stages_completed.append("evidence_table")
             evidence_table_block = self._render_section2_evidence_table(evidence_struct)
+
+            stages_completed.append("score_derivation")
             score_derivation_block = self._render_section3_score_derivation(scores, pillars)
+
+            stages_completed.append("agent_findings")
             agent_narrative_block = self._render_section4_agent_findings(agents)
+
+            stages_completed.append("peer_comparison")
             peer_block = self._render_section5_peer_comparison(company, industry, peers_struct)
+
+            stages_completed.append("calibration")
             calibration_block = self._render_section6_calibration(calibration, scores)
+
+            calibration_block = self._render_section6_calibration(calibration, scores)
+
+            stages_completed.append("limitations")
             limitations_block = self._render_section7_limitations(limitations)
+            
+            stages_completed.append("esg_mismatch")
+            mismatch_section = self._plain_textify(self._generate_mismatch_section(state))
 
             validation_section = self._plain_textify(self._generate_validation_metadata_section())
             temporal_section = self._plain_textify(self._generate_temporal_consistency_section(state))
@@ -292,24 +320,61 @@ class ProfessionalReportGenerator:
                 f"{major}\n"
                 f"{temporal_section}\n\n"
                 f"{major}\n"
-                f"APPENDIX C: DATA ENRICHMENT & ADVANCED METRICS\n"
+                f"APPENDIX C: ESG MISMATCH DETECTOR (PROMISE VS ACTUAL)\n"
+                f"{major}\n"
+                f"{mismatch_section}\n\n"
+                f"{major}\n"
+                f"APPENDIX D: DATA ENRICHMENT & ADVANCED METRICS\n"
                 f"{major}\n"
                 f"{enrichment_section}\n\n"
                 f"{major}\n"
-                f"APPENDIX D: REALISM DIAGNOSTICS\n"
+                f"APPENDIX E: REALISM DIAGNOSTICS\n"
                 f"{major}\n"
                 f"{realism_section}\n\n"
                 f"{major}\n"
-                f"APPENDIX E: QUANTITATIVE PERFORMANCE METRICS\n"
+                f"APPENDIX F: QUANTITATIVE PERFORMANCE METRICS\n"
                 f"{major}\n"
                 f"{quantitative_section}\n\n"
                 f"{major}\n"
                 f"END OF REPORT\n"
                 f"{major}"
             )
+            stages_completed.append("report_assembly")
 
         except Exception as exc:
-            return f"[ERROR] Report generation failed: {exc}"
+            generation_status = "partial"
+            stages_failed.append("report_assembly")
+            warnings.append(str(exc))
+            # Log structured error for debugging (not surfaced to end user)
+            _err_log = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "report_id": safe_get(state, "report_id", default="unknown"),
+                "stage": "generate_executive_report",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "traceback": _tb.format_exc(),
+            }
+            print(f"[ERROR] Report generation failed: {json.dumps(_err_log, default=str)[:500]}")
+            report = (
+                f"{'=' * 80}\n"
+                f"ESG GREENWASHING RISK ASSESSMENT REPORT (PARTIAL)\n"
+                f"{'=' * 80}\n\n"
+                f"Report generation encountered an error.\n"
+                f"Stages completed: {', '.join(stages_completed)}\n"
+                f"Error: {type(exc).__name__}\n\n"
+                f"Available data has been preserved in the JSON export.\n"
+                f"{'=' * 80}\n"
+            )
+
+        # Store generation log on state for downstream consumers
+        duration = round(time.time() - _start_time, 2)
+        state["report_generation_log"] = {
+            "status": generation_status,
+            "stages_completed": stages_completed,
+            "stages_failed": stages_failed,
+            "warnings": warnings,
+            "duration_seconds": duration,
+        }
 
         if not isinstance(report, str) or not report.strip():
             return "[ERROR] Report generation failed: No content generated."
@@ -551,7 +616,7 @@ class ProfessionalReportGenerator:
         st = (source_type or "").lower()
 
         if not u:
-            return "Unverifiable", False
+            return "[UNVERIFIABLE]", False
 
         verifiable = True
 
@@ -803,17 +868,7 @@ class ProfessionalReportGenerator:
         return f"{agent_name}: Agent ran successfully. Key metrics: {list(agent_data.keys())}"
 
     def _extract_peer_context(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        peer_analysis = state.get("peer_comparison") or state.get("peer_results") or {}
-        if not isinstance(peer_analysis, dict) or not peer_analysis:
-            for out in reversed(state.get("agent_outputs", []) or []):
-                if not isinstance(out, dict):
-                    continue
-                if out.get("agent") not in {"peer_comparison", "industry_comparator"}:
-                    continue
-                candidate = out.get("output")
-                if isinstance(candidate, dict) and candidate:
-                    peer_analysis = candidate
-                    break
+        peer_analysis = state.get("peer_comparison") or {}
         if not isinstance(peer_analysis, dict):
             peer_analysis = {}
 
@@ -1012,7 +1067,7 @@ class ProfessionalReportGenerator:
             return "No structured evidence citations were available for this run."
 
         lines: List[str] = []
-        lines.append(f"{'No':<3} {'Source Name':<30} {'Reliability Tier':<28} {'Verifiable':<10} {'Claim Support':<15}")
+        lines.append(f"{'#':<3} {'Source Name':<30} {'Reliability Tier':<28} {'Verifiable':<10} {'Claim Support':<15}")
         lines.append("-" * 91)
         for c in citations:
             idx = str(c.get("id", ""))
@@ -1029,7 +1084,7 @@ class ProfessionalReportGenerator:
         lines.append("  3. Major News Outlet")
         lines.append("  4. General Web / Other")
         lines.append("  5. Estimated / Synthetic")
-        lines.append("  6. Unverifiable")
+        lines.append("  6. [UNVERIFIABLE]")
         return "\n".join(lines)
 
     def _render_metadata_table(
@@ -1338,9 +1393,8 @@ class ProfessionalReportGenerator:
                 unverifiable = output.get("unverifiable_count") or len(output.get("unverifiable_sources", []) or [])
                 total = output.get("total_sources") or output.get("sources_analyzed") or 0
                 overall = output.get("overall_credibility") or output.get("credibility_score") or "N/A"
-                high_display = ", ".join(str(x) for x in high_list) if high_list else "none"
                 lines.append(
-                    f"Source credibility assessment across {total} sources. High-credibility sources: {high_display}. "
+                    f"Source credibility assessment across {total} sources. High-credibility sources: {high_list}. "
                     f"Low-credibility sources: {low_count} items. Unverifiable sources: {unverifiable}. "
                     f"Overall credibility score: {overall}/100."
                 )
@@ -2721,7 +2775,7 @@ KEY PERFORMANCE METRICS
                 "confidence": scores.get("confidence", analysis_state.get("confidence")),
                 "compliance": regulatory.get("compliance_score"),
             },
-            "pillar_factors": raw_scores.get("pillar_factors", {}),
+            "pillar_factors": raw_scores.get("pillar_factors") or {},
             "contradictions": contradictions,
             "regulatory_gaps": [
                 {
@@ -2736,14 +2790,14 @@ KEY PERFORMANCE METRICS
                 "scope2": scope2.get("value") if isinstance(scope2, dict) else None,
                 "scope3": scope3.get("total") if isinstance(scope3, dict) else None,
                 "data_quality": (
-                    (carbon_source.get("data_quality", {}) or {}).get("overall_score")
+                    safe_get(carbon_source, "data_quality", "overall_score")
                     if isinstance(carbon_source, dict)
                     else None
                 ),
             },
             "evidence_sources": [
                 {
-                    "source_name": e.get("source_name"),
+                    "source_name": parse_source_name(e.get("url", "")) if e.get("source_name") in (None, "Unknown", "") else e.get("source_name"),
                     "url": e.get("url"),
                     "reliability_tier": e.get("reliability_tier"),
                     "stance": e.get("claim_support"),
@@ -2761,6 +2815,14 @@ KEY PERFORMANCE METRICS
                 "dataset_size": calibration.get("dataset_size"),
                 "calibration_status": calibration.get("calibration_status"),
             },
+            "report_generation_log": analysis_state.get("report_generation_log", {
+                "status": "success",
+                "stages_completed": [],
+                "stages_failed": [],
+                "warnings": [],
+                "duration_seconds": None,
+            }),
+            "esg_mismatch_analysis": analysis_state.get("esg_mismatch_analysis", {}),
             "report_confidence_level": report_metadata.get("report_confidence", "MEDIUM"),
             "quality_warnings": quality.get("quality_warnings", report_metadata.get("quality_warnings", [])),
         }
@@ -2790,6 +2852,63 @@ KEY PERFORMANCE METRICS
                 return f.read()
         except Exception as exc:
             return json.dumps({"error": "JSON export failed", "detail": str(exc)}, indent=2)
+
+    def _generate_mismatch_section(self, state: Dict[str, Any]) -> str:
+        """
+        Generate ESG Mismatch Detector analysis section.
+        Highlights contradictions between company promises and actual evidence.
+        """
+        mismatch_data = state.get("esg_mismatch_analysis")
+        if not mismatch_data:
+            return "No ESG Promise vs Actual gap analysis was performed for this report."
+
+        lines = [
+            "ESG MISMATCH DETECTOR (PROMISE VS ACTUAL PERFORMANCE)",
+            "─" * 60,
+        ]
+
+        overall_risk = mismatch_data.get("Overall Greenwashing Risk", "Unknown")
+        summary = mismatch_data.get("Executive Summary", "No summary available.")
+        
+        lines.append(f"Overall Mismatch Risk: {overall_risk.upper()}")
+        lines.append(f"Summary: {summary}")
+        lines.append("")
+
+        future = mismatch_data.get("1. Future Commitments & Progress", [])
+        if future:
+            lines.append("FUTURE COMMITMENTS & PROGRESS")
+            lines.append("─" * 30)
+            for idx, item in enumerate(future, start=1):
+                lines.append(f"  {idx}. Pledge: {safe_get(item, 'Pledge', default='Unknown')}")
+                lines.append(f"     Status:   {safe_get(item, 'Status Trend', default='N/A')}")
+                lines.append(f"     Progress: {safe_get(item, 'Progress/Trend', default='N/A')}")
+                lines.append(f"     Source:   {safe_get(item, 'Source of Measure', default='N/A')}")
+                lines.append("")
+
+        past = mismatch_data.get("2. Past Promise-Implementation Gaps (Mismatches)", [])
+        if past and isinstance(past, list) and isinstance(past[0], dict):
+            lines.append("PAST PROMISE-IMPLEMENTATION GAPS DETECTED")
+            lines.append("─" * 40)
+            for idx, item in enumerate(past, start=1):
+                lines.append(f"  {idx}. Failed Pledge: {safe_get(item, 'Failed Pledge', default='Unknown')}")
+                lines.append(f"     Target:        {safe_get(item, 'Expected Target', default='N/A')}")
+                lines.append(f"     Actual Gap:    {safe_get(item, 'Flagged Status', default='N/A')}")
+                lines.append(f"     Risk Level:    {safe_get(item, 'Risk Level', default='N/A')}")
+                lines.append(f"     Evidence:      {safe_get(item, 'Evidence Source', default='N/A')}")
+                lines.append("")
+        elif past and isinstance(past, list) and isinstance(past[0], str):
+            lines.append(past[0])
+            lines.append("")
+
+        # Wrap long lines cleanly
+        wrapped_lines = []
+        for line in lines:
+            if line.startswith("─"):
+                wrapped_lines.append(line)
+            else:
+                wrapped_lines.append("\n".join(textwrap.wrap(line, width=80, subsequent_indent="     " if line.startswith("     ") else "")))
+
+        return "\n".join(wrapped_lines)
 
     def _generate_temporal_consistency_section(self, state: Dict[str, Any]) -> str:
         """
@@ -3278,11 +3397,29 @@ Note: This may occur when:
 # LangGraph node wrapper
 def professional_report_generation_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Generate professional enterprise report - Node wrapper for LangGraph."""
+    import time as _time
+    _t0 = _time.time()
     print(f"\n{'== GENERATING PROFESSIONAL REPORT':=^70}")
 
-    generator = ProfessionalReportGenerator()
+    # === SAFETY TRIM: guard against operator.add accumulation ===
+    raw_outputs = state.get("agent_outputs", [])
+    if isinstance(raw_outputs, list) and len(raw_outputs) > 200:
+        print(f"⚠️ [RPT] agent_outputs has {len(raw_outputs)} entries — trimming to last 200 (operator.add accumulation)")
+        # Keep last unique-by-agent entries within the last 200
+        seen, trimmed = set(), []
+        for item in reversed(raw_outputs):
+            name = item.get("agent", "") if isinstance(item, dict) else ""
+            if name not in seen:
+                seen.add(name)
+                trimmed.append(item)
+        state["agent_outputs"] = list(reversed(trimmed))
+    print(f"[RPT] agent_outputs count: {len(state.get('agent_outputs', []))}", flush=True)
 
+    print(f"[RPT] Step 1: generate_executive_report...", flush=True)
+    generator = ProfessionalReportGenerator()
     professional_report = generator.generate_executive_report(state)
+    print(f"[RPT] Step 1 done ({_time.time()-_t0:.1f}s) — {len(professional_report)} chars", flush=True)
+
 
     # Never write a bloated report to state — cap it
     if len(professional_report) > 500_000:
@@ -3290,18 +3427,30 @@ def professional_report_generation_node(state: Dict[str, Any]) -> Dict[str, Any]
 
     state["report"] = professional_report
 
+    print(f"[RPT] Step 2: _build_structured_report...", flush=True)
     structured = generator._build_structured_report(state)
+    print(f"[RPT] Step 2 done ({_time.time()-_t0:.1f}s)", flush=True)
+
+    print(f"[RPT] Step 3: ReportQualityChecker...", flush=True)
     quality = ReportQualityChecker().evaluate(state, structured)
+    print(f"[RPT] Step 3 done ({_time.time()-_t0:.1f}s)", flush=True)
+
     metadata = {
         "report_id": structured.get("metadata", {}).get("report_id"),
         "analysis_date": (structured.get("metadata", {}).get("timestamp_dt") or datetime.utcnow()).isoformat(),
         "report_confidence": quality.get("report_confidence_level", "MEDIUM"),
         "quality_warnings": quality.get("quality_warnings", []),
     }
+
+    print(f"[RPT] Step 4: generate_json_export...", flush=True)
     json_path, json_size = generator.generate_json_export(state, metadata)
+    print(f"[RPT] Step 4 done ({_time.time()-_t0:.1f}s) — {json_size} chars → {json_path}", flush=True)
+
+    print(f"[RPT] Step 5: reading JSON file...", flush=True)
     with open(json_path, "r", encoding="utf-8") as f:
         state["json_export"] = f.read()
     state["json_export_path"] = json_path
+    print(f"[RPT] Step 5 done ({_time.time()-_t0:.1f}s)", flush=True)
 
     print(f"[OK] Professional report generated ({len(professional_report)} characters)")
     print(f"[OK] JSON export generated ({json_size} characters)")
@@ -3317,4 +3466,5 @@ def professional_report_generation_node(state: Dict[str, Any]) -> Dict[str, Any]
         },
     })
 
+    print(f"[RPT] TOTAL report generation time: {_time.time()-_t0:.1f}s")
     return state

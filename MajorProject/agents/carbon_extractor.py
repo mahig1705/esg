@@ -17,46 +17,6 @@ from core.llm_client import llm_client
 from config.agent_prompts import CARBON_EXTRACTION_PROMPT
 
 
-INDUSTRY_SCOPE3_MINIMUMS = {
-    "banking": 1_000_000,
-    "financial services": 1_000_000,
-    "energy": 100_000_000,
-    "oil and gas": 100_000_000,
-    "manufacturing": 1_000_000,
-    "technology": 100_000,
-    "retail": 500_000,
-    "general": 10_000,
-}
-
-INDUSTRY_SCOPE1_MINIMUMS = {
-    "banking": 10_000,
-    "financial services": 10_000,
-    "energy": 1_000_000,
-    "oil and gas": 1_000_000,
-    "manufacturing": 100_000,
-    "technology": 10_000,
-    "general": 1_000,
-}
-
-
-def validate_emission_value(value, scope: str, industry: str) -> float | None:
-    """Reject values that are clearly parsing artifacts (too small for industry)."""
-    if value is None:
-        return None
-    industry_key = (industry or "general").lower().strip()
-    if scope == "scope3":
-        minimum = INDUSTRY_SCOPE3_MINIMUMS.get(industry_key, INDUSTRY_SCOPE3_MINIMUMS["general"])
-    else:
-        minimum = INDUSTRY_SCOPE1_MINIMUMS.get(industry_key, INDUSTRY_SCOPE1_MINIMUMS["general"])
-    if float(value) < minimum:
-        print(
-            f"[CarbonExtractor] REJECTED {scope}={value} for {industry} "
-            f"(below minimum {minimum}) - likely parsing artifact"
-        )
-        return None
-    return float(value)
-
-
 class CarbonExtractor:
     """
     Scope 1-3 Carbon Emissions Extractor
@@ -340,8 +300,7 @@ class CarbonExtractor:
     def extract_carbon_data(self, company: str, evidence: List[Dict[str, Any]],
                            claim: Dict[str, Any] = None,
                            report_chunks: Optional[List[Dict[str, Any]]] = None,
-                           report_claims_by_year: Optional[Dict[Any, List[str]]] = None,
-                           industry: str = "General") -> Dict[str, Any]:
+                           report_claims_by_year: Optional[Dict[Any, List[str]]] = None) -> Dict[str, Any]:
         """
         Extract comprehensive carbon emissions data from evidence
         
@@ -417,12 +376,7 @@ class CarbonExtractor:
         
         # Step 2: Validate and normalize units
         print("🔍 Validating emission figures...")
-        validated_data = self._validate_emissions(
-            extracted_data,
-            company,
-            industry=industry,
-            extraction_text=extraction_text,
-        )
+        validated_data = self._validate_emissions(extracted_data, company)
         
         # Step 3: Calculate carbon intensity metrics
         print("📈 Calculating carbon intensity...")
@@ -701,38 +655,16 @@ Extract ALL carbon emission data. Return ONLY valid JSON."""
                 value = float(match.group(1).replace(",", ""))
                 unit = match.group(2) if len(match.groups()) > 1 and match.group(2) else "tCO2e"
                 normalized_value = self._normalize_units(value, unit)
-                row_year = self._extract_scope_year_from_context(text, scope, match.start(), match.end())
                 if scope == "scope3":
-                    result[scope] = {
-                        "total": normalized_value,
-                        "unit": "tCO2e",
-                        "source": "regex_extraction",
-                        "year": row_year,
-                    }
+                    result[scope] = {"total": normalized_value, "unit": "tCO2e", "source": "regex_extraction"}
                 elif scope == "total":
-                    result[scope] = {
-                        "value": normalized_value,
-                        "unit": "tCO2e",
-                        "source": "regex_extraction",
-                        "year": row_year,
-                    }
+                    result[scope] = {"value": normalized_value, "unit": "tCO2e", "source": "regex_extraction"}
                 else:
-                    result[scope] = {
-                        "value": normalized_value,
-                        "unit": "tCO2e",
-                        "source": "regex_extraction",
-                        "year": row_year,
-                    }
+                    result[scope] = {"value": normalized_value, "unit": "tCO2e", "source": "regex_extraction"}
         
         return result
     
-    def _validate_emissions(
-        self,
-        data: Dict[str, Any],
-        company: str,
-        industry: str = "General",
-        extraction_text: str = "",
-    ) -> Dict[str, Any]:
+    def _validate_emissions(self, data: Dict[str, Any], company: str) -> Dict[str, Any]:
         """Validate emission figures for reasonableness"""
         
         validated = {"scope1": {}, "scope2": {}, "scope3": {}}
@@ -756,88 +688,26 @@ Extract ALL carbon emission data. Return ONLY valid JSON."""
                     if normalized_value < 0:
                         validation_flags.append("negative_value_invalid")
                     
-                    scope_year = scope_data.get("year")
-                    if not scope_year:
-                        scope_year = self._extract_scope_year_from_context(extraction_text, scope)
-
-                    accepted_value = validate_emission_value(normalized_value, scope, industry)
-                    if accepted_value is None:
-                        validation_flags.append("below_industry_minimum_artifact")
-                        validated[scope] = {
-                            "value": None,
-                            "unit": "tCO2e",
-                            "original_value": value,
-                            "original_unit": scope_data.get("unit"),
-                            "year": scope_year,
-                            "validation_flags": validation_flags,
-                            "verified": False,
-                        }
-                        if scope == "scope3":
-                            validated[scope]["total"] = None
-                        continue
-
                     validated_scope = {
-                        "value": accepted_value,
+                        "value": normalized_value,
                         "unit": "tCO2e",
                         "original_value": value,
                         "original_unit": scope_data.get("unit"),
-                        "year": scope_year,
+                        "year": scope_data.get("year"),
                         "validation_flags": validation_flags,
                         "verified": len(validation_flags) == 0
                     }
                     if scope == "scope3":
-                        validated_scope["total"] = accepted_value
+                        validated_scope["total"] = normalized_value
                     validated[scope] = validated_scope
             elif isinstance(scope_data, (int, float)):
-                accepted_value = validate_emission_value(scope_data, scope, industry)
-                scope_year = self._extract_scope_year_from_context(extraction_text, scope)
                 validated[scope] = {
-                    "value": accepted_value,
+                    "value": float(scope_data),
                     "unit": "tCO2e",
-                    "year": scope_year,
-                    "verified": accepted_value is not None,
-                    "validation_flags": [] if accepted_value is not None else ["below_industry_minimum_artifact"],
+                    "verified": True
                 }
-                if scope == "scope3":
-                    validated[scope]["total"] = accepted_value
         
         return validated
-
-    def _extract_scope_year_from_context(
-        self,
-        text: str,
-        scope: str,
-        start_idx: Optional[int] = None,
-        end_idx: Optional[int] = None,
-    ) -> Optional[int]:
-        """Extract year near scope row so year and value come from nearby context."""
-        if not text:
-            return None
-
-        scope_label = {
-            "scope1": r"scope\s*1",
-            "scope2": r"scope\s*2",
-            "scope3": r"scope\s*3",
-            "total": r"total\s+emissions",
-        }.get(scope, r"scope\s*[123]")
-
-        if start_idx is not None and end_idx is not None:
-            local = text[max(0, start_idx - 180): min(len(text), end_idx + 180)]
-            year_match = re.search(r"\b(20\d{2}|19\d{2})\b", local)
-            if year_match:
-                return int(year_match.group(1))
-
-        row_pat = re.compile(
-            rf"{scope_label}[^\n\r]{{0,180}}\b(20\d{{2}}|19\d{{2}})\b|\b(20\d{{2}}|19\d{{2}})\b[^\n\r]{{0,180}}{scope_label}",
-            re.IGNORECASE,
-        )
-        row_match = row_pat.search(text)
-        if row_match:
-            for group in row_match.groups():
-                if group and group.isdigit():
-                    return int(group)
-
-        return None
     
     def _normalize_units(self, value: float, unit: str) -> float:
         """Normalize emission values to tCO2e"""

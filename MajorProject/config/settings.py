@@ -1,16 +1,13 @@
 import os
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 load_dotenv()
 
 class Settings(BaseModel):
-    model_config = ConfigDict(env_file=".env")
-
     # API Keys
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    HF_TOKEN: str = os.getenv("HF_TOKEN", "")
     NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
     NEWSDATA_API_KEY: str = os.getenv("NEWSDATA_API_KEY", "")
     SEC_API_KEY: str = os.getenv("SEC_API_KEY", "")
@@ -104,5 +101,8 @@ class Settings(BaseModel):
         "UK_FCA_ANTIGREENWASHING"
     ]
     
+    class Config:
+        env_file = ".env"
+
 settings = Settings()
 GREENWASHING_THRESHOLD = 50.0  # auto-computed

@@ -4,7 +4,6 @@ With intelligent relevance filtering to prevent cross-contamination
 """
 
 import requests
-import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from core.llm_client import llm_client
@@ -51,17 +50,6 @@ class EvidenceRetriever:
         except ImportError:
             self.indian_financial_available = False
             print("⚠️ IndianFinancialData not available")
-
-        self.source_weights = {
-            "company_esg_report": 0.65,
-            "sec_filing": 0.95,
-            "cdp_disclosure": 0.98,
-            "third_party_audit": 1.0,
-            "ngo_report": 0.8,
-            "major_news": 0.6,
-            "aggregator": 0.3,
-            "default": 0.5
-        }
     
     def retrieve_evidence(self, claim: Dict[str, Any], company: str) -> Dict[str, Any]:
         """
@@ -113,30 +101,6 @@ class EvidenceRetriever:
             query=f"{company} {claim_text[:50]}",
             max_per_source=10
         )
-
-        source_counts = {
-            source: len(items) if isinstance(items, list) else 0
-            for source, items in all_sources.items()
-        }
-        total_sources = max(1, len(source_counts))
-        successful_sources = sum(1 for count in source_counts.values() if count > 0)
-        success_rate = (successful_sources / total_sources) * 100
-
-        print(f"\n   Success rate: {success_rate:.1f}%\n")
-        print("🏆 TOP PERFORMERS:")
-        top_sources = sorted(source_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-        for source, count in top_sources:
-            print(f"   • {source}: {count} results")
-
-        print("\n💡 RECOMMENDATIONS:")
-        underperformers = [s for s, c in source_counts.items() if c == 0]
-        if underperformers:
-            print("   ⚠️ Review sources with zero results:")
-            for source in underperformers[:5]:
-                print(f"   • {source}")
-        else:
-            print("   ✅ All sources performing as expected")
-        print("=" * 70)
 
         # Flatten all sources
         all_evidence = []
@@ -268,10 +232,6 @@ class EvidenceRetriever:
         result = {
             "claim_id": claim_id,
             "evidence": structured_evidence,
-            "contradicting_evidence": [
-                e for e in structured_evidence
-                if str(e.get("stance", "")).lower() == "contradicts"
-            ],
             "evidence_gap": quality_metrics['evidence_gap'],
             "quality_metrics": quality_metrics,
             "source_breakdown": source_breakdown,
@@ -293,99 +253,77 @@ class EvidenceRetriever:
         Filter evidence to ensure relevance to company and claim
         Removes cached cross-contamination (e.g., Apple results for BP query)
         """
-        return self._filter_evidence_items(evidence, company, claim_text)
-
-    def _filter_evidence_items(self, evidence, company, claim):
-        if not evidence or not company:
-            return evidence
-
-        company_lower = company.lower()
-        aliases = {
-            company_lower,
-            company_lower.replace(" plc", "").strip(),
-            company_lower.replace(" ltd", "").strip(),
-            company_lower.replace(" limited", "").strip(),
-            company_lower.replace(" corporation", "").strip(),
-            company_lower.replace(" corp", "").strip(),
-            company_lower.replace(" inc", "").strip(),
-            company_lower.replace(" group", "").strip(),
-            company_lower.replace(" & co", "").strip(),
-            company_lower.replace(" chase", "").strip(),
-        }
-        aliases.update(
-            t for t in company_lower.replace("-", " ").replace("&", " ").split()
-            if len(t) > 3 and t not in ("bank", "the", "and", "for")
-        )
-
-        claim_keywords = set(re.findall(r"[a-zA-Z][a-zA-Z0-9-]+", str(claim or "").lower()))
-
+        
         filtered = []
+        company_lower = company.lower()
+        claim_keywords = set(claim_text.lower().split())
+        
+        # Common company names to detect wrong results
+        company_indicators = {
+            'apple', 'tesla', 'microsoft', 'google', 'amazon', 'meta', 'facebook',
+            'shell', 'exxon', 'chevron', 'bp', 'totalenergies', 'conocophillips',
+            'coca-cola', 'pepsi', 'nestle', 'unilever', 'nike', 'adidas', 'puma',
+            'walmart', 'target', 'costco', 'ford', 'gm', 'volkswagen', 'toyota'
+        }
+        
         for item in evidence:
-            if not isinstance(item, dict):
-                continue
-
-            # Content-only relevance check. URLs can be Google/Bing/news aggregator URLs.
-            content_fields = " ".join(
-                str(item.get(k, ""))
-                for k in ("title", "snippet", "content", "source_name", "description")
-            ).lower()
-
-            mentions_company = any(alias and len(alias) > 2 and alias in content_fields for alias in aliases)
-            claim_hits = sum(1 for kw in claim_keywords if len(kw) > 4 and kw in content_fields)
-
-            if mentions_company or claim_hits >= 2:
+            # Check if company name appears in title or snippet
+            title = item.get('title', '').lower()
+            snippet = item.get('snippet', '').lower()
+            url = item.get('url', '').lower()
+            combined_text = f"{title} {snippet} {url}"
+            
+            # Must mention the company
+            mentions_company = company_lower in combined_text
+            
+            # Or mentions key claim concepts (at least 2 keywords)
+            claim_relevance_score = sum(
+                1 for kw in claim_keywords 
+                if kw in combined_text and len(kw) > 3
+            )
+            
+            # Check if it's about a DIFFERENT company
+            wrong_company = None
+            for other_company in company_indicators:
+                if other_company != company_lower and other_company in combined_text:
+                    # If the other company is mentioned MORE than target company
+                    other_count = combined_text.count(other_company)
+                    target_count = combined_text.count(company_lower)
+                    
+                    if other_count > target_count:
+                        wrong_company = other_company
+                        break
+            
+            # Include if:
+            # 1. Mentions target company, OR
+            # 2. Has high claim relevance (3+ keywords) AND no wrong company detected
+            if mentions_company or (claim_relevance_score >= 3 and not wrong_company):
                 filtered.append(item)
-            else:
-                title_preview = str(item.get("title", ""))[:60]
-                print(f"      ⏭️  Filtered: '{title_preview}' (no company/claim match)")
-
-        return filtered if filtered else evidence
+            elif wrong_company:
+                print(f"      ⏭️  Filtered: '{item.get('title', 'Unknown')[:60]}...' (mentions {wrong_company.title()}, not {company})")
+        
+        return filtered
     
     def _structure_evidence(self, raw_evidence: List[Dict], claim: str) -> List[Dict]:
         """Structure and classify evidence with AI relationship determination"""
         
         structured = []
-        skipped_count = 0
-        deduplicated_count = 0
         
         print(f"   Analyzing {len(raw_evidence)} sources with AI...", flush=True)
-        
-        # [FIX 2] Track (domain + source_type) pairs for proper deduplication
-        # Counts valid evidence sources using domain + source_type instead of domain-only
-        seen_sources = set()
-        domain_extract = lambda url: url.split('/')[2] if url.count('/') >= 2 else url
         
         for i, ev in enumerate(raw_evidence):
             if i % 10 == 0 and i > 0:
                 print(f"   Progress: {i}/{len(raw_evidence)}...", flush=True)
             
-            # PHASE 5 FIX: Skip sources without URL (invalid sources)
-            url = ev.get("url", "").strip()
-            if not url:
-                skipped_count += 1
-                continue
-            
             # Classify source type
-            source_type = classify_source(url, ev.get("source", ""))
+            source_type = classify_source(ev.get("url", ""), ev.get("source", ""))
             
             # Override with explicit type if provided
             if ev.get("source_type"):
                 source_type = ev.get("source_type")
             
-            # [FIX 2] Create unique key using domain + source_type (not domain-only)
-            domain = domain_extract(url)
-            unique_key = f"{domain}|{source_type}"
-            
-            if unique_key in seen_sources:
-                # Skip duplicate (same domain + source type combination)
-                deduplicated_count += 1
-                continue
-            
-            seen_sources.add(unique_key)
-            
             # Determine relationship using LLM (fast Groq)
             relationship = self._determine_relationship(claim, ev.get("snippet", ""))
-            weight = self._get_source_weight(ev, source_type)
             
             # Calculate freshness
             freshness = self._calculate_freshness(ev.get("date", ""))
@@ -394,65 +332,17 @@ class EvidenceRetriever:
                 "source_id": f"ev_{i:03d}",
                 "source_name": ev.get("source", "Unknown"),
                 "source_type": source_type,
-                "url": url,  # Already validated above
-                "domain": domain,  # NEW: Store domain for reference
+                "url": ev.get("url", ""),
                 "date": ev.get("date", datetime.now().isoformat()),
                 "relevant_text": ev.get("snippet", "")[:500],
                 "relationship_to_claim": relationship,
-                    "stance": relationship,
-                "evidence_weight": weight,
                 "data_freshness_days": freshness,
                 "data_source_api": ev.get("data_source_api", "Unknown"),
                 "retrieval_timestamp": datetime.now().isoformat()
             })
         
-        if skipped_count > 0:
-            print(f"   ⏭️  Skipped {skipped_count} sources without URLs (invalid)")
-        if deduplicated_count > 0:
-            print(f"   ⏭️  Deduplicated {deduplicated_count} sources (domain+type matches)")
-        print(f"   ✓ Analysis complete ({len(structured)} valid unique sources)")
-        
-        # [FIX 3] Normalize evidence metadata - ensure all required fields are present
-        print(f"   Normalizing evidence metadata...")
-        normalized = [self._normalize_evidence(ev) for ev in structured]
-        print(f"   [Fix] Evidence metadata normalized: {len(normalized)} items processed")
-        
-        # Rank evidence by source weight, then by freshness
-        normalized.sort(
-            key=lambda x: (
-                x.get("evidence_weight", self.source_weights["default"]),
-                -x.get("data_freshness_days", 999)
-            ),
-            reverse=True
-        )
-
-        return normalized
-
-    def _get_source_weight(self, ev: Dict[str, Any], source_type: str) -> float:
-        """Map evidence source to quality weight for downstream risk scoring."""
-        url = str(ev.get("url", "")).lower()
-        source_name = str(ev.get("source", "")).lower()
-        title = str(ev.get("title", "")).lower()
-        combined = f"{url} {source_name} {title}"
-
-        if any(k in combined for k in ["sustainability-report", "esg-report", "annualreport", "brsr"]):
-            return self.source_weights["company_esg_report"]
-        if any(k in combined for k in ["tcfd", "assurance report", "limited assurance", "reasonable assurance", "isae 3000", "assurance statement"]):
-            return self.source_weights["third_party_audit"]
-        if any(k in combined for k in ["sec.gov", "10-k", "10k", "10-q", "20-f"]):
-            return self.source_weights["sec_filing"]
-        if "cdp" in combined:
-            return self.source_weights["cdp_disclosure"]
-        if any(k in combined for k in ["greenpeace", "wwf", "environmental defense", "ngo"]):
-            return self.source_weights["ngo_report"]
-        if any(k in combined for k in ["reuters", "bloomberg", "ft.com", "wsj", "economist"]):
-            return self.source_weights["major_news"]
-        if any(k in combined for k in ["duckduckgo", "news.google", "yahoo", "aggregator"]):
-            return self.source_weights["aggregator"]
-        if source_type in ["Government/Regulatory", "Academic"]:
-            return 0.9
-
-        return self.source_weights["default"]
+        print(f"   ✓ Analysis complete")
+        return structured
     
     def _determine_relationship(self, claim: str, evidence: str) -> str:
         """Use FAST LLM (Groq) to determine relationship"""
@@ -478,51 +368,6 @@ class EvidenceRetriever:
                     return word
         
         return "Neutral"
-    
-    def _normalize_evidence(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        [FIX 3] Normalize evidence metadata to ensure all required fields are present
-        Every evidence item must include: title, source, url, date
-        Prevents "Unknown" / "N/A" placeholders in final output
-        """
-        import uuid
-        
-        normalized = {
-            "source_id": item.get("source_id", f"ev_{uuid.uuid4().hex[:8]}"),
-            "title": item.get("source_name") or 
-                    item.get("title") or 
-                    "Unknown Source",
-            "source": item.get("source_name") or 
-                     item.get("source") or 
-                     item.get("data_source_api") or 
-                     "Unknown",
-            "url": item.get("url", ""),
-            "domain": item.get("domain", ""),
-            "date": item.get("date") or datetime.now().isoformat(),
-            "content": item.get("relevant_text", ""),
-            "snippet": item.get("relevant_text", "")[:200],
-            "source_type": item.get("source_type", "Unknown"),
-            "relationship_to_claim": item.get("relationship_to_claim", "Neutral"),
-            "evidence_weight": item.get("evidence_weight", self.source_weights["default"]),
-            "data_freshness_days": item.get("data_freshness_days", 999),
-            "data_source_api": item.get("data_source_api", "Unknown"),
-            "retrieval_timestamp": item.get("retrieval_timestamp", datetime.now().isoformat()),
-            "date_retrieved": datetime.now().date().isoformat(),
-            "source_name": item.get("source_name") or item.get("source") or "Unknown",
-            "reliability_tier": item.get("source_type", "Web")
-        }
-        
-        # Validate critical fields
-        if normalized["title"] == "Unknown Source" or normalized["title"] == "Unknown":
-            normalized["title"] = f"Source: {normalized['source']}"
-        
-        if not normalized["url"] or normalized["url"] == "":
-            normalized["url"] = ""
-            normalized["evidence_weight"] = min(float(normalized["evidence_weight"]), 0.2)
-            normalized["reliability_tier"] = "UNVERIFIABLE"
-            print(f"   ⚠️ UNVERIFIABLE evidence downweighted: {normalized['title'][:60]}")
-        
-        return normalized
     
     def _calculate_freshness(self, date_str: str) -> int:
         """Calculate days since publication"""
@@ -617,11 +462,6 @@ class EvidenceRetriever:
         
         # Source type diversity
         source_types = set(ev.get("source_type") for ev in evidence)
-
-        weighted_quality = round(
-            (sum(float(ev.get("evidence_weight", self.source_weights["default"])) for ev in evidence) / len(evidence)) * 100,
-            1,
-        ) if evidence else 0
         
         # Source type breakdown
         type_breakdown = {}
@@ -652,7 +492,6 @@ class EvidenceRetriever:
             "avg_freshness_days": round(avg_freshness, 1),
             "source_diversity": len(source_types),
             "diversity_score": diversity_score,
-            "weighted_quality_score": weighted_quality,
             "coverage_score": round(coverage_score, 1),
             "total_sources": len(evidence),
             "source_type_breakdown": type_breakdown,

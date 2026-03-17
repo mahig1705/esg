@@ -5,6 +5,33 @@ Defines the data structure passed between agents
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 import operator
 
+
+def _dedupe_agent_outputs(left: List[Dict], right: List[Dict]) -> List[Dict]:
+    """Custom LangGraph reducer for agent_outputs.
+
+    Keeps ONLY the last output per agent name. This prevents the
+    operator.add explosion (16M+ entries) that occurs when LangGraph
+    concatenates the list on every state checkpoint merge across
+    20+ pipeline nodes.
+
+    The result is a bounded list (one entry per agent).
+    """
+    if not isinstance(left, list):
+        left = []
+    if not isinstance(right, list):
+        right = []
+    # Build ordered dict: later entries (from right) win per agent name
+    merged: Dict[str, Dict] = {}
+    for item in left:
+        if isinstance(item, dict):
+            key = item.get("agent", id(item))
+            merged[key] = item
+    for item in right:
+        if isinstance(item, dict):
+            key = item.get("agent", id(item))
+            merged[key] = item
+    return list(merged.values())
+
 class ESGState(TypedDict):
     """
     Central state object for LangGraph workflow
@@ -27,7 +54,7 @@ class ESGState(TypedDict):
     rating_grade: Optional[str]  # "AAA", "AA", "A", "BBB", "BB", "B", "CCC"
     
     # Agent collaboration
-    agent_outputs: Annotated[List[Dict], operator.add]  # Append-only list
+    agent_outputs: Annotated[List[Dict], _dedupe_agent_outputs]  # Deduped per-agent outputs (bounded list)
     iteration_count: int
     needs_revision: bool
     verdict_locked: Optional[bool]  # Prevents verdict override when domain knowledge is applied
@@ -47,6 +74,7 @@ class ESGState(TypedDict):
     greenwishing_analysis: Optional[Dict[str, Any]]  # Greenwishing/greenhushing detection
     regulatory_compliance: Optional[Dict[str, Any]]  # Regulatory horizon scanning
     climatebert_analysis: Optional[Dict[str, Any]]  # ClimateBERT NLP analysis  
+    esg_mismatch_analysis: Optional[Dict[str, Any]]  # Promise vs Actual gap detection
     explainability_report: Optional[Dict[str, Any]]  # SHAP/LIME explanations
     
     # Final output

@@ -8,59 +8,6 @@ from langchain_groq import ChatGroq
 from core.state_schema import ESGState
 from core.evidence_cache import evidence_cache
 
-
-INDUSTRY_KEYWORD_MAP = {
-    "Banking": [
-        "bank", "jpmorgan", "jpmc", "jpm", "goldman sachs", "citigroup", "citibank",
-        "wells fargo", "barclays", "hsbc", "bnp paribas", "deutsche bank",
-        "morgan stanley", "credit suisse", "ubs", "santander", "ing",
-        "financial services", "asset management", "investment bank",
-    ],
-    "Energy": [
-        "shell", "bp", "exxon", "chevron", "totalenergies", "repsol",
-        "equinor", "eni", "conocophillips", "oil", "gas", "petroleum",
-        "refinery", "upstream", "downstream",
-    ],
-    "Technology": [
-        "microsoft", "apple", "google", "alphabet", "meta", "amazon",
-        "nvidia", "samsung", "intel", "ibm", "oracle", "salesforce",
-        "software", "semiconductor", "cloud computing",
-    ],
-    "Automotive": [
-        "toyota", "volkswagen", "ford", "general motors", "bmw",
-        "mercedes", "tesla", "stellantis", "honda", "hyundai",
-    ],
-    "Manufacturing": [
-        "siemens", "ge", "3m", "honeywell", "caterpillar", "boeing",
-        "airbus", "lockheed", "manufacturing", "industrial",
-    ],
-    "Retail": [
-        "walmart", "amazon retail", "target", "costco", "carrefour",
-        "tesco", "ikea", "retail", "consumer goods",
-    ],
-    "Healthcare": [
-        "pfizer", "johnson", "roche", "novartis", "astrazeneca",
-        "merck", "abbott", "pharmaceutical", "biotech", "healthcare",
-    ],
-}
-
-
-def resolve_industry(company_name: str, user_provided_industry: str = None) -> str:
-    """Auto-detect industry from company name. User-provided value wins if not General."""
-    if (
-        user_provided_industry
-        and user_provided_industry.strip().lower() not in ("general", "unknown", "")
-    ):
-        return user_provided_industry
-
-    name_lower = str(company_name or "").lower()
-    for industry, keywords in INDUSTRY_KEYWORD_MAP.items():
-        if any(kw in name_lower for kw in keywords):
-            print(f"[IndustryResolver] Auto-detected: {company_name} -> {industry}")
-            return industry
-
-    return user_provided_industry or "General"
-
 class SupervisorAgent:
     def __init__(self):
         self.llm = ChatGroq(
@@ -156,9 +103,6 @@ def assess_complexity_node(state: ESGState) -> ESGState:
     CLEARS session cache at start of new analysis
     """
     company = state.get("company", "Unknown")
-
-    # Resolve industry before any downstream agent consumes state["industry"].
-    state["industry"] = resolve_industry(company, state.get("industry"))
     
     # CLEAR SESSION CACHE for new analysis (keeps disk cache for reuse)
     evidence_cache.clear_session_cache()

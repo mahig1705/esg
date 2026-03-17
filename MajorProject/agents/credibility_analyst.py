@@ -1,6 +1,5 @@
 import json
 from typing import Dict, Any, List
-from urllib.parse import urlparse
 from core.llm_client import llm_client
 from config.agent_prompts import SOURCE_CREDIBILITY_PROMPT
 
@@ -21,20 +20,6 @@ class CredibilityAnalyst:
             "Company-Controlled": 0.35,
             "Sponsored Content": 0.20
         }
-
-    def analyze(
-        self,
-        evidence: List[Dict[str, Any]],
-        company: str = None,
-        claim: str = None,
-    ) -> Dict[str, Any]:
-        """Primary entrypoint used by LangGraph wrappers."""
-        result = self.analyze_sources(evidence or [])
-        result["company"] = company
-        result["claim"] = claim
-        result["confidence"] = round(result.get("overall_credibility", 0) / 100.0, 2)
-        result["total_sources"] = len(evidence or [])
-        return result
     
     def analyze_sources(self, evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -105,9 +90,6 @@ class CredibilityAnalyst:
         source_name = evidence.get('source_name', 'Unknown')
         url = evidence.get('url', '')
         content = evidence.get('relevant_text', '')
-        parsed = urlparse(url) if url else None
-        domain = (parsed.netloc or "").lower() if parsed else ""
-        url_valid = bool(parsed and parsed.scheme in {"http", "https"} and parsed.netloc)
         
         # Get base credibility
         base_credibility = self.base_scores.get(source_type, 0.50)
@@ -152,8 +134,6 @@ class CredibilityAnalyst:
             "source_id": evidence.get('source_id'),
             "source_name": source_name,
             "source_type": source_type,
-            "domain": domain,
-            "url_valid": url_valid,
             "base_credibility": base_credibility,
             "adjustments": adjustments,
             "final_credibility_score": round(final_score, 2),

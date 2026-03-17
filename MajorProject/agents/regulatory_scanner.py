@@ -352,7 +352,6 @@ class RegulatoryHorizonScanner:
                 ],
                 "claim_validation_rules": [
                     {"pattern": "science based|sbti|1.5", "requirement": "Must have SBTi validated target"},
-                    {"pattern": "net zero|net-zero|carbon neutral", "requirement": "Must have SBTi validated target"},
                     {"pattern": "paris aligned|paris agreement", "requirement": "Must show alignment pathway"}
                 ]
             },
@@ -524,38 +523,21 @@ class RegulatoryHorizonScanner:
             
             if re.search(pattern, claim_text, re.IGNORECASE):
                 # Claim triggers this rule - check if requirement is met
-                requirement_lower = requirement.lower()
-                if "sbti" in requirement_lower or "science based" in requirement_lower:
-                    sbti_terms = ["sbti", "science based", "science-based", "science based target"]
-                    has_sbti_evidence = any(term in evidence_lower for term in sbti_terms)
-                    if has_sbti_evidence:
-                        requirements_met.append({
-                            "triggered_by": pattern,
-                            "requirement": requirement,
-                            "status": "Likely Compliant"
-                        })
-                    else:
-                        requirements_unverified.append({
-                            "triggered_by": pattern,
-                            "requirement": requirement,
-                            "status": "Cannot Verify - Evidence Insufficient"
-                        })
+                requirement_keywords = requirement.lower().split()
+                key_terms = [w for w in requirement_keywords if len(w) > 4][:5]
+                
+                if any(term in evidence_lower for term in key_terms):
+                    requirements_met.append({
+                        "triggered_by": pattern,
+                        "requirement": requirement,
+                        "status": "Likely Compliant"
+                    })
                 else:
-                    requirement_keywords = requirement_lower.split()
-                    key_terms = [w for w in requirement_keywords if len(w) > 4][:5]
-
-                    if any(term in evidence_lower for term in key_terms):
-                        requirements_met.append({
-                            "triggered_by": pattern,
-                            "requirement": requirement,
-                            "status": "Likely Compliant"
-                        })
-                    else:
-                        requirements_unverified.append({
-                            "triggered_by": pattern,
-                            "requirement": requirement,
-                            "status": "Cannot Verify - Evidence Insufficient"
-                        })
+                    requirements_unverified.append({
+                        "triggered_by": pattern,
+                        "requirement": requirement,
+                        "status": "Cannot Verify - Evidence Insufficient"
+                    })
         
         # Calculate compliance status
         total_rules = len(requirements_met) + len(requirements_unverified)

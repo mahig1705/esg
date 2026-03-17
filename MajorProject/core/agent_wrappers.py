@@ -11,6 +11,16 @@ from datetime import datetime
 agents_dir = Path(__file__).parent.parent / "agents"
 sys.path.insert(0, str(agents_dir))
 
+# Add project root to Python path for feature imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+try:
+    from features.esg_mismatch_detector.pipeline import analyze_company_esg
+except ImportError as e:
+    print(f"⚠️  ESG Mismatch Detector import failed: {e}")
+    analyze_company_esg = None
+
 from core.state_schema import ESGState
 from core.evidence_cache import evidence_cache
 from typing import Dict, Any
@@ -482,8 +492,7 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
             evidence=evidence,
             claim=claim_dict,
             report_chunks=parsed_chunks,
-            report_claims_by_year=report_claims_by_year,
-            industry=industry,
+            report_claims_by_year=report_claims_by_year
         )
         
         if isinstance(result, dict):
@@ -1111,20 +1120,11 @@ def peer_comparison_node(state: ESGState) -> ESGState:
         comparator = IndustryComparator()
         
         print(f"🏢 Comparing with industry peers...")
-
-        risk_results = state.get("risk_results") or {}
-        pillar_scores = risk_results.get("pillar_scores", {}) if isinstance(risk_results, dict) else {}
-        overall_esg = pillar_scores.get("overall_esg_score") if isinstance(pillar_scores, dict) else None
-
-        if hasattr(comparator, 'generate_dynamic_peer_table'):
-            result = comparator.generate_dynamic_peer_table(
-                company=state.get("company", ""),
-                industry=state.get("industry", "General"),
-                esg_score=overall_esg,
-                pillar_scores=pillar_scores if isinstance(pillar_scores, dict) else {},
-            )
-        elif hasattr(comparator, 'compare_to_peers'):
-            result = comparator.compare_to_peers(state.get("company", ""), state.get("claims", []))
+        
+        if hasattr(comparator, 'compare'):
+            result = comparator.compare(state["company"], state["industry"])
+        elif hasattr(comparator, 'analyze'):
+            result = comparator.analyze(state["company"])
         else:
             result = {"peers": [], "confidence": 0.5}
         
@@ -1139,7 +1139,6 @@ def peer_comparison_node(state: ESGState) -> ESGState:
         })
         if isinstance(result, dict):
             state["peer_results"] = result
-            state["peer_comparison"] = result
         state.setdefault("node_execution_order", []).append("Peer Comparison")
         
         print(f"{'✅ NODE COMPLETED':^70}")
@@ -1284,9 +1283,7 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
         "debate_activated": False,
         "financial_context": None,
         "agent_outputs": list(state.get("agent_outputs", [])),
-        "industry": state.get("industry", ""),
-        "company": state.get("company", ""),
-        "claim": state.get("claim", ""),
+        "industry": state.get("industry", "")
     }
     
     for output in state.get("agent_outputs", []):
@@ -1415,21 +1412,11 @@ def credibility_analysis_node(state: ESGState) -> ESGState:
         analyst = CredibilityAnalyst()
         
         print(f"🔒 Assessing source credibility...")
-
-        evidence = state.get("evidence") or []
-        if not evidence:
-            evidence = (state.get("evidence_results", {}) or {}).get("items", [])
-        if not evidence:
-            evidence = state.get("filtered_evidence", [])
-
+        
         if hasattr(analyst, 'analyze'):
-            result = analyst.analyze(
-                evidence=evidence,
-                company=state.get("company"),
-                claim=state.get("claim"),
-            )
+            result = analyst.analyze(state["evidence"])
         elif hasattr(analyst, 'assess'):
-            result = analyst.assess(evidence)
+            result = analyst.assess(state["evidence"])
         else:
             result = {"credibility_score": 0.5, "confidence": 0.5}
         
@@ -1545,11 +1532,7 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
     state["agent_outputs"].append({
         "agent": "confidence_scoring",
         "confidence": avg_confidence,
-        "timestamp": datetime.now().isoformat(),
-        "output": {
-            "average_confidence": avg_confidence,
-            "agents_counted": agent_count,
-        },
+        "timestamp": datetime.now().isoformat()
     })
     
     print(f"{'✅ NODE COMPLETED':^70}")
@@ -1576,13 +1559,9 @@ def verdict_generation_node(state: ESGState) -> ESGState:
         esg_override_active = risk_scorer_result.get("esg_override_active", False)
         
         if esg_override_active:
-            risk_source = risk_scorer_result.get("risk_source", "ESG Pillar Override")
-            esg_score = risk_scorer_result.get("esg_score", risk_scorer_result.get("overall_esg_score", 0))
-            rating_grade = risk_scorer_result.get("rating_grade", "N/A")
-
-            print(f"\n✅ ESG PILLAR OVERRIDE DETECTED - {risk_source}")
-            print(f"   ESG Score: {esg_score}/100")
-            print(f"   Rating: {rating_grade}")
+            print(f"\n✅ ESG PILLAR OVERRIDE DETECTED - Strong Performance")
+            print(f"   ESG Score: {risk_scorer_result.get('esg_score', 0)}/100")
+            print(f"   Rating: {risk_scorer_result.get('rating_grade', 'A')}")
             print(f"   This override takes HIGHEST PRIORITY")
             
             # Lock the verdict to ESG pillar-based assessment
@@ -2474,3 +2453,70 @@ def temporal_consistency_node(state: ESGState) -> ESGState:
     return state
 
 
+
+# ============================================================
+# ESG MISMATCH DETECTOR NODE (2026 Features)
+# ============================================================
+
+def esg_mismatch_node(state: ESGState) -> ESGState:
+    """
+    Executes the ESG Mismatch Detector to compare company promises vs actual evidence.
+    """
+    print(f"\n{'?? NODE: ESG Mismatch Detector':=^70}")
+    
+    # Initialize state collections if missing
+    if "agent_outputs" not in state or not isinstance(state["agent_outputs"], list):
+        state["agent_outputs"] = []
+        
+    company = state.get("company", "")
+    if not company or analyze_company_esg is None:
+        print(f"?? Skipping mismatch detection (missing company name or module unavailable)")
+        state["agent_outputs"].append({
+            "agent": "esg_mismatch",
+            "output": {"status": "skipped", "reason": "Module unavailable or missing company"},
+            "confidence": 0.0,
+            "timestamp": datetime.now().isoformat()
+        })
+        return state
+        
+    try:
+        print(f"?? Analyzing ESG promises vs reality for: {company}")
+        
+        # Call the standalone pipeline
+        # Note: the pipeline relies on caching internally.
+        mismatch_results = analyze_company_esg(company)
+        
+        if isinstance(mismatch_results, dict):
+            # Save raw structure to state
+            state["esg_mismatch_analysis"] = mismatch_results
+            
+            risk = mismatch_results.get("Overall Greenwashing Risk", "Unknown")
+            print(f"   Mismatch Risk Level: {risk}")
+            
+            # Decide a confidence baseline
+            confidence = 0.8 if risk in ["High", "Severe", "Violation Detected"] else 0.6
+                
+            state["agent_outputs"].append({
+                "agent": "esg_mismatch",
+                "output": mismatch_results,
+                "confidence": confidence,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+        else:
+            print(f"?? Unexpected mismatch result format: {type(mismatch_results)}")
+            
+    except Exception as e:
+        print(f"? Error in ESG Mismatch Detector: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        state["agent_outputs"].append({
+            "agent": "esg_mismatch",
+            "error": str(e),
+            "confidence": 0.0,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    print(f"{'='*70}")
+    return state

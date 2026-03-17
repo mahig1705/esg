@@ -19,80 +19,6 @@ except ImportError:
     print("⚠️ yfinance not installed. Run: pip install yfinance")
 
 
-TICKER_SYMBOL_MAP = {
-    # Common mismatches
-    "JPMC": "JPM",
-    "JPMorgan": "JPM",
-    "JPMorgan Chase": "JPM",
-    "JPMorgan Chase & Co": "JPM",
-    "J.P. Morgan": "JPM",
-    "Alphabet": "GOOGL",
-    "Google": "GOOGL",
-    "Meta": "META",
-    "Facebook": "META",
-    "Amazon": "AMZN",
-    "Microsoft": "MSFT",
-    "Tesla": "TSLA",
-    "Shell": "SHEL",
-    "Shell PLC": "SHEL",
-    "BP": "BP",
-    "TotalEnergies": "TTE",
-    "ExxonMobil": "XOM",
-    "Chevron": "CVX",
-    "Goldman Sachs": "GS",
-    "Bank of America": "BAC",
-    "Wells Fargo": "WFC",
-    "Citigroup": "C",
-    "Barclays": "BCS",
-    "HSBC": "HSBC",
-    # Existing broad symbol support
-    "Apple": "AAPL",
-    "Nvidia": "NVDA",
-    "Netflix": "NFLX",
-    "Coca-Cola": "KO",
-    "Pepsi": "PEP",
-    "Walmart": "WMT",
-    "ConocoPhillips": "COP",
-    "Toyota": "TM",
-    "Volkswagen": "VWAGY",
-    "Ford": "F",
-    "GM": "GM",
-    "Unilever": "UL",
-    "Nestle": "NSRGY",
-    "Nike": "NKE",
-    "Adidas": "ADDYY",
-    "Starbucks": "SBUX",
-    "McDonalds": "MCD",
-    "Pfizer": "PFE",
-    "Johnson & Johnson": "JNJ",
-    "Moderna": "MRNA",
-    "Boeing": "BA",
-    "Lockheed Martin": "LMT",
-    "General Electric": "GE",
-    "Siemens": "SIEGY",
-    "BASF": "BASFY",
-    "Dupont": "DD",
-    "Dow": "DOW",
-}
-
-
-def resolve_ticker(company_name: str) -> str:
-    """Resolve common company names to their correct exchange ticker."""
-    if not company_name:
-        return company_name
-
-    if company_name in TICKER_SYMBOL_MAP:
-        return TICKER_SYMBOL_MAP[company_name]
-
-    name_lower = company_name.lower()
-    for key, ticker in TICKER_SYMBOL_MAP.items():
-        key_lower = key.lower()
-        if key_lower in name_lower or name_lower in key_lower:
-            return ticker
-
-    return company_name
-
-
 class FinancialAnalyst:
     """
     Analyzes company financial health and ESG-financial correlations
@@ -103,8 +29,52 @@ class FinancialAnalyst:
         self.name = "ESG-Financial Correlation Analyst"
         self.llm = llm_client
         
-        # Case-insensitive lookup map
-        self.symbol_map = {k.lower(): v for k, v in TICKER_SYMBOL_MAP.items()}
+        # Stock symbol mappings (extend as needed)
+        self.symbol_map = {
+            "tesla": "TSLA",
+            "apple": "AAPL",
+            "microsoft": "MSFT",
+            "amazon": "AMZN",
+            "google": "GOOGL",
+            "alphabet": "GOOGL",
+            "meta": "META",
+            "facebook": "META",
+            "nvidia": "NVDA",
+            "netflix": "NFLX",
+            "coca-cola": "KO",
+            "pepsi": "PEP",
+            "walmart": "WMT",
+            "exxon": "XOM",
+            "chevron": "CVX",
+            "bp": "BP",
+            "shell": "SHEL",
+            "totalenergies": "TTE",
+            "conocophillips": "COP",
+            "toyota": "TM",
+            "volkswagen": "VWAGY",
+            "ford": "F",
+            "gm": "GM",
+            "unilever": "UL",
+            "nestle": "NSRGY",
+            "nike": "NKE",
+            "adidas": "ADDYY",
+            "starbucks": "SBUX",
+            "mcdonalds": "MCD",
+            "jpmorgan": "JPM",
+            "bank of america": "BAC",
+            "goldman sachs": "GS",
+            "wells fargo": "WFC",
+            "pfizer": "PFE",
+            "johnson & johnson": "JNJ",
+            "moderna": "MRNA",
+            "boeing": "BA",
+            "lockheed martin": "LMT",
+            "general electric": "GE",
+            "siemens": "SIEGY",
+            "basf": "BASFY",
+            "dupont": "DD",
+            "dow": "DOW"
+        }
 
         aliases_path = Path(__file__).parent.parent / "config" / "company_aliases.json"
         self.company_aliases = {}
@@ -234,12 +204,7 @@ class FinancialAnalyst:
     
     def _get_ticker(self, company: str) -> Optional[str]:
         """Get stock ticker from company name"""
-        company = resolve_ticker(company)
         company_lower = company.lower().strip()
-
-        # If resolver already returned a ticker, use it directly
-        if company.isupper() and 1 <= len(company) <= 6 and company.isalpha():
-            return company
 
         # Config alias map takes precedence for edge cases (e.g., BP vs BP.L)
         for canonical, alias_data in self.company_aliases.items():
@@ -269,7 +234,7 @@ class FinancialAnalyst:
             
             for term in search_terms:
                 try:
-                    ticker = yf.Ticker(resolve_ticker(term).upper())
+                    ticker = yf.Ticker(term.upper())
                     info = ticker.info
                     if info and info.get('symbol'):
                         return info['symbol']
@@ -282,8 +247,6 @@ class FinancialAnalyst:
     
     def _fetch_financial_data(self, ticker_symbol: str) -> Dict[str, Any]:
         """Fetch financial data from Yahoo Finance with debug logging"""
-
-        ticker_symbol = resolve_ticker(str(ticker_symbol or "")).upper()
         
         print(f"\n{'='*60}")
         print(f"🔍 DEBUG: Financial Data Fetch")
@@ -293,7 +256,7 @@ class FinancialAnalyst:
         try:
             # Step 1: Yahoo Finance (Primary)
             print(f"\n[1] Attempting Yahoo Finance API for {ticker_symbol}...")
-            ticker = yf.Ticker(resolve_ticker(ticker_symbol).upper())
+            ticker = yf.Ticker(ticker_symbol)
             info = ticker.info
             
             print(f"✅ Yahoo Finance Response Status: SUCCESS")

@@ -12,40 +12,6 @@ SECTOR_KNOWN_PEERS = {
     "Consumer Goods": ["Unilever", "Nestle", "P&G", "HUL", "ITC"]
 }
 
-STATIC_PEER_BASELINES = {
-    "Banking": [
-        {"name": "Bank of America", "ticker": "BAC", "esg_score": 52.0,
-         "greenwashing_risk_score": 48.0, "rating": "BB", "source": "baseline",
-         "environmental_score": 48.0, "social_score": 55.0, "governance_score": 53.0},
-        {"name": "Wells Fargo", "ticker": "WFC", "esg_score": 44.0,
-         "greenwashing_risk_score": 56.0, "rating": "B", "source": "baseline",
-         "environmental_score": 40.0, "social_score": 46.0, "governance_score": 46.0},
-        {"name": "Citigroup", "ticker": "C", "esg_score": 55.0,
-         "greenwashing_risk_score": 45.0, "rating": "BB", "source": "baseline",
-         "environmental_score": 52.0, "social_score": 57.0, "governance_score": 56.0},
-        {"name": "Barclays", "ticker": "BCS", "esg_score": 58.0,
-         "greenwashing_risk_score": 42.0, "rating": "BBB", "source": "baseline",
-         "environmental_score": 55.0, "social_score": 60.0, "governance_score": 59.0},
-        {"name": "HSBC", "ticker": "HSBC", "esg_score": 60.0,
-         "greenwashing_risk_score": 40.0, "rating": "BBB", "source": "baseline",
-         "environmental_score": 58.0, "social_score": 62.0, "governance_score": 60.0},
-    ],
-    "Energy": [
-        {"name": "BP", "ticker": "BP", "esg_score": 42.0,
-         "greenwashing_risk_score": 68.0, "rating": "B", "source": "baseline",
-         "environmental_score": 38.0, "social_score": 44.0, "governance_score": 44.0},
-        {"name": "TotalEnergies", "ticker": "TTE", "esg_score": 50.0,
-         "greenwashing_risk_score": 54.0, "rating": "BB", "source": "baseline",
-         "environmental_score": 48.0, "social_score": 52.0, "governance_score": 50.0},
-        {"name": "ExxonMobil", "ticker": "XOM", "esg_score": 38.0,
-         "greenwashing_risk_score": 72.0, "rating": "CCC", "source": "baseline",
-         "environmental_score": 32.0, "social_score": 42.0, "governance_score": 40.0},
-        {"name": "Chevron", "ticker": "CVX", "esg_score": 41.0,
-         "greenwashing_risk_score": 65.0, "rating": "B", "source": "baseline",
-         "environmental_score": 36.0, "social_score": 44.0, "governance_score": 43.0},
-    ],
-}
-
 def get_peer_scores(company_name: str, sector: str) -> list:
     """
     Returns list of peer dicts with real data where possible.
@@ -147,36 +113,6 @@ class IndustryComparator:
         # Load industry baselines
         self.industry_config = self._load_industry_config()
 
-    def _get_baseline_industry_key(self, industry: str) -> str:
-        industry_lower = str(industry or "").lower().strip()
-        if "bank" in industry_lower or "financial" in industry_lower or "finance" in industry_lower:
-            return "Banking"
-        if "energy" in industry_lower or "oil" in industry_lower or "gas" in industry_lower:
-            return "Energy"
-        return ""
-
-    def _get_static_baseline_peers(self, industry: str, exclude_company: str = None) -> List[Dict[str, Any]]:
-        key = self._get_baseline_industry_key(industry)
-        if not key:
-            return []
-        peers = []
-        for p in STATIC_PEER_BASELINES.get(key, []):
-            if exclude_company and str(p.get("name", "")).lower() == str(exclude_company).lower():
-                continue
-            peers.append({
-                "company": p.get("name"),
-                "ticker": p.get("ticker"),
-                "esg": float(p.get("esg_score", 50.0)),
-                "e": float(p.get("environmental_score", 50.0)),
-                "s": float(p.get("social_score", 50.0)),
-                "g": float(p.get("governance_score", 50.0)),
-                "rating": p.get("rating", "BB"),
-                "greenwashing_risk_score": float(p.get("greenwashing_risk_score", 50.0)),
-                "source": "baseline",
-                "timestamp": datetime.now().isoformat(),
-            })
-        return peers
-
     def _load_industry_config(self) -> Dict:
         """Load industry baseline configuration"""
         try:
@@ -243,7 +179,7 @@ class IndustryComparator:
         Returns companies from same industry that were previously analyzed
         """
         if not self.peer_db_available:
-            return self._get_static_baseline_peers(industry, exclude_company=exclude_company)[:max_peers]
+            return []
         
         try:
             # Normalize industry
@@ -258,7 +194,7 @@ class IndustryComparator:
             )
             
             if not results or not results.get('metadatas'):
-                return self._get_static_baseline_peers(industry, exclude_company=exclude_company)[:max_peers]
+                return []
             
             # Extract peer data
             peers = []
@@ -280,18 +216,12 @@ class IndustryComparator:
                     "timestamp": metadata.get('timestamp', '')
                 })
             
-            if not peers:
-                peers = self._get_static_baseline_peers(industry, exclude_company=exclude_company)
-                if peers:
-                    print(f"📊 Loaded {len(peers)} static baseline peers for {industry}")
-            else:
-                print(f"📊 Found {len(peers)} real peers in database for {industry}")
-
+            print(f"📊 Found {len(peers)} real peers in database for {industry}")
             return peers[:max_peers]
             
         except Exception as e:
             print(f"⚠️ Failed to retrieve peers from database: {e}")
-            return self._get_static_baseline_peers(industry, exclude_company=exclude_company)[:max_peers]
+            return []
 
     def generate_estimated_peers(self, industry: str, target_esg: float, 
                                  count: int = 5) -> List[Dict[str, Any]]:
@@ -511,7 +441,7 @@ class IndustryComparator:
         table += f"| Industry Average     | {avg_esg:>6.1f}    | {avg_e:>2.0f} | {avg_s:>2.0f} | {avg_g:>2.0f} | -    | -      |\n"
         
         # Step 8: Determine data source for disclaimer
-        real_count = len([p for p in all_peers if p.get('source') in {'database', 'baseline'}])
+        real_count = len([p for p in all_peers if p.get('source') == 'database'])
         estimated_count = len([p for p in all_peers if p.get('source') == 'estimated'])
         
         if real_count >= 3:

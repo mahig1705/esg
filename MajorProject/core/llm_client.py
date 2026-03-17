@@ -1,6 +1,7 @@
 import os
 from groq import Groq
-from google import genai
+import google.genai as genai
+from google.genai import types as genai_types
 from typing import Dict, Any, Optional, List
 from config.settings import settings
 import time
@@ -11,8 +12,11 @@ class LLMClient:
         # Initialize Groq client
         self.groq_client = Groq(api_key=settings.GROQ_API_KEY)
         
-        # Initialize Gemini client
-        self.gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        # Initialize Gemini client (with 120-second HTTP timeout to prevent indefinite hangs)
+        self.gemini_client = genai.Client(
+            api_key=settings.GEMINI_API_KEY,
+            http_options=genai_types.HttpOptions(timeout=120000),  # 120 seconds in ms
+        )
         
         # PHASE 8: Add caching for LLM responses
         self.response_cache: Dict[str, str] = {}  # hash(prompt) -> response
@@ -157,7 +161,8 @@ class LLMClient:
                     model=model,
                     messages=messages,
                     temperature=temperature,
-                    max_tokens=8000
+                    max_tokens=8000,
+                    timeout=90,  # 90-second timeout to prevent indefinite hangs
                 )
                 return response.choices[0].message.content
             except Exception as e:
@@ -207,10 +212,10 @@ class LLMClient:
                 response = self.gemini_client.models.generate_content(
                     model=model_name,
                     contents=prompt,
-                    config={
-                        "temperature": temperature,
-                        "max_output_tokens": 8000,
-                    },
+                    config=genai_types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=8000,
+                    ),
                 )
                 
                 result = getattr(response, "text", None)
