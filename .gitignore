@@ -7,7 +7,6 @@ env/
 ENV/
 .venv/
 MajorProject/venv/
-
 # Python cache
 __pycache__/
 *.py[cod]
