@@ -112,6 +112,14 @@ class GreenwishingDetector:
         print(f"Claim: {claim.get('claim_text', '')[:80]}...")
         
         claim_text = claim.get("claim_text", "")
+        industry = (
+            (structured_context or {}).get("industry")
+            or claim.get("industry")
+            or "General"
+        )
+        print(f"[Greenwishing] Input claim: {claim_text[:100]}")
+        print(f"[Greenwishing] Industry: {industry}")
+        print(f"[Greenwishing] Evidence items: {len(evidence) if isinstance(evidence, list) else 0}")
         evidence_text = self._combine_evidence(evidence)
         context_text = self._combine_structured_context(structured_context or {})
         full_text = f"{evidence_text}\n\n{context_text}".strip()
@@ -268,7 +276,7 @@ class GreenwishingDetector:
                 "severity": "High" if len(unfunded_matches) >= 2 else "Medium"
             })
         
-        # Check vague timelines
+        # Check vague timelines from phrase matches.
         vague_timeline_matches = []
         for phrase in self.greenwishing_indicators["vague_timelines"]:
             if phrase in combined_text:
@@ -281,7 +289,7 @@ class GreenwishingDetector:
                 "severity": "Medium"
             })
         
-        # Check for missing pathway/funding
+        # Check for missing pathway/funding from phrase matches.
         pathway_issues = []
         for phrase in self.greenwishing_indicators["no_pathway"]:
             if phrase in combined_text:
@@ -294,7 +302,7 @@ class GreenwishingDetector:
                 "severity": "High"
             })
         
-        # Check aspirational vs concrete language ratio
+        # Check aspirational vs concrete language ratio.
         aspirational_count = sum(
             1 for phrase in self.greenwishing_indicators["aspirational_language"]
             if phrase in combined_text
@@ -320,16 +328,73 @@ class GreenwishingDetector:
                     "detail": "Major commitment without disclosed capital expenditure",
                     "severity": "High"
                 })
+
+        # Always evaluate core indicators regardless of industry.
+        current_year = datetime.now().year
+        year_match = re.search(r"\b(20\d{2})\b", claim_text)
+        target_year = int(year_match.group(1)) if year_match else None
+        has_interim_steps = any(
+            k in combined_text for k in [
+                "interim target", "2030", "2035", "near-term", "milestone", "annual reduction", "science based pathway"
+            ]
+        )
+        vague_timeline = bool(target_year and (target_year - current_year > 10) and not has_interim_steps)
+
+        funded_pathway_terms = [
+            "funded", "funding", "capex", "capital expenditure", "allocated", "budget", "investment plan", "transition plan"
+        ]
+        no_clear_pathway = not any(k in evidence_lower for k in funded_pathway_terms)
+
+        claim_nlp_score = min(100, (aspirational_count * 12) + (len(unfunded_matches) * 18) + (15 if "net zero" in claim_lower or "net-zero" in claim_lower else 0))
+        evidence_nlp_score = min(100, sum(1 for k in funded_pathway_terms if k in evidence_lower) * 10)
+        aspirational_imbalance = claim_nlp_score > (evidence_nlp_score + 10)
+
+        if vague_timeline and not any(f.get("type") == "vague_timeline" for f in findings):
+            findings.append({
+                "type": "vague_timeline",
+                "detail": "Target timeline extends beyond 10 years without clear interim milestones",
+                "severity": "Medium"
+            })
+
+        if no_clear_pathway and not any(f.get("type") == "no_clear_pathway" for f in findings):
+            findings.append({
+                "type": "no_clear_pathway",
+                "detail": "No funded implementation pathway found in evidence",
+                "severity": "High"
+            })
+
+        if aspirational_imbalance and not any(f.get("type") == "aspirational_imbalance" for f in findings):
+            findings.append({
+                "type": "aspirational_imbalance",
+                "detail": f"Claim language score ({claim_nlp_score}) exceeds evidence grounding ({evidence_nlp_score})",
+                "severity": "Medium"
+            })
         
         # Calculate score
         severity_weights = {"High": 30, "Medium": 20, "Low": 10}
         score = min(100, sum(severity_weights.get(f["severity"], 10) for f in findings))
+
+        has_netzero_language = any(
+            kw in claim_lower for kw in [
+                "net-zero", "net zero", "carbon neutral", "carbon negative", "climate positive", "zero emissions"
+            ]
+        )
+        if has_netzero_language:
+            score = max(score, 30)
+
+        if (vague_timeline or no_clear_pathway or aspirational_imbalance) and score <= 0:
+            score = 20
         
         return {
             "detected": len(findings) > 0,
             "findings": findings,
             "score": score,
             "risk_level": "High" if score >= 60 else "Medium" if score >= 30 else "Low",
+            "indicators": {
+                "vague_timeline": vague_timeline,
+                "no_clear_pathway": no_clear_pathway,
+                "aspirational_imbalance": aspirational_imbalance,
+            },
             "definition": "Greenwishing: Setting unfunded, aspirational sustainability goals without credible implementation pathways"
         }
     

@@ -13,6 +13,13 @@
       "email": "tisha@gmail.com",
       "password": "tisha12345",
       "role": "user"
+    },
+    {
+      "id": "1773808988626",
+      "name": "Mahi Gandhi",
+      "email": "mahi.gandhi23@spit.ac.in",
+      "password": "Mahi@1705",
+      "role": "user"
     }
   ]
 }

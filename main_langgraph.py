@@ -36,6 +36,7 @@ load_dotenv()
 USE_LANGGRAPH = os.getenv("USE_LANGGRAPH", "true").lower() == "true"
 
 if USE_LANGGRAPH:
+    from agents.industry_comparator import initialize_peer_database
     from core.workflow_phase2 import build_phase2_graph
     from core.professional_report_generator import ProfessionalReportGenerator
 
@@ -50,6 +51,8 @@ class ESGGreenwashingDetectorLangGraph:
         print("🌱 ESG GREENWASHING DETECTION SYSTEM v3.0 (LangGraph)")
         print("Agentic AI | Dynamic Routing | Multi-Agent Debate | Professional Reports")
         print("="*80)
+
+        initialize_peer_database()
         
         if not USE_LANGGRAPH:
             print("⚠️  LangGraph disabled. Use main.py instead.")

@@ -156,6 +156,50 @@ class ReportParserService:
         "diversity", "inclusion", "human rights", "labor", "workforce",
         "ethics", "compliance", "accountability", "stakeholder"
     ]
+
+    # Mandatory passthrough terms: any chunk containing one of these must survive ESG filtering.
+    CARBON_MANDATORY_KEYWORDS = [
+        "scope 1", "scope 2", "scope 3", "scope1", "scope2", "scope3",
+        "scope one", "scope two", "scope three",
+        "tco2e", "tco2", "co2e", "mtco2e", "ktco2e",
+        "metric ton", "metric tonne", "tonnes co2",
+        "million tonnes", "billion tonnes",
+        "ghg emissions", "greenhouse gas", "carbon emissions",
+        "direct emissions", "indirect emissions", "financed emissions",
+        "value chain emissions", "operational emissions",
+        "facilitated emissions", "portfolio emissions",
+        "carbon compass", "pcaf", "absolute financed",
+        "scope 1 and 2", "scope 1, 2", "total ghg",
+        "emission intensity", "carbon intensity",
+        "2023 emissions", "2024 emissions", "2022 emissions",
+        "reported emissions",
+        "greenhouse gas emissions",
+        "ghg performance",
+        "total ghg",
+        "absolute ghg",
+        "carbon footprint",
+        "scope 1 and 2",
+        "scope 1 & 2",
+        "operational ghg",
+        "manufacturing ghg",
+        "value chain ghg",
+        "brand footprint",
+        "cradle to grave",
+        "lifecycle emissions",
+        "science-based target",
+        "net zero by 2039",
+        "climate transition",
+        "carbon reduction",
+        "emission reduction",
+        "paris agreement",
+        "climate targets",
+        "absolute reduction",
+        "versus 2015",
+        "2015 baseline",
+        "carbon intensity",
+        "co2e",
+        "ktco2e",
+    ]
     
     # Keywords for sections to skip (reduce noise)
     IRRELEVANT_SECTIONS = [
@@ -742,11 +786,20 @@ class ReportParserService:
             "sustainability targets"
         ]
 
+        def should_preserve_chunk(chunk_text: str) -> bool:
+            text_lower = (chunk_text or "").lower()
+            return any(kw in text_lower for kw in self.CARBON_MANDATORY_KEYWORDS)
+
         for section in sections:
             if not section.strip():
                 continue
             
             section_lower = section.lower()
+
+            # Mandatory passthrough for emissions/GHG content.
+            if should_preserve_chunk(section_lower):
+                relevant_sections.append(section)
+                continue
             
             # Check if section contains irrelevant keywords (skip it)
             skip_section = any(irr in section_lower for irr in irrelevant_lower)

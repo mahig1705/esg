@@ -17,6 +17,79 @@ from core.llm_client import llm_client
 from config.agent_prompts import CARBON_EXTRACTION_PROMPT
 
 
+UNIT_MULTIPLIERS = {
+    "billion tonnes": 1_000_000_000,
+    "billion tons": 1_000_000_000,
+    "billion tco2e": 1_000_000_000,
+    "bn tco2e": 1_000_000_000,
+    "gt co2e": 1_000_000_000,
+    "million tonnes": 1_000_000,
+    "million tons": 1_000_000,
+    "million metric tons": 1_000_000,
+    "million tco2e": 1_000_000,
+    "mtco2e": 1_000_000,
+    "mt co2e": 1_000_000,
+    "mmt": 1_000_000,
+    "thousand tonnes": 1_000,
+    "thousand metric tons": 1_000,
+    "ktco2e": 1_000,
+    "kt co2e": 1_000,
+    "000 tonnes": 1_000,
+    "000 tco2e": 1_000,
+    "tonnes co2e": 1,
+    "tco2e": 1,
+    "t co2e": 1,
+    "metric tons co2e": 1,
+}
+
+SCOPE3_INDUSTRY_MINIMUMS = {
+    "banking": 1_000_000,
+    "financial services": 1_000_000,
+    "energy": 100_000_000,
+    "oil and gas": 100_000_000,
+    "consumer goods": 10_000_000,
+    "fmcg": 10_000_000,
+    "retail": 10_000_000,
+    "automotive": 50_000_000,
+    "technology": 1_000_000,
+    "healthcare": 1_000_000,
+    "manufacturing": 10_000_000,
+    "utilities": 50_000_000,
+    "general": 100_000,
+}
+
+SCOPE1_INDUSTRY_MINIMUMS = {
+    "banking": 10_000,
+    "financial services": 10_000,
+    "energy": 1_000_000,
+    "oil and gas": 1_000_000,
+    "consumer goods": 100_000,
+    "fmcg": 100_000,
+    "technology": 10_000,
+    "general": 1_000,
+}
+
+SCOPE1_ALIASES = [
+    "operations emissions",
+    "operational emissions",
+    "direct operations",
+    "factory emissions",
+    "manufacturing emissions",
+]
+
+SCOPE3_ALIASES = [
+    "value chain",
+    "brand footprint",
+    "consumer use",
+    "raw materials",
+    "ingredients",
+    "packaging emissions",
+    "end of life",
+    "upstream emissions",
+    "downstream emissions",
+]
+
+
 class CarbonExtractor:
     """
     Scope 1-3 Carbon Emissions Extractor
@@ -26,6 +99,23 @@ class CarbonExtractor:
     def __init__(self):
         self.name = "Carbon Emissions Extraction Specialist"
         self.llm = llm_client
+        
+        # Industry-level emissions baselines (order-of-magnitude only) used when disclosures are missing.
+        # Purpose: prevent downstream "score collapse" due to missing data while clearly flagging low confidence.
+        # Units: tCO2e (annual, indicative typical large-cap ranges).
+        self.industry_emissions_baselines = {
+            "oil_and_gas": {"scope1": 25_000_000, "scope2": 3_000_000, "scope3": 250_000_000},
+            "coal": {"scope1": 60_000_000, "scope2": 5_000_000, "scope3": 300_000_000},
+            "mining": {"scope1": 10_000_000, "scope2": 2_000_000, "scope3": 30_000_000},
+            "aviation": {"scope1": 8_000_000, "scope2": 200_000, "scope3": 0},
+            "chemicals": {"scope1": 5_000_000, "scope2": 1_000_000, "scope3": 15_000_000},
+            "cement": {"scope1": 20_000_000, "scope2": 2_000_000, "scope3": 6_000_000},
+            "steel": {"scope1": 30_000_000, "scope2": 6_000_000, "scope3": 12_000_000},
+            "banking": {"scope1": 12_000, "scope2": 180_000, "scope3": 35_000_000},  # financed emissions dominated
+            "consumer_goods": {"scope1": 60_000, "scope2": 120_000, "scope3": 10_000_000},
+            "technology": {"scope1": 25_000, "scope2": 250_000, "scope3": 2_500_000},
+            "unknown": {"scope1": 100_000, "scope2": 300_000, "scope3": 5_000_000},
+        }
         
         # Known company emissions database (from CDP, BRSR, sustainability reports)
         # Data sources: CDP 2024, Company BRSR filings, Annual Sustainability Reports
@@ -332,6 +422,39 @@ class CarbonExtractor:
             report_chunks=report_chunks or [],
             report_claims_by_year=report_claims_by_year or {}
         )
+
+        industry_hint = self._estimate_industry_for_baseline(company, extraction_text)
+        chunk_texts = []
+        for chunk in report_chunks or []:
+            if isinstance(chunk, dict) and chunk.get("text"):
+                chunk_texts.append(str(chunk.get("text")))
+        for ev in evidence or []:
+            if isinstance(ev, dict):
+                snippet = ev.get("snippet") or ev.get("relevant_text") or ev.get("content")
+                if snippet:
+                    chunk_texts.append(str(snippet))
+
+        deterministic_scope1 = self._extract_scope_emissions_from_chunks(chunk_texts, 1, industry_hint)
+        deterministic_scope2 = self._extract_scope_emissions_from_chunks(chunk_texts, 2, industry_hint)
+        deterministic_scope3 = self._extract_scope_emissions_from_chunks(chunk_texts, 3, industry_hint)
+        deterministic_scope12 = self._extract_scope12_combined(chunk_texts, industry_hint)
+
+        if deterministic_scope1.get("value") is None and deterministic_scope12.get("scope1") is not None:
+            deterministic_scope1 = {
+                "value": deterministic_scope12.get("scope1"),
+                "year": deterministic_scope12.get("year"),
+                "source": deterministic_scope12.get("source"),
+                "confidence": deterministic_scope12.get("confidence", "medium"),
+                "candidates_found": deterministic_scope12.get("candidates_found", 0),
+            }
+        if deterministic_scope2.get("value") is None and deterministic_scope12.get("scope2") is not None:
+            deterministic_scope2 = {
+                "value": deterministic_scope12.get("scope2"),
+                "year": deterministic_scope12.get("year"),
+                "source": deterministic_scope12.get("source"),
+                "confidence": deterministic_scope12.get("confidence", "medium"),
+                "candidates_found": deterministic_scope12.get("candidates_found", 0),
+            }
         
         # Step 0: Check known emissions database first
         known_data = self._get_known_emissions(company)
@@ -343,6 +466,32 @@ class CarbonExtractor:
         extracted_data = self._llm_extract_carbon(company, extraction_text, claim)
         if not extracted_data:
             extracted_data = self._regex_extract_carbon(extraction_text)
+
+        # Deterministic scope extraction has priority when available.
+        if deterministic_scope1.get("value") is not None:
+            extracted_data["scope1"] = {
+                "value": deterministic_scope1.get("value"),
+                "unit": "tCO2e",
+                "year": deterministic_scope1.get("year"),
+                "source": deterministic_scope1.get("source") or "PDF extraction",
+                "confidence": deterministic_scope1.get("confidence", "medium"),
+            }
+        if deterministic_scope2.get("value") is not None:
+            extracted_data["scope2"] = {
+                "value": deterministic_scope2.get("value"),
+                "unit": "tCO2e",
+                "year": deterministic_scope2.get("year"),
+                "source": deterministic_scope2.get("source") or "PDF extraction",
+                "confidence": deterministic_scope2.get("confidence", "medium"),
+            }
+        if deterministic_scope3.get("value") is not None:
+            extracted_data["scope3"] = {
+                "total": deterministic_scope3.get("value"),
+                "unit": "tCO2e",
+                "year": deterministic_scope3.get("year"),
+                "source": deterministic_scope3.get("source") or "PDF extraction",
+                "confidence": deterministic_scope3.get("confidence", "medium"),
+            }
         
         # Helper to check if scope has actual data
         def has_emission_value(scope_data):
@@ -374,9 +523,49 @@ class CarbonExtractor:
                 print("📊 Using CDP public-data fallback...")
                 extracted_data.update(cdp_fallback)
         
+        # Step 1.9: Confidence-aware fallback when emissions are missing
+        # If we still have no usable scope values, estimate an industry baseline rather than returning an empty/zero set.
+        llm_has_data = has_emission_value(extracted_data.get("scope1")) or has_emission_value(extracted_data.get("scope2")) or has_emission_value(extracted_data.get("scope3"))
+        used_baseline_estimate = False
+        baseline_industry = "unknown"
+        if not llm_has_data:
+            baseline_industry = self._estimate_industry_for_baseline(company, extraction_text)
+            baseline = self.industry_emissions_baselines.get(baseline_industry, self.industry_emissions_baselines["unknown"])
+            extracted_data = {
+                "scope1": {"value": baseline["scope1"], "unit": "tCO2e", "year": None, "source": f"Industry baseline estimate ({baseline_industry})"},
+                "scope2": {"value": baseline["scope2"], "unit": "tCO2e", "year": None, "source": f"Industry baseline estimate ({baseline_industry})"},
+                "scope3": {"total": baseline["scope3"], "unit": "tCO2e", "year": None, "source": f"Industry baseline estimate ({baseline_industry})"},
+                "data_source": "Estimated industry baseline (no disclosed scope data in sources)"
+            }
+            used_baseline_estimate = True
+        
         # Step 2: Validate and normalize units
         print("🔍 Validating emission figures...")
         validated_data = self._validate_emissions(extracted_data, company)
+
+        # Magnitude validation to reject parser artifacts (return None, never zero).
+        industry_state = self._normalize_industry_for_threshold(industry_hint)
+        scope1_value = self._validate_emission_magnitude(
+            (validated_data.get("scope1") or {}).get("value"), 1, industry_state, company
+        )
+        scope2_value = self._validate_emission_magnitude(
+            (validated_data.get("scope2") or {}).get("value"), 2, industry_state, company
+        )
+        scope3_value = self._validate_emission_magnitude(
+            (validated_data.get("scope3") or {}).get("total") or (validated_data.get("scope3") or {}).get("value"),
+            3,
+            industry_state,
+            company,
+        )
+        if "scope1" not in validated_data:
+            validated_data["scope1"] = {}
+        if "scope2" not in validated_data:
+            validated_data["scope2"] = {}
+        if "scope3" not in validated_data:
+            validated_data["scope3"] = {}
+        validated_data["scope1"]["value"] = scope1_value
+        validated_data["scope2"]["value"] = scope2_value
+        validated_data["scope3"]["total"] = scope3_value
         
         # Step 3: Calculate carbon intensity metrics
         print("📈 Calculating carbon intensity...")
@@ -404,10 +593,21 @@ class CarbonExtractor:
                 "verification_status": known_data.get("verification"),
                 "data_source": "BRSR Filing / CDP Disclosure"
             }
+
+        claim_text = ""
+        if isinstance(claim, dict):
+            claim_text = claim.get("claim_text", "")
+        elif isinstance(claim, str):
+            claim_text = claim
+
+        inferred_net_zero = self.extract_net_zero_year_from_claim(claim_text)
         
         result = {
             "company": company,
-            "extraction_successful": bool(validated_data.get("scope1") or validated_data.get("scope2")),
+            # Baseline estimates are useful for stability but are not treated as a successful extraction.
+            "extraction_successful": bool(validated_data.get("scope1") or validated_data.get("scope2")) and not used_baseline_estimate,
+            "used_baseline_estimate": used_baseline_estimate,
+            "baseline_industry": baseline_industry if used_baseline_estimate else None,
             "emissions": {
                 "scope1": validated_data.get("scope1", {}),
                 "scope2": validated_data.get("scope2", {}),
@@ -425,6 +625,13 @@ class CarbonExtractor:
             "source_coverage": source_meta,
             **additional_info  # Include net zero target, renewable %, etc.
         }
+
+        result["net_zero_target"] = (
+            result.get("net_zero_target")
+            or extracted_data.get("net_zero_target")
+            or inferred_net_zero
+            or "Not declared in available evidence"
+        )
         
         print(f"\n✅ Carbon extraction complete:")
         print(f"   Scope 1: {result['emissions']['scope1'].get('value', 'N/A')} tCO2e")
@@ -436,6 +643,266 @@ class CarbonExtractor:
             print(f"   Data Source: {additional_info.get('data_source', 'Unknown')}")
         
         return result
+
+    def extract_net_zero_year_from_claim(self, claim: str) -> Optional[str]:
+        """Extract net-zero target year directly from the analyzed claim text."""
+        if not claim:
+            return None
+        claim_lower = claim.lower()
+        if "net-zero" in claim_lower or "net zero" in claim_lower:
+            year_match = re.search(r"20[3-9][0-9]", claim)
+            if year_match:
+                return f"Net zero by {year_match.group(0)} (from claim)"
+        return None
+
+    def _extract_emission_value_with_unit(self, text: str) -> Tuple[Optional[float], Optional[str]]:
+        """Extract emission values and normalize to tCO2e using unit multipliers."""
+        text_lower = (text or "").lower()
+        number_pattern = r"([\d,]+\.?\d*|\d*\.\d+)"
+
+        for unit_str, multiplier in sorted(UNIT_MULTIPLIERS.items(), key=lambda x: x[1], reverse=True):
+            pattern = number_pattern + r"\s*" + re.escape(unit_str)
+            match = re.search(pattern, text_lower)
+            if match:
+                raw_num_str = match.group(1).replace(",", "")
+                try:
+                    raw_num = float(raw_num_str)
+                    return raw_num * multiplier, match.group(0)
+                except ValueError:
+                    continue
+
+        # Base fallback where only tCO2e-like token appears.
+        match = re.search(number_pattern + r"\s*(tco2e|co2e)", text_lower)
+        if match:
+            try:
+                return float(match.group(1).replace(",", "")), match.group(0)
+            except ValueError:
+                return None, None
+
+        return None, None
+
+    def _extract_scope_emissions_from_chunks(self, chunks: List[str], scope_number: int, industry_hint: str) -> Dict[str, Any]:
+        """Extract Scope 1/2/3 emissions from chunk corpus with unit-aware parsing."""
+        number_pattern = r"([\d,]+\.?\d*|\d*\.\d+)"
+        scope_patterns = {
+            1: [
+                rf"scope\s*1\s*(?:direct\s*)?(?:emissions?\s*)?[:\-]?\s*{number_pattern}",
+                rf"direct\s*(?:ghg\s*)?emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"scope\s*1\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"combustion\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"operated\s*assets?\s*[:\-]?\s*{number_pattern}",
+                rf"equity\s*share\s*[:\-]?\s*{number_pattern}",
+                rf"operated\s*basis\s*[:\-]?\s*{number_pattern}",
+                rf"own\s*operations\s*[:\-]?\s*{number_pattern}",
+                rf"operations\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"operational\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"direct\s*operations\s*[:\-]?\s*{number_pattern}",
+                rf"factory\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"manufacturing\s*emissions?\s*[:\-]?\s*{number_pattern}",
+            ],
+            2: [
+                rf"scope\s*2\s*(?:indirect\s*)?(?:energy\s*)?(?:emissions?\s*)?[:\-]?\s*{number_pattern}",
+                rf"(?:market.based|location.based)\s*[:\-]?\s*{number_pattern}",
+                rf"scope\s*2\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"purchased\s*electricity\s*[:\-]?\s*{number_pattern}",
+                rf"energy\s*indirect\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"market\s*based\s*[:\-]?\s*{number_pattern}",
+                rf"location\s*based\s*[:\-]?\s*{number_pattern}",
+                rf"electricity\s*consumption\s*[:\-]?\s*{number_pattern}",
+            ],
+            3: [
+                rf"(?:total\s*)?financed\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"facilitated\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"portfolio\s*(?:ghg\s*)?emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"absolute\s*financed\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"scope\s*3\s*(?:value\s*chain\s*)?(?:emissions?\s*)?[:\-]?\s*{number_pattern}",
+                rf"value\s*chain\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"brand\s*footprint\s*[:\-]?\s*{number_pattern}",
+                rf"consumer\s*use\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"raw\s*materials?\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"ingredients\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"packaging\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"end\s*of\s*life\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"upstream\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"downstream\s*emissions?\s*[:\-]?\s*{number_pattern}",
+                rf"(?:total\s*)?indirect\s*(?:ghg\s*)?emissions?\s*[:\-]?\s*{number_pattern}",
+            ],
+        }
+
+        candidates: List[Dict[str, Any]] = []
+        for chunk in chunks or []:
+            chunk_lower = (chunk or "").lower()
+            for pattern in scope_patterns.get(scope_number, []):
+                for match in re.finditer(pattern, chunk_lower):
+                    start = max(0, match.start() - 80)
+                    end = min(len(chunk_lower), match.end() + 140)
+                    context = chunk_lower[start:end]
+                    value, source_text = self._extract_emission_value_with_unit(context)
+                    if value is None:
+                        continue
+
+                    year_match = re.search(r"20(1[5-9]|2[0-9])", context)
+                    year = int(year_match.group(0)) if year_match else None
+                    candidates.append(
+                        {
+                            "value": value,
+                            "year": year,
+                            "source_text": source_text,
+                            "context": context[:220],
+                            "confidence": "high" if year else "medium",
+                        }
+                    )
+
+        if not candidates:
+            return {"value": None, "year": None, "source": None, "confidence": "none", "candidates_found": 0}
+
+        with_year = [c for c in candidates if c.get("year")]
+        pool = with_year if with_year else candidates
+        best = max(pool, key=lambda c: (c.get("year") or 0, c.get("value") or 0))
+
+        valid_value = self._validate_emission_magnitude(best.get("value"), scope_number, self._normalize_industry_for_threshold(industry_hint), "company")
+        if valid_value is None:
+            return {"value": None, "year": best.get("year"), "source": None, "confidence": "none", "candidates_found": len(candidates)}
+
+        return {
+            "value": valid_value,
+            "year": best.get("year"),
+            "source": f"PDF extraction - {(best.get('source_text') or '')[:50]}",
+            "confidence": best.get("confidence", "medium"),
+            "candidates_found": len(candidates),
+        }
+
+    def _extract_scope12_combined(self, chunks: List[str], industry_hint: str) -> Dict[str, Any]:
+        """Extract combined Scope 1+2 figure and split into Scope 1/2 fallback values."""
+        patterns = [
+            r"scope\s*1\s*(?:and|&|\+)\s*2\s*[:\-]?\s*([\d,\.]+)\s*(million|billion|mt|kt)?",
+            r"scope\s*1\s*(?:and|&|\+)\s*2\s*emissions?\s*[:\-]?\s*([\d,\.]+)\s*(million|billion|mt|kt)?",
+            r"combined\s*scope\s*1\s*(?:and|&)\s*2\s*[:\-]?\s*([\d,\.]+)\s*(million|billion|mt|kt)?",
+        ]
+
+        candidates: List[Dict[str, Any]] = []
+        for chunk in chunks or []:
+            chunk_lower = (chunk or "").lower()
+            for pattern in patterns:
+                for match in re.finditer(pattern, chunk_lower):
+                    start = max(0, match.start() - 60)
+                    end = min(len(chunk_lower), match.end() + 120)
+                    context = chunk_lower[start:end]
+                    value, source_text = self._extract_emission_value_with_unit(context)
+                    if value is None:
+                        try:
+                            raw = float(match.group(1).replace(",", ""))
+                        except Exception:
+                            continue
+                        unit = (match.group(2) or "").lower()
+                        if unit == "billion":
+                            value = raw * 1_000_000_000
+                        elif unit in {"million", "mt"}:
+                            value = raw * 1_000_000
+                        elif unit == "kt":
+                            value = raw * 1_000
+                        else:
+                            value = raw
+
+                    year_match = re.search(r"20(1[5-9]|2[0-9])", context)
+                    year = int(year_match.group(0)) if year_match else None
+                    candidates.append({
+                        "value": value,
+                        "year": year,
+                        "source": source_text or match.group(0),
+                    })
+
+        if not candidates:
+            return {"scope1": None, "scope2": None, "year": None, "source": None, "confidence": "none", "candidates_found": 0}
+
+        best = max(candidates, key=lambda c: ((c.get("year") or 0), (c.get("value") or 0)))
+        total_scope12 = best.get("value")
+        if not isinstance(total_scope12, (int, float)):
+            return {"scope1": None, "scope2": None, "year": None, "source": None, "confidence": "none", "candidates_found": len(candidates)}
+
+        industry_key = self._normalize_industry_for_threshold(industry_hint)
+        scope1_ratio = 0.85 if industry_key in {"oil and gas", "energy"} else 0.70
+        scope2_ratio = 1.0 - scope1_ratio
+
+        return {
+            "scope1": round(float(total_scope12) * scope1_ratio, 2),
+            "scope2": round(float(total_scope12) * scope2_ratio, 2),
+            "year": best.get("year"),
+            "source": f"PDF extraction - combined scope1+2 ({str(best.get('source') or '')[:40]})",
+            "confidence": "medium",
+            "candidates_found": len(candidates),
+        }
+
+    def _normalize_industry_for_threshold(self, industry: str) -> str:
+        industry_key = str(industry or "general").lower().strip().replace("_", " ")
+        aliases = {
+            "oil_and_gas": "oil and gas",
+            "financial services": "financial services",
+            "bank": "banking",
+            "banks": "banking",
+            "consumer_goods": "consumer goods",
+        }
+        return aliases.get(industry_key, industry_key)
+
+    def _validate_emission_magnitude(self, value: Optional[float], scope: int, industry: str, company: str) -> Optional[float]:
+        """Reject implausibly small emissions for the industry; return None when rejected."""
+        if value is None:
+            return None
+
+        industry_key = str(industry or "general").lower().strip()
+        key_variants = [
+            industry_key,
+            industry_key.replace(" & ", "_and_"),
+            industry_key.replace(" ", "_"),
+            industry_key.replace("oil & gas", "energy"),
+        ]
+
+        minimum = None
+        for key in key_variants:
+            if scope == 3:
+                minimum = SCOPE3_INDUSTRY_MINIMUMS.get(key)
+            else:
+                minimum = SCOPE1_INDUSTRY_MINIMUMS.get(key)
+            if minimum is not None:
+                break
+        if minimum is None:
+            minimum = 1_000
+
+        if float(value) < minimum:
+            print(
+                f"[CarbonValidator] REJECTED Scope {scope}={value} "
+                f"for {company} ({industry}) - below {minimum:,}"
+            )
+            return None
+        return float(value)
+
+    def _estimate_industry_for_baseline(self, company: str, text: str) -> str:
+        """
+        Best-effort industry estimation purely for baseline emissions fallback.
+        Kept intentionally simple and deterministic (no external calls).
+        """
+        hay = f"{company} {text}".lower()
+        if any(k in hay for k in ["oil", "gas", "petroleum", "refinery", "upstream", "downstream", "lng"]):
+            return "oil_and_gas"
+        if any(k in hay for k in ["coal", "thermal power", "mining coal"]):
+            return "coal"
+        if any(k in hay for k in ["mining", "ore", "tailings", "extraction site"]):
+            return "mining"
+        if any(k in hay for k in ["airline", "aviation", "jet fuel", "fleet emissions"]):
+            return "aviation"
+        if any(k in hay for k in ["cement", "clinker"]):
+            return "cement"
+        if any(k in hay for k in ["steel", "blast furnace"]):
+            return "steel"
+        if any(k in hay for k in ["chemical", "petrochemical", "polymer", "fertiliser", "fertilizer"]):
+            return "chemicals"
+        if any(k in hay for k in ["bank", "banking", "financial services", "lending", "financed emissions"]):
+            return "banking"
+        if any(k in hay for k in ["fmcg", "consumer goods", "home care", "personal care", "packaging"]):
+            return "consumer_goods"
+        if any(k in hay for k in ["software", "cloud", "data center", "datacenter", "saas"]):
+            return "technology"
+        return "unknown"
 
     def _fetch_cdp_carbon_data(self, company_name: str) -> Dict[str, Any]:
         """Best-effort CDP public web fallback for scope values."""
@@ -875,7 +1342,8 @@ Extract ALL carbon emission data. Return ONLY valid JSON."""
         has_scope2 = bool(data.get("scope2", {}).get("value"))
         has_scope3 = bool(data.get("scope3", {}).get("value") or data.get("scope3", {}).get("total"))
         
-        # If NO emissions data exists, return zero quality
+        # If NO disclosed emissions data exists, keep score non-zero to avoid downstream collapse.
+        # This reflects "estimated baseline available" rather than "no signal at all".
         if not (has_scope1 or has_scope2 or has_scope3):
             return {
                 "factors": {
@@ -884,12 +1352,13 @@ Extract ALL carbon emission data. Return ONLY valid JSON."""
                     "scope3_present": 0,
                     "year_specified": 0,
                     "methodology_stated": 0,
-                    "third_party_verified": 0
+                    "third_party_verified": 0,
+                    "baseline_estimated": 25
                 },
-                "overall_score": 0,
+                "overall_score": 25,
                 "data_confidence": "Low",
-                "status": "insufficient_data",
-                "message": "Emissions data not available in retrieved sources."
+                "status": "estimated_baseline",
+                "message": "No disclosed Scope 1/2/3 values found; using industry baseline estimate with low confidence."
             }
         
         quality_factors = {

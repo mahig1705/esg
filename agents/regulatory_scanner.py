@@ -555,8 +555,28 @@ class RegulatoryHorizonScanner:
             compliance_percentage = (len(requirements_met) / total_rules) * 100
 
         gap_details = [r.get("requirement") for r in requirements_unverified if r.get("requirement")]
+
+        net_zero_required_frameworks = [
+            "science based targets initiative",
+            "fca anti-greenwashing",
+            "corporate sustainability reporting directive",
+        ]
+        net_zero_claim = any(
+            kw in claim_text for kw in ["net zero", "net-zero", "carbon neutral", "carbon negative", "climate positive"]
+        )
+        framework_name = str(reg.get("name") or "").strip().lower()
+        evidence_confirms_compliance = len(requirements_met) > 0 and len(requirements_unverified) == 0
+
+        is_required_framework = any(req in framework_name for req in net_zero_required_frameworks)
+        critical_gap = False
+        if net_zero_claim and is_required_framework and not evidence_confirms_compliance:
+            gap_message = f"Cannot confirm {reg.get('name')} compliance from available evidence"
+            if gap_message not in gap_details:
+                gap_details.append(gap_message)
+            critical_gap = True
+
         has_gap = len(gap_details) > 0
-        status = "GAP FOUND" if has_gap else "COMPLIANT"
+        status = "GAP" if has_gap else "COMPLIANT"
         
         return {
             "regulation_id": reg_id,
@@ -567,6 +587,7 @@ class RegulatoryHorizonScanner:
             "gap_details": gap_details,
             "compliance_status": compliance_status,
             "compliance_percentage": round(compliance_percentage, 1),
+            "critical_gap": critical_gap,
             "requirements_met": requirements_met,
             "requirements_unverified": requirements_unverified,
             "violations": violations,
@@ -647,14 +668,28 @@ Analyze regulatory compliance risks. Return JSON."""
             }
 
         total = len(compliance_results)
-        gaps = sum(
-            1 for result in compliance_results
-            if len(result.get("gap_details", [])) > 0
-        )
-        compliant = total - gaps
+        gaps = 0
+        compliant = 0
+        high_risk_gaps = 0
+        medium_risk_gaps = 0
+        critical_gaps = 0
+
+        for result in compliance_results:
+            gap_count = len(result.get("gap_details", []) or [])
+            if gap_count > 0:
+                gaps += 1
+                status = str(result.get("compliance_status", "")).lower()
+                if "non-compliant" in status:
+                    high_risk_gaps += 1
+                else:
+                    medium_risk_gaps += 1
+                if bool(result.get("critical_gap")):
+                    critical_gaps += 1
+            else:
+                compliant += 1
 
         base_score = int((compliant / total) * 100)
-        penalty = min(gaps * 12, 60)
+        penalty = (high_risk_gaps * 15) + (medium_risk_gaps * 8) + (critical_gaps * 30)
         score = max(0, base_score - penalty)
 
         if score >= 70:
@@ -676,6 +711,9 @@ Analyze regulatory compliance risks. Return JSON."""
             "gaps": gaps,
             "total_regulations": total,
             "compliant_regulations": compliant,
+            "high_risk_gaps": high_risk_gaps,
+            "medium_risk_gaps": medium_risk_gaps,
+            "critical_gaps": critical_gaps,
         }
 
     def _generate_compliance_recommendations(self, compliance_results: List[Dict]) -> List[str]:
@@ -781,8 +819,27 @@ def compute_compliance_score(regulation_results: list) -> dict:
         })
 
     compliant_count = total - gaps
+    high_risk_gaps = 0
+    medium_risk_gaps = 0
+    critical_gaps = 0
+    for r in regulation_results:
+        gap_details = r.get("gap_details") if isinstance(r, dict) else []
+        if gap_details is None:
+            gap_details = r.get("gaps_found", []) if isinstance(r, dict) else []
+        if not isinstance(gap_details, list):
+            gap_details = [str(gap_details)] if gap_details else []
+        if not gap_details:
+            continue
+        compliance_status = str((r or {}).get("compliance_status", "")).lower()
+        if "non-compliant" in compliance_status:
+            high_risk_gaps += 1
+        else:
+            medium_risk_gaps += 1
+        if bool((r or {}).get("critical_gap")):
+            critical_gaps += 1
+
     base = int((compliant_count / total) * 100)
-    penalty = min(gaps * 12, 60)
+    penalty = (high_risk_gaps * 15) + (medium_risk_gaps * 8) + (critical_gaps * 30)
     score = max(0, base - penalty)
 
     if score >= 70:
@@ -805,6 +862,9 @@ def compute_compliance_score(regulation_results: list) -> dict:
         "gaps": gaps,
         "total_regulations": total,
         "compliant_regulations": compliant_count,
+        "high_risk_gaps": high_risk_gaps,
+        "medium_risk_gaps": medium_risk_gaps,
+        "critical_gaps": critical_gaps,
     }
 
 # Alias for backward compatibility with tests and other modules

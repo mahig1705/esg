@@ -4,8 +4,10 @@ With intelligent relevance filtering to prevent cross-contamination
 """
 
 import requests
+import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from urllib.parse import urlparse
 from core.llm_client import llm_client
 from core.vector_store import vector_store
 from utils.enterprise_data_sources import enterprise_fetcher
@@ -13,6 +15,59 @@ from utils.web_search import classify_source
 from config.agent_prompts import EVIDENCE_RETRIEVAL_PROMPT
 from core.evidence_cache import evidence_cache
 import time
+
+
+DOMAIN_BLOCKLIST = {
+    "9to5mac.com",
+    "9to5google.com",
+    "macrumors.com",
+    "playstation.com",
+    "xbox.com",
+    "ign.com",
+    "gamespot.com",
+    "dezeen.com",
+    "architecturaldigest.com",
+    "buzzfeed.com",
+    "reddit.com",
+    "ghanabusinessnews.com",
+    "ghanamma.com",
+    "thenationonlineng",
+    "thenationonlineng.com",
+    "punchng.com",
+    "punchng",
+    "thepunch.com.ng",
+    "dailypost.ng",
+    "dailypost",
+}
+
+
+def clean_snippet_text(text: str) -> str:
+    if not text:
+        return text
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', str(text))
+    text = re.sub(r'(?<=[,.;:])(?=[A-Za-z])', ' ', text)
+    text = re.sub(r'(net)\s*-?\s*(zero)', r'\1-\2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(zero)\s*(by)', r'\1 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(climate)\s*(change)', r'\1 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(commitment)\s*(to)', r'\1 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(due)\s*(to)', r'\1 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(due)\s*(to)\s*(rising)', r'\1 \2 \3', text, flags=re.IGNORECASE)
+    text = re.sub(r'(rising)\s*(emissions)', r'\1 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(across)\s*(its)', r'\1 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _is_generic_source_name(name: str) -> bool:
+    token = str(name or "").strip().lower()
+    return token in {
+        "",
+        "unknown",
+        "web source",
+        "general web",
+        "general web / other",
+        "source",
+    }
 
 
 class EvidenceRetriever:
@@ -76,6 +131,37 @@ class EvidenceRetriever:
         cached_result = evidence_cache.get_evidence(company, cache_key)
         
         if cached_result:
+            cached_evidence = cached_result.get("evidence", []) if isinstance(cached_result, dict) else []
+            if isinstance(cached_evidence, list):
+                filtered_cached = []
+                for item in cached_evidence:
+                    if self._is_blocklisted(
+                        item.get("url", ""),
+                        item.get("source", ""),
+                        item.get("source_name", ""),
+                        item.get("domain", ""),
+                        item.get("title", ""),
+                    ):
+                        continue
+                    item["relevant_text"] = clean_snippet_text(item.get("relevant_text", ""))
+                    item["snippet"] = clean_snippet_text(item.get("snippet", ""))
+                    item["title"] = clean_snippet_text(item.get("title", ""))
+                    if _is_generic_source_name(item.get("source_name", "")):
+                        item["source_name"] = (
+                            item.get("source")
+                            or item.get("domain")
+                            or (urlparse(item.get("url", "")).netloc or "").replace("www.", "")
+                            or item.get("data_source_api")
+                            or item.get("title", "").split(" - ")[0]
+                            or "Unknown"
+                        )
+                    filtered_cached.append(item)
+                if len(filtered_cached) != len(cached_evidence):
+                    cached_result["evidence"] = filtered_cached
+                    cached_result["quality_metrics"] = self._calculate_quality_metrics(
+                        filtered_cached,
+                        cached_result.get("source_breakdown", {}) if isinstance(cached_result, dict) else {},
+                    )
             print(f"✅ Using cached evidence - ZERO API calls")
             return cached_result
         
@@ -112,7 +198,7 @@ class EvidenceRetriever:
         
         # 4. FILTER BY RELEVANCE (NEW - Prevents Apple for BP contamination)
         print(f"🔍 Filtering for relevance to {company}...")
-        filtered_evidence = self._filter_relevant_evidence(all_evidence, company, claim_text)
+        filtered_evidence = self._filter_evidence_items(all_evidence, company, claim_text)
         
         filtered_count = len(all_evidence) - len(filtered_evidence)
         if filtered_count > 0:
@@ -248,12 +334,26 @@ class EvidenceRetriever:
         
         return result
     
+    def _filter_evidence_items(self, evidence: List[Dict], company: str, claim_text: str) -> List[Dict]:
+        # Step 1: Domain blocklist - apply first.
+        evidence = [
+            item for item in evidence
+            if not self._is_blocklisted(
+                item.get("url", ""),
+                item.get("source", ""),
+                item.get("source_name", ""),
+                item.get("domain", ""),
+                item.get("title", ""),
+            )
+        ]
+        # Step 2: Existing relevance logic.
+        return self._filter_relevant_evidence(evidence, company, claim_text)
+
     def _filter_relevant_evidence(self, evidence: List[Dict], company: str, claim_text: str) -> List[Dict]:
         """
         Filter evidence to ensure relevance to company and claim
         Removes cached cross-contamination (e.g., Apple results for BP query)
         """
-        
         filtered = []
         company_lower = company.lower()
         claim_keywords = set(claim_text.lower().split())
@@ -303,6 +403,18 @@ class EvidenceRetriever:
                 print(f"      ⏭️  Filtered: '{item.get('title', 'Unknown')[:60]}...' (mentions {wrong_company.title()}, not {company})")
         
         return filtered
+
+    @staticmethod
+    def _is_blocklisted(url: str, source: str = "", source_name: str = "", domain: str = "", title: str = "") -> bool:
+        domain_from_url = (urlparse(url).netloc or "").lower().replace("www.", "")
+        haystack = " ".join([
+            domain_from_url,
+            str(source or "").lower(),
+            str(source_name or "").lower(),
+            str(domain or "").lower(),
+            str(title or "").lower(),
+        ])
+        return any(blocked in haystack for blocked in DOMAIN_BLOCKLIST)
     
     def _structure_evidence(self, raw_evidence: List[Dict], claim: str) -> List[Dict]:
         """Structure and classify evidence with AI relationship determination"""
@@ -314,6 +426,9 @@ class EvidenceRetriever:
         for i, ev in enumerate(raw_evidence):
             if i % 10 == 0 and i > 0:
                 print(f"   Progress: {i}/{len(raw_evidence)}...", flush=True)
+
+            ev["snippet"] = clean_snippet_text(ev.get("snippet", ""))
+            ev["title"] = clean_snippet_text(ev.get("title", ""))
             
             # Classify source type
             source_type = classify_source(ev.get("url", ""), ev.get("source", ""))
@@ -327,10 +442,21 @@ class EvidenceRetriever:
             
             # Calculate freshness
             freshness = self._calculate_freshness(ev.get("date", ""))
+
+            source_name = ev.get("source") or ev.get("source_name") or ""
+            if _is_generic_source_name(source_name):
+                source_name = (
+                    ev.get("domain")
+                    or ev.get("provider")
+                    or (urlparse(ev.get("url", "")).netloc or "").replace("www.", "")
+                    or ev.get("data_source_api")
+                    or ev.get("title", "").split(" - ")[0]
+                    or "Unknown"
+                )
             
             structured.append({
                 "source_id": f"ev_{i:03d}",
-                "source_name": ev.get("source", "Unknown"),
+                "source_name": source_name,
                 "source_type": source_type,
                 "url": ev.get("url", ""),
                 "date": ev.get("date", datetime.now().isoformat()),
