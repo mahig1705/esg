@@ -12,6 +12,21 @@ from datetime import datetime
 from dotenv import load_dotenv
 import json
 
+
+def _configure_utf8_console() -> None:
+    """Avoid Windows cp1252 crashes when logs include non-ASCII characters."""
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        # Logging setup should never block startup.
+        pass
+
+
+_configure_utf8_console()
+
 if sys.version_info < (3, 11):
     print("WARNING: Python 3.11+ recommended. Current:", sys.version)
 

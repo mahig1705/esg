@@ -4,7 +4,7 @@ import re
 import time
 import textwrap
 import traceback as _tb
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple
 from core.safe_utils import safe_get, safe_number, parse_source_name
 
@@ -88,8 +88,13 @@ class ReportQualityChecker:
             )
 
         for pillar_key, pillar_data in pillars.items():
+            if not isinstance(pillar_data, dict):
+                quality_warnings.append(
+                    f"{pillar_key}-pillar payload was null or malformed; using fallback defaults for this dimension."
+                )
+                continue
             score = pillar_data.get("score")
-            factors = pillar_data.get("factors") or []
+            factors = [f for f in (pillar_data.get("factors") or []) if isinstance(f, dict)]
             if isinstance(score, (int, float)) and score is not None and not factors:
                 quality_warnings.append(
                     f"{pillar_key}-pillar score present but no traceable factor rows; derivation is opaque for this dimension."
@@ -347,7 +352,7 @@ class ProfessionalReportGenerator:
             warnings.append(str(exc))
             # Log structured error for debugging (not surfaced to end user)
             _err_log = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "report_id": safe_get(state, "report_id", default="unknown"),
                 "stage": "generate_executive_report",
                 "error_type": type(exc).__name__,
@@ -393,7 +398,7 @@ class ProfessionalReportGenerator:
     # ------------------------------------------------------------------
 
     def _build_structured_report(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        analysis_timestamp = datetime.utcnow()
+        analysis_timestamp = datetime.now(timezone.utc)
 
         company = str(state.get("company") or "Unknown").strip() or "Unknown"
         industry = str(state.get("industry") or "Unknown").strip() or "Unknown"
@@ -653,6 +658,79 @@ class ProfessionalReportGenerator:
         if not pillar_factors:
             pillar_factors = self._extract_pillar_factors_from_logs(state)
 
+        def _normalize_factor_rows(raw_pillar_obj: Any) -> List[Dict[str, Any]]:
+            """Normalize old/new pillar formats into report factor rows.
+
+            Supports:
+            1) Legacy list of factor dicts
+            2) Structured pillar dict with sub_indicators
+            """
+            normalized: List[Dict[str, Any]] = []
+
+            # Legacy shape: pillar_factors[pillar] is already a list of factor dicts.
+            if isinstance(raw_pillar_obj, list):
+                for row in raw_pillar_obj:
+                    if not isinstance(row, dict):
+                        continue
+                    factor_name = row.get("factor") or row.get("name") or "Unknown factor"
+                    confidence = str(row.get("confidence") or ("High" if row.get("verified") else "Unknown"))
+                    normalized.append(
+                        {
+                            "factor": factor_name,
+                            "raw_signal": row.get("raw_signal", "N/A"),
+                            "source": row.get("source") or row.get("data_source") or "Unknown",
+                            "weight": row.get("weight"),
+                            "points_contributed": row.get("points_contributed"),
+                            "confidence": confidence,
+                        }
+                    )
+                return normalized
+
+            # New shape: pillar_factors[pillar] is a dict with sub_indicators.
+            if not isinstance(raw_pillar_obj, dict):
+                return normalized
+
+            sub_indicators = raw_pillar_obj.get("sub_indicators") or []
+            if not isinstance(sub_indicators, list):
+                sub_indicators = []
+
+            for sub in sub_indicators:
+                if not isinstance(sub, dict):
+                    continue
+
+                sub_score = sub.get("score")
+                weight = sub.get("weight")
+                points_contributed = None
+                if isinstance(sub_score, (int, float)) and isinstance(weight, (int, float)):
+                    points_contributed = round(float(sub_score) * float(weight), 2)
+
+                raw_signal = sub.get("raw_value")
+                if raw_signal is None and isinstance(sub_score, (int, float)):
+                    raw_signal = f"{float(sub_score):.1f}/100"
+                if raw_signal is None:
+                    raw_signal = "N/A"
+
+                source = sub.get("data_source") or sub.get("source_url") or "Unknown"
+
+                confidence = "Low"
+                if sub.get("verified") is True:
+                    confidence = "High"
+                elif isinstance(sub_score, (int, float)):
+                    confidence = "Medium"
+
+                normalized.append(
+                    {
+                        "factor": sub.get("name") or sub.get("factor") or "Unknown factor",
+                        "raw_signal": raw_signal,
+                        "source": source,
+                        "weight": weight,
+                        "points_contributed": points_contributed,
+                        "confidence": confidence,
+                    }
+                )
+
+            return normalized
+
         def build_pillar(name: str) -> Dict[str, Any]:
             label = {
                 "E": "Environmental",
@@ -670,13 +748,12 @@ class ProfessionalReportGenerator:
 
             factors: List[Dict[str, Any]] = []
             key_map = {"E": "environmental", "S": "social", "G": "governance"}
-            state_factors = pillar_factors.get(key_map.get(name, ""), [])
-            if isinstance(state_factors, list) and state_factors:
+            raw_pillar_obj = pillar_factors.get(key_map.get(name, ""), {})
+            state_factors = _normalize_factor_rows(raw_pillar_obj)
+            if state_factors:
                 for row in state_factors:
-                    if not isinstance(row, dict):
-                        continue
-                    factor_name = row.get("factor", "Unknown factor")
-                    confidence = str(row.get("confidence", "Unknown"))
+                    factor_name = row.get("factor") or "Unknown factor"
+                    confidence = str(row.get("confidence") or "Unknown")
                     if confidence.lower() == "low":
                         factor_name = f"{factor_name} [LOW CONFIDENCE]"
                     factors.append({
@@ -1191,9 +1268,13 @@ class ProfessionalReportGenerator:
     def _render_material_issues_section(self, pillars: Dict[str, Any]) -> str:
         drivers = []
         for key, pillar in pillars.items():
+            if not isinstance(pillar, dict):
+                continue
             label = pillar.get("label", key)
             factors = pillar.get("factors") or []
             for factor in factors:
+                if not isinstance(factor, dict):
+                    continue
                 points = factor.get("points_contributed")
                 if isinstance(points, (int, float)):
                     drivers.append(
@@ -1244,9 +1325,11 @@ class ProfessionalReportGenerator:
         lines.append("")
 
         for key, p in pillars.items():
+            if not isinstance(p, dict):
+                p = {}
             label = p.get("label", key)
             score = p.get("score")
-            factors = p.get("factors") or []
+            factors = [f for f in (p.get("factors") or []) if isinstance(f, dict)]
             lines.append(f"{label.upper()} PILLAR")
             lines.append("-" * max(20, len(label) + 7))
             if isinstance(score, (int, float)):
@@ -1299,12 +1382,33 @@ class ProfessionalReportGenerator:
         if not agents:
             return "No agent outputs were available to summarize."
 
+        if not isinstance(agents, dict):
+            return "Agent findings payload was malformed and could not be rendered."
+
+        def _as_dict(value: Any) -> Dict[str, Any]:
+            return value if isinstance(value, dict) else {}
+
+        def _as_list(value: Any) -> List[Any]:
+            return value if isinstance(value, list) else []
+
         lines: List[str] = []
         for name, info in sorted(agents.items()):
+            if not isinstance(info, dict):
+                lines.append(f"Agent: {name}")
+                lines.append("-" * max(8, len(str(name)) + 7))
+                lines.append("Status: MALFORMED OUTPUT | Error: Agent payload was not a structured object")
+                lines.append(
+                    "This dimension was excluded from the integrated narrative due to malformed agent payload."
+                )
+                lines.append("")
+                continue
+
             output = info.get("output") or {}
+            if not isinstance(output, dict):
+                output = {"raw": output}
             error = info.get("error")
             conf = info.get("confidence")
-            has_findings = info.get("has_findings") and not error
+            has_findings = bool(info.get("has_findings")) and not error
 
             header = f"Agent: {name}"
             lines.append(header)
@@ -1328,8 +1432,8 @@ class ProfessionalReportGenerator:
 
             if name == "contradiction_analysis":
                 found = int(output.get("contradictions_found", 0))
-                contradictions = output.get("contradiction_list", []) or []
-                most = output.get("most_severe") or {}
+                contradictions = _as_list(output.get("contradiction_list"))
+                most = _as_dict(output.get("most_severe"))
                 if found == 0:
                     company = output.get("company") or ""
                     known_cases = analyze_contradictions("net zero", company, []).get("controversy_count", 0) if company else 0
@@ -1347,14 +1451,14 @@ class ProfessionalReportGenerator:
                 scope1 = output.get("scope1") or (output.get("emissions", {}).get("scope1", {}).get("value"))
                 scope2 = output.get("scope2") or (output.get("emissions", {}).get("scope2", {}).get("value"))
                 scope3 = output.get("scope3") or (output.get("emissions", {}).get("scope3", {}).get("total"))
-                quality = output.get("data_quality", {})
+                quality = _as_dict(output.get("data_quality"))
                 q_score = quality.get("overall_score") if isinstance(quality, dict) else quality
                 q_conf = quality.get("data_confidence", "Unknown") if isinstance(quality, dict) else "Unknown"
                 missing = output.get("missing_scopes") or [
                     s for s, v in {"Scope 1": scope1, "Scope 2": scope2, "Scope 3": scope3}.items() if v in (None, "N/A")
                 ]
                 lines.append(
-                    f"The carbon extractor analyzed {output.get('articles_analyzed', 0)} evidence items and {output.get('source_coverage', {}).get('report_chunks', 0)} report chunks. "
+                    f"The carbon extractor analyzed {output.get('articles_analyzed', 0)} evidence items and {_as_dict(output.get('source_coverage')).get('report_chunks', 0)} report chunks. "
                     f"Scope 1: {scope1 if scope1 is not None else 'NOT DISCLOSED'} tCO2e. Scope 2: {scope2 if scope2 is not None else 'NOT DISCLOSED'} tCO2e. "
                     f"Scope 3: {scope3 if scope3 is not None else 'NOT DISCLOSED'}. Data quality: {q_score if q_score is not None else 'N/A'}/100 ({q_conf} confidence). "
                     f"Missing disclosures: {missing}."
@@ -1403,10 +1507,10 @@ class ProfessionalReportGenerator:
                         f"WARNING — {unverifiable} sources could not be independently verified and were downweighted in scoring."
                     )
             elif name == "climatebert_analysis":
-                claim_a = output.get("claim_analysis", {})
-                gw = claim_a.get("greenwashing_detection", {})
-                relevance = claim_a.get("climate_relevance", {})
-                comp = output.get("comparison", {})
+                claim_a = _as_dict(output.get("claim_analysis"))
+                gw = _as_dict(claim_a.get("greenwashing_detection"))
+                relevance = _as_dict(claim_a.get("climate_relevance"))
+                comp = _as_dict(output.get("comparison"))
                 claim_score = comp.get("claim_greenwashing_score", output.get("claim_score", 0))
                 evidence_score = comp.get("evidence_greenwashing_score", output.get("evidence_score", 0))
                 lines.append(
@@ -1426,11 +1530,11 @@ class ProfessionalReportGenerator:
                     f"The industry comparator assembled a peer set using data source type '{data_source}', with {real_ct} real peer(s) and {est_ct} estimated baseline(s). Peer-level ESG and greenwashing scores were used to position the issuer within its sector where coverage allowed."
                 )
             elif name == "greenwishing_detection":
-                overall = output.get("overall_deception_risk") or {}
+                overall = _as_dict(output.get("overall_deception_risk"))
                 overall_level = overall.get("risk_level")
-                greenwishing = output.get("greenwishing", {}).get("risk_level")
-                greenhushing = output.get("greenhushing", {}).get("risk_level")
-                sel_disc = output.get("selective_disclosure", {}).get("risk_level")
+                greenwishing = _as_dict(output.get("greenwishing")).get("risk_level")
+                greenhushing = _as_dict(output.get("greenhushing")).get("risk_level")
+                sel_disc = _as_dict(output.get("selective_disclosure")).get("risk_level")
                 lines.append(
                     f"The deception-pattern detector scanned corporate language for greenwishing (over-claiming), greenhushing (under-disclosure), and selective disclosure behaviors. Overall deception risk was {overall_level}; greenwishing risk was {greenwishing}, greenhushing risk was {greenhushing}, and selective disclosure risk was {sel_disc}."
                 )
@@ -1447,24 +1551,29 @@ class ProfessionalReportGenerator:
                     gaps = 0
                 compliant = []
                 gap_list = []
-                for row in output.get("compliance_results", []) or []:
-                    has_gap = len(row.get("gap_details", [])) > 0
+                for row in _as_list(output.get("compliance_results")):
+                    if not isinstance(row, dict):
+                        continue
+                    gap_details = row.get("gap_details")
+                    if not isinstance(gap_details, list):
+                        gap_details = []
+                    has_gap = len(gap_details) > 0
                     if has_gap:
-                        gap_list.append(f"{row.get('regulation_name')}: {', '.join(row.get('gap_details', [])[:1])}")
+                        gap_list.append(f"{row.get('regulation_name')}: {', '.join(gap_details[:1])}")
                     else:
                         compliant.append(row.get("regulation_name"))
                 lines.append(
-                    f"Regulatory scanning covered {jurisdiction} across {len(output.get('applicable_regulations', []) or [])} frameworks. "
+                    f"Regulatory scanning covered {jurisdiction} across {len(_as_list(output.get('applicable_regulations')))} frameworks. "
                     f"Compliance score: {score}/100 (Risk: {risk_level}). Gaps identified: {gaps}. "
                     f"Compliant frameworks: {compliant}. Frameworks with gaps: {gap_list}."
                 )
                 if gaps:
-                    alerts = [r.get("regulation") for r in output.get("regulatory_risks", []) or []]
+                    alerts = [r.get("regulation") for r in _as_list(output.get("regulatory_risks")) if isinstance(r, dict)]
                     lines.append(f"Regulatory risk alerts: {alerts}.")
             elif name == "explainability":
-                factors = output.get("top_factors", []) or []
-                p = factors[0] if len(factors) > 0 else {}
-                s = factors[1] if len(factors) > 1 else {}
+                factors = _as_list(output.get("top_factors"))
+                p = _as_dict(factors[0]) if len(factors) > 0 else {}
+                s = _as_dict(factors[1]) if len(factors) > 1 else {}
                 lines.append(
                     f"SHAP/LIME explainability analysis identified the top risk drivers. Method: {output.get('method', 'N/A')}. "
                     f"Primary risk driver: {p.get('factor', p.get('feature', 'N/A'))} ({p.get('impact', 'N/A')} impact, {p.get('direction', 'N/A')}). "
@@ -1484,7 +1593,11 @@ class ProfessionalReportGenerator:
         industry: str,
         peers: Dict[str, Any],
     ) -> str:
+        if not isinstance(peers, dict):
+            peers = {}
         real_peers = peers.get("real_peers") or []
+        if not isinstance(real_peers, list):
+            real_peers = []
         if len(real_peers) < 2:
             return "Peer comparison unavailable due to insufficient peer data."
 
@@ -1497,6 +1610,8 @@ class ProfessionalReportGenerator:
         lines.append("-" * len(header))
 
         for p in real_peers:
+            if not isinstance(p, dict):
+                continue
             name = str(p.get("name") or p.get("company") or "Peer").strip()[:28]
             esg = p.get("esg_score")
             gw = p.get("greenwashing_risk_score")

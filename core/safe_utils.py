@@ -3,7 +3,7 @@ Safe utility functions for ESG report generation.
 Prevents NoneType crashes through defensive dict access and type coercion.
 """
 
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 
@@ -194,3 +194,107 @@ def get_reliability_tier(url: str) -> int:
 def get_reliability_score(tier: int) -> float:
     """Convert tier number to 0-1 reliability score."""
     return {1: 1.0, 2: 0.8, 3: 0.6, 4: 0.3, 0: 0.0}.get(tier, 0.3)
+
+
+# ---------------------------------------------------------------------------
+# Null-safe rendering helpers
+# ---------------------------------------------------------------------------
+
+def safe_render_indicator(indicator: dict) -> dict:
+    """Render a sub-indicator safely with placeholders for missing fields.
+
+    Rules:
+    - If score is None -> display_score="N/A", data_missing=True
+    - If raw_value is None -> display_value="Not disclosed"
+    - If source_url is None -> source_label="No source"
+    - Never raise AttributeError regardless of input shape
+    - render_quality in {"full", "partial", "empty"}
+    """
+    row: Dict[str, Any] = dict(indicator) if isinstance(indicator, dict) else {}
+
+    score = row.get("score")
+    raw_value = row.get("raw_value")
+    source_url = row.get("source_url")
+
+    # Preserve row when complete; add display/accessory fields only when needed.
+    has_score = score is not None
+    has_raw_value = raw_value is not None
+    has_source = source_url is not None and str(source_url).strip() != ""
+
+    if not has_score:
+        row["display_score"] = "N/A"
+        row["data_missing"] = True
+
+    if not has_raw_value:
+        row["display_value"] = "Not disclosed"
+
+    if not has_source:
+        row["source_label"] = "No source"
+
+    # Determine render quality from key field coverage.
+    present_count = sum([has_score, has_raw_value, has_source])
+    if present_count == 3:
+        row["render_quality"] = "full"
+    elif present_count == 0:
+        row["render_quality"] = "empty"
+    else:
+        row["render_quality"] = "partial"
+
+    return row
+
+
+def safe_render_pillar(pillar: dict) -> dict:
+    """Render a pillar safely by normalizing and scoring sub-indicators.
+
+    - Applies safe_render_indicator to each sub-indicator
+    - Computes pillar score from non-null indicator scores only
+    - Adds coverage_pct and score_reliable flag (True when coverage >= 60%)
+    """
+    p: Dict[str, Any] = dict(pillar) if isinstance(pillar, dict) else {}
+
+    raw_subs = p.get("sub_indicators")
+    if not isinstance(raw_subs, list):
+        raw_subs = []
+
+    rendered: List[Dict[str, Any]] = [safe_render_indicator(ind) for ind in raw_subs]
+    p["sub_indicators"] = rendered
+
+    # Use only scored indicators for pillar score.
+    scored_rows = [ind for ind in rendered if isinstance(ind.get("score"), (int, float))]
+    scored_count = len(scored_rows)
+    total_count = len(rendered)
+
+    pillar_score: Any = None
+    if scored_count > 0:
+        weighted_rows = [
+            ind
+            for ind in scored_rows
+            if isinstance(ind.get("weight"), (int, float)) and float(ind.get("weight")) > 0
+        ]
+
+        if weighted_rows:
+            total_weight = sum(float(ind.get("weight")) for ind in weighted_rows)
+            if total_weight > 0:
+                weighted_sum = sum(float(ind.get("score")) * float(ind.get("weight")) for ind in weighted_rows)
+                pillar_score = round(weighted_sum / total_weight, 2)
+        if pillar_score is None:
+            pillar_score = round(
+                sum(float(ind.get("score")) for ind in scored_rows) / scored_count,
+                2,
+            )
+
+    p["score"] = pillar_score if pillar_score is not None else "N/A"
+
+    coverage_ratio = (scored_count / total_count) if total_count > 0 else 0.0
+    p["coverage_pct"] = f"{scored_count}/{total_count} indicators scored ({coverage_ratio * 100:.1f}%)"
+    p["score_reliable"] = coverage_ratio >= 0.60
+
+    # Pillar-level quality summary.
+    if total_count == 0:
+        p["render_quality"] = "empty"
+    elif scored_count == total_count:
+        p["render_quality"] = "full"
+    else:
+        p["render_quality"] = "partial"
+
+    return p

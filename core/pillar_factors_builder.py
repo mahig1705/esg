@@ -132,6 +132,328 @@ _INDUSTRY_EXTRA = {
 }
 
 
+# Structured scoring rules to replace keyword-only scoring for selected indicators.
+_STRUCTURED_SCORING_RULES: Dict[str, Dict[str, Any]] = {
+    "Renewable Energy Transition": {
+        "primary_metric": "Renewable energy share (% of total energy consumption)",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 80.0,
+            "above_average": 50.0,
+            "average": 30.0,
+            "below_average": 10.0,
+        },
+        "metric_patterns": [
+            r"renewable[^.\n]{0,70}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,70}?renewable",
+            r"clean energy[^.\n]{0,70}?(\d{1,3}(?:\.\d+)?)\s*%",
+        ],
+        "claim_keywords": ["renewable", "clean energy", "solar", "wind", "transition"],
+        "policy_keywords": ["target", "policy", "roadmap", "sourcing", "ppa", "commitment"],
+        "source_hint": "Sustainability report, annual report energy table, CDP climate disclosure",
+        "gri_alignment": ["GRI 302-1", "GRI 302-4"],
+        "sasb_alignment": ["SASB IF-EU-000.B", "SASB SV-PS-130a.1"],
+    },
+    "Biodiversity & Land Use": {
+        "primary_metric": "Share of operational sites with biodiversity management plans (%)",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 90.0,
+            "above_average": 70.0,
+            "average": 50.0,
+            "below_average": 30.0,
+        },
+        "metric_patterns": [
+            r"biodiversity[^.\n]{0,90}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"ecosystem[^.\n]{0,90}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"sites?[^.\n]{0,60}?biodiversity[^.\n]{0,60}?(\d{1,3}(?:\.\d+)?)\s*%",
+        ],
+        "claim_keywords": ["biodiversity", "ecosystem", "habitat", "deforestation", "land use"],
+        "policy_keywords": ["tnfd", "no net loss", "restoration", "conservation", "plan"],
+        "source_hint": "BRSR Principle 6 disclosures, biodiversity section in sustainability report",
+        "gri_alignment": ["GRI 304-1", "GRI 304-3"],
+        "sasb_alignment": ["SASB RR-FM-160a.1", "SASB CG-HP-430a.1"],
+    },
+    "Waste & Circular Economy": {
+        "primary_metric": "Waste diversion rate (% waste diverted from landfill)",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 90.0,
+            "above_average": 75.0,
+            "average": 60.0,
+            "below_average": 40.0,
+        },
+        "metric_patterns": [
+            r"waste diversion[^.\n]{0,70}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"recycl(?:ed|ing)[^.\n]{0,70}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,70}?(?:diverted|recycled)",
+        ],
+        "claim_keywords": ["waste", "recycling", "circular economy", "landfill", "diversion"],
+        "policy_keywords": ["zero waste", "circularity", "waste policy", "hazardous waste", "take-back"],
+        "source_hint": "Annual sustainability waste KPIs, GRI waste tables, regulator filings",
+        "gri_alignment": ["GRI 306-3", "GRI 306-4", "GRI 306-5"],
+        "sasb_alignment": ["SASB CG-MR-150a.1", "SASB RT-CH-410a.1"],
+    },
+    "Employee Health & Safety": {
+        "primary_metric": "Lost Time Injury Frequency Rate (LTIFR)",
+        "metric_unit": "rate",
+        "direction": "lower_better",
+        "thresholds": {
+            "top_decile": 0.10,
+            "above_average": 0.25,
+            "average": 0.50,
+            "below_average": 1.00,
+        },
+        "metric_patterns": [
+            r"ltifr[^\d]{0,25}(\d+(?:\.\d+)?)",
+            r"lost time injury frequency rate[^\d]{0,25}(\d+(?:\.\d+)?)",
+            r"trir[^\d]{0,25}(\d+(?:\.\d+)?)",
+        ],
+        "claim_keywords": ["health", "safety", "occupational", "injury", "fatality", "ltifr"],
+        "policy_keywords": ["iso 45001", "ohs policy", "safety management", "certified", "assured"],
+        "source_hint": "Safety tables in annual/sustainability report, assured OHS metrics",
+        "gri_alignment": ["GRI 403-9", "GRI 403-10"],
+        "sasb_alignment": ["SASB RT-IG-320a.1", "SASB SV-PS-320a.1"],
+    },
+    "Diversity, Equity & Inclusion": {
+        "primary_metric": "Women in management or leadership roles (%)",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 45.0,
+            "above_average": 35.0,
+            "average": 25.0,
+            "below_average": 15.0,
+        },
+        "metric_patterns": [
+            r"women[^.\n]{0,70}?(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,40}?(?:management|leadership|board|workforce)",
+            r"(?:management|leadership|board|workforce)[^.\n]{0,70}?women[^.\n]{0,40}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"gender diversity[^.\n]{0,70}?(\d{1,3}(?:\.\d+)?)\s*%",
+        ],
+        "claim_keywords": ["diversity", "inclusion", "equity", "gender", "women", "dei"],
+        "policy_keywords": ["equal opportunity", "anti-discrimination", "inclusive hiring", "pay equity", "policy"],
+        "source_hint": "Workforce diversity section, board composition, BRSR workforce disclosures",
+        "gri_alignment": ["GRI 405-1", "GRI 406-1"],
+        "sasb_alignment": ["SASB SV-PS-330a.1", "SASB TC-SI-330a.1"],
+    },
+}
+
+
+def _extract_data_year(ev: Dict[str, Any]) -> Optional[int]:
+    """Best-effort year extraction from evidence metadata."""
+    for field in ("date", "publishedAt", "date_retrieved"):
+        date_str = str(ev.get(field, ""))
+        year_match = re.search(r"20[12]\d", date_str)
+        if year_match:
+            return int(year_match.group())
+    return None
+
+
+def _extract_best_metric_value(
+    rule: Dict[str, Any],
+    evidence_sources: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Extract the best quantitative metric value for a structured-scoring indicator."""
+    metric_patterns = rule.get("metric_patterns", [])
+    metric_unit = rule.get("metric_unit")
+    best_match: Optional[Dict[str, Any]] = None
+
+    for ev in evidence_sources:
+        if not isinstance(ev, dict):
+            continue
+
+        url = str(ev.get("url", ""))
+        tier = get_reliability_tier(url)
+        source_name = parse_source_name(url) or ev.get("source_name", "Web evidence")
+        data_year = _extract_data_year(ev)
+        ev_text = " ".join(
+            str(ev.get(k, ""))
+            for k in ("title", "snippet", "content", "relevant_text", "source", "source_name")
+        )
+
+        for pattern in metric_patterns:
+            for match in re.finditer(pattern, ev_text, flags=re.IGNORECASE):
+                try:
+                    value = float(match.group(1))
+                except (TypeError, ValueError, IndexError):
+                    continue
+
+                if metric_unit == "%" and (value < 0 or value > 100):
+                    continue
+                if metric_unit == "rate" and (value < 0 or value > 1000):
+                    continue
+
+                candidate = {
+                    "value": value,
+                    "url": url or None,
+                    "source_name": source_name,
+                    "tier": tier,
+                    "year": data_year,
+                    "matched_text": match.group(0),
+                }
+
+                if best_match is None:
+                    best_match = candidate
+                    continue
+
+                # Prefer higher-reliability sources first, then newer year.
+                best_year = best_match.get("year") or 0
+                cand_year = candidate.get("year") or 0
+                if candidate["tier"] < best_match["tier"] or (
+                    candidate["tier"] == best_match["tier"] and cand_year > best_year
+                ):
+                    best_match = candidate
+
+    return best_match or {}
+
+
+def _score_from_thresholds(value: float, rule: Dict[str, Any]) -> int:
+    """Map a quantitative value into the fixed score buckets: 100/75/50/25/0."""
+    thresholds = rule.get("thresholds", {})
+    direction = rule.get("direction", "higher_better")
+
+    if direction == "lower_better":
+        if value <= thresholds.get("top_decile", float("inf")):
+            return 100
+        if value <= thresholds.get("above_average", float("inf")):
+            return 75
+        if value <= thresholds.get("average", float("inf")):
+            return 50
+        if value <= thresholds.get("below_average", float("inf")):
+            return 25
+        return 0
+
+    if value >= thresholds.get("top_decile", float("inf")):
+        return 100
+    if value >= thresholds.get("above_average", float("inf")):
+        return 75
+    if value >= thresholds.get("average", float("inf")):
+        return 50
+    if value >= thresholds.get("below_average", float("inf")):
+        return 25
+    return 0
+
+
+def _score_structured_indicator(
+    indicator: Dict[str, Any],
+    rule: Dict[str, Any],
+    evidence_sources: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Structured indicator scoring with quantitative thresholds and explicit fallback."""
+    name = indicator["name"]
+    metric_match = _extract_best_metric_value(rule, evidence_sources)
+
+    thresholds = rule.get("thresholds", {})
+    threshold_text = (
+        f"100 if metric is top decile ({thresholds.get('top_decile')}), "
+        f"75 above average ({thresholds.get('above_average')}), "
+        f"50 average ({thresholds.get('average')}), "
+        f"25 below average ({thresholds.get('below_average')}), else 0"
+    )
+
+    if metric_match:
+        metric_value = float(metric_match["value"])
+        score = _score_from_thresholds(metric_value, rule)
+        metric_unit = rule.get("metric_unit")
+        if metric_unit == "%":
+            raw_value = f"{metric_value:.1f}%"
+        else:
+            raw_value = f"{metric_value:.3f}"
+
+        return {
+            "name": name,
+            "score": float(score),
+            "weight": indicator["weight"],
+            "data_source": metric_match.get("source_name") or "Structured quantitative disclosure",
+            "source_url": metric_match.get("url"),
+            "data_year": metric_match.get("year") or 2024,
+            "methodology": (
+                f"Structured threshold scoring using {rule.get('primary_metric')}. "
+                f"Buckets: {threshold_text}."
+            ),
+            "raw_value": raw_value,
+            "unit": metric_unit,
+            "verified": bool(metric_match.get("tier", 5) <= 2),
+            "primary_metric": rule.get("primary_metric"),
+            "metric_source_hint": rule.get("source_hint"),
+            "gri_alignment": rule.get("gri_alignment", []),
+            "sasb_alignment": rule.get("sasb_alignment", []),
+            "fallback_rule": "verified policy=40, unverified claim=20, no mention=0",
+            "scoring_model": "structured_threshold_v1",
+        }
+
+    claim_keywords = [str(k).lower() for k in rule.get("claim_keywords", [])]
+    policy_keywords = [str(k).lower() for k in rule.get("policy_keywords", [])]
+
+    best_policy_url = None
+    best_policy_source = None
+    best_policy_tier = 5
+    best_policy_year = None
+    has_policy_mention = False
+    has_any_claim = False
+
+    for ev in evidence_sources:
+        if not isinstance(ev, dict):
+            continue
+        url = str(ev.get("url", ""))
+        tier = get_reliability_tier(url)
+        source_name = parse_source_name(url) or ev.get("source_name", "Web evidence")
+        ev_text = " ".join(
+            str(ev.get(k, ""))
+            for k in ("title", "snippet", "content", "relevant_text", "source", "source_name")
+        ).lower()
+
+        claim_hit = any(kw in ev_text for kw in claim_keywords)
+        policy_hit = any(kw in ev_text for kw in policy_keywords)
+        if claim_hit:
+            has_any_claim = True
+        if claim_hit and policy_hit:
+            has_policy_mention = True
+            if tier < best_policy_tier:
+                best_policy_tier = tier
+                best_policy_url = url or None
+                best_policy_source = source_name
+                best_policy_year = _extract_data_year(ev)
+
+    if has_policy_mention and best_policy_tier <= 2:
+        fallback_score = 40.0
+        fallback_source = best_policy_source or "Verified policy disclosure"
+        verified = True
+    elif has_any_claim:
+        fallback_score = 20.0
+        fallback_source = best_policy_source or "Unverified narrative claim"
+        verified = False
+    else:
+        fallback_score = 0.0
+        fallback_source = "No relevant disclosure"
+        verified = False
+
+    return {
+        "name": name,
+        "score": fallback_score,
+        "weight": indicator["weight"],
+        "data_source": fallback_source,
+        "source_url": best_policy_url,
+        "data_year": best_policy_year or 2024,
+        "methodology": (
+            f"Structured threshold scoring with fallback. Primary metric: {rule.get('primary_metric')}. "
+            f"Fallback applied: verified policy=40, unverified claim=20, no mention=0."
+        ),
+        "raw_value": None,
+        "unit": rule.get("metric_unit"),
+        "verified": verified,
+        "primary_metric": rule.get("primary_metric"),
+        "metric_source_hint": rule.get("source_hint"),
+        "gri_alignment": rule.get("gri_alignment", []),
+        "sasb_alignment": rule.get("sasb_alignment", []),
+        "fallback_rule": "verified policy=40, unverified claim=20, no mention=0",
+        "scoring_model": "structured_threshold_v1",
+    }
+
+
 def _normalize_industry(industry: str) -> str:
     """Normalize industry name for lookup."""
     if not industry:
@@ -173,8 +495,13 @@ def _score_indicator(
     Returns a dict with score, data_source, raw_value, verified, etc.
     If evidence is insufficient, score is set to None.
     """
-    keywords = indicator.get("keywords", [])
     name = indicator["name"]
+
+    structured_rule = _STRUCTURED_SCORING_RULES.get(name)
+    if structured_rule:
+        return _score_structured_indicator(indicator, structured_rule, evidence_sources)
+
+    keywords = indicator.get("keywords", [])
 
     # Collect matching evidence
     matching_sources = []
@@ -287,26 +614,45 @@ def _rescale_scores_to_target(
     This ensures mathematical consistency: weighted_avg(sub_scores) == pillar_score.
     """
     scored = [(i, ind) for i, ind in enumerate(sub_indicators) if ind.get("score") is not None]
-
     if not scored:
         return sub_indicators
 
-    # Current weighted average (of scored indicators only)
-    scored_weight_sum = sum(ind["weight"] for _, ind in scored)
-    if scored_weight_sum <= 0:
+    # Keep structured-threshold indicators fixed; only rescale flexible indicators.
+    locked = [
+        (i, ind)
+        for i, ind in scored
+        if ind.get("scoring_model") == "structured_threshold_v1"
+    ]
+    flexible = [
+        (i, ind)
+        for i, ind in scored
+        if ind.get("scoring_model") != "structured_threshold_v1"
+    ]
+
+    if not flexible:
         return sub_indicators
 
-    current_avg = sum(ind["score"] * ind["weight"] for _, ind in scored) / scored_weight_sum
+    total_weight = sum(ind["weight"] for _, ind in scored)
+    flex_weight = sum(ind["weight"] for _, ind in flexible)
+    if total_weight <= 0 or flex_weight <= 0:
+        return sub_indicators
 
-    if current_avg <= 0:
+    locked_total = sum(ind["score"] * ind["weight"] for _, ind in locked)
+    target_total = target_score * total_weight
+    target_flex_avg = (target_total - locked_total) / flex_weight
+    target_flex_avg = max(0.0, min(100.0, target_flex_avg))
+
+    current_flex_avg = sum(ind["score"] * ind["weight"] for _, ind in flexible) / flex_weight
+
+    if current_flex_avg <= 0:
         # Can't rescale from zero, just set all to target
-        for idx, ind in scored:
-            sub_indicators[idx] = {**ind, "score": round(target_score, 1)}
+        for idx, ind in flexible:
+            sub_indicators[idx] = {**ind, "score": round(target_flex_avg, 1)}
         return sub_indicators
 
-    scale_factor = target_score / current_avg
+    scale_factor = target_flex_avg / current_flex_avg
 
-    for idx, ind in scored:
+    for idx, ind in flexible:
         new_score = max(0.0, min(100.0, ind["score"] * scale_factor))
         sub_indicators[idx] = {**ind, "score": round(new_score, 1)}
 
