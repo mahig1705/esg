@@ -494,6 +494,7 @@ class ProfessionalReportGenerator:
         ts = v["metadata"].get("timestamp_dt") or datetime.utcnow()
         report_id = str(v["metadata"].get("report_id") or f"{ts.strftime('%Y%m%d-%H%M%S')}-{v['company'][:4].upper()}")
         date_line = ts.strftime("%d %B %Y at %H:%M UTC")
+        report_version = "4.0"
 
         claim_wrapped = textwrap.wrap(v["claim"], width=80)
         claim_line = f"Claim Analyzed:     {claim_wrapped[0] if claim_wrapped else 'No claim provided'}"
@@ -505,28 +506,27 @@ class ProfessionalReportGenerator:
         )
 
         verdict_findings = self._build_verdict_findings(v["agents"], v["scores"])
-        while len(verdict_findings) < 5:
-            verdict_findings.append("[i] Additional analysis completed")
+        if len(verdict_findings) < 2:
+            verdict_findings.append("[i] INFO - Additional analysis completed without critical warning flags")
+        if len(verdict_findings) < 2:
+            verdict_findings.append("[i] INFO - Report contains multi-agent triangulation across evidence and scoring")
+        verdict_findings = verdict_findings[:4]
 
         section1_text = (
-            f"This assessment evaluates {v['company']}'s ESG claim against multi-agent evidence, "
-            f"contradiction screening, and calibrated risk scoring. The computed greenwashing risk "
-            f"score is {v['gw_score']:.1f}/100 with rating {v['rating']} and risk band {v['band']}. "
-            f"Evidence breadth spans {len(v['citations'])} sources with {v['evidence'].get('verifiable_citations', 0)} "
-            f"verifiable records and {v['premium_count']} premium Tier 1-2 citations. "
-            f"Peer context uses {len(v['same_industry_peers'])} same-industry comparators where available, and "
-            f"overall report confidence is {v['report_confidence']}. Detailed derivations, contradictions, carbon "
-            f"metrics, and calibration context follow in Sections 2 through 10."
+            f"This assessment evaluates {v['company']}'s claim using multi-agent evidence retrieval, contradiction checks, and calibrated ESG risk scoring. "
+            f"The resulting greenwashing score is {v['gw_score']:.1f}/100, indicating {v['band'].lower()} risk under the current thresholding policy. "
+            f"The evidence base includes {len(v['citations'])} total sources, with {v['evidence'].get('verifiable_citations', 0)} verifiable citations. "
+            f"Overall confidence for this run is {v['report_confidence']} ({v['confidence_pct']:.1f}%)."
         )
 
         sec2_lines = [
             major,
-            "SECTION 2: EVIDENCE CITATIONS",
+            "SECTION 4: EVIDENCE CITATIONS TABLE",
             major,
-            f"Total sources: {len(v['citations'])}   Verifiable: {v['evidence'].get('verifiable_citations', 0)}   Premium (Tier 1-2): {v['premium_count']}",
+            f"Total sources: {len(v['citations'])}   Verifiable: {v['evidence'].get('verifiable_citations', 0)}",
             "",
-            f"{'No':<4} {'Source':<30} {'Tier':<28} {'Ver':<5} {'Stance':<12}",
-            "-" * 81,
+            f"{'#':<4} {'Source Name':<32} {'Tier':<28} {'Verifiable':<11} {'Stance':<12}",
+            "-" * 92,
         ]
         for i, c in enumerate(v["citations"], start=1):
             src = str(c.get("source_name") or "").strip()
@@ -538,6 +538,8 @@ class ProfessionalReportGenerator:
                     src = str(c.get("data_source_api") or "").strip()
                 if not src:
                     src = str(c.get("title") or "Known source").split(" - ")[0][:30]
+            if not src or src.lower() in {"unknown", "unknown source", "known source"}:
+                src = f"Documented Source {i}"
             tier = str(c.get("reliability_tier") or "General Web / Other")
             ver = "YES" if c.get("verifiable") else "NO"
             stance_raw = str(c.get("claim_support") or "Neutral").lower()
@@ -547,16 +549,10 @@ class ProfessionalReportGenerator:
                 stance = "Supports"
             else:
                 stance = "Neutral"
-            sec2_lines.append(f"{i:<4} {src[:30]:<30} {tier[:28]:<28} {ver:<5} {stance:<12}")
+            sec2_lines.append(f"{i:<4} {src[:32]:<32} {tier[:28]:<28} {ver:<11} {stance:<12}")
         sec2_lines.extend([
-            "-" * 81,
-            "Reliability tiers (strongest to weakest):",
-            "  Tier 1 - Regulatory Filing (SEC, FCA, CMA, SEBI, courts)",
-            "  Tier 2 - CDP / Third-Party Verified (CDP, SBTi, GRI assurance)",
-            "  Tier 3 - Major News Outlet (Reuters, FT, Bloomberg, BBC)",
-            "  Tier 4 - General Web / Other (DuckDuckGo, NewsAPI, Mediastack)",
-            "  Tier 5 - Estimated / Synthetic (baselines, sector averages)",
-            "  Tier 6 - [UNVERIFIABLE] (excluded from scoring)",
+            "-" * 92,
+            "Footnote - Tier legend: T1 Regulatory Filing; T2 CDP/Third-Party Verified; T3 Major News; T4 General Web; T5 Estimated/Synthetic; T6 Unverifiable.",
             major,
         ])
 
@@ -587,13 +583,13 @@ class ProfessionalReportGenerator:
 
         score_header = [
             major,
-            "SECTION 3: SCORE DERIVATION (E / S / G)",
+            "SECTION 5: SCORE DERIVATION (E / S / G)",
             major,
             f"Overall greenwashing risk score: {v['gw_score']:.1f}/100  ->  Rating: {v['rating']}  ->  Band: {v['band']}",
             "",
             "Composite formula:",
-            "  (Environmental x 0.35) + (Social x 0.30) + (Governance x 0.35) = ESG Score",
-            "  Greenwashing Risk = 100 - ESG Score  [or methodology-specific formula]",
+            "  ESG score = (Environmental x 0.35) + (Social x 0.30) + (Governance x 0.35)",
+            "  Greenwashing risk score = 100 - ESG score",
             "",
             f"ENVIRONMENTAL PILLAR - {e_score:.1f}/100",
             "─" * 34,
@@ -601,15 +597,19 @@ class ProfessionalReportGenerator:
             "  " + "─" * 98,
         ]
 
-        def _append_pillar_rows(block: Dict[str, Any], fallback_score: float) -> None:
+        def _append_pillar_rows(block: Dict[str, Any], fallback_score: float, expected_total: int) -> None:
             sub = block.get("sub_indicators", []) if isinstance(block, dict) else []
             if not isinstance(sub, list):
                 sub = []
+
+            total_indicators = len(sub) if len(sub) > 0 else expected_total
+            scored_indicators = 0
 
             if not sub:
                 score_header.append(f"  {'No factor rows returned by scorer':<36} {'N/A':<16} {'risk_scoring':<22} {'-':<6} {'0.0':<6} {'LOW':<10}")
                 score_header.append("  " + "─" * 98)
                 score_header.append(f"  Pillar weighted total: {fallback_score:.1f}/100")
+                score_header.append(f"  Coverage: scored 0/{total_indicators} indicators - treat with caution")
                 return
 
             points_sum = 0.0
@@ -620,6 +620,8 @@ class ProfessionalReportGenerator:
                 raw = factor.get("raw_signal_normalized")
                 if not isinstance(raw, (int, float)):
                     raw = factor.get("score") if isinstance(factor.get("score"), (int, float)) else None
+                if isinstance(raw, (int, float)):
+                    scored_indicators += 1
                 signal = f"{float(raw):.1f}/100" if isinstance(raw, (int, float)) else str(factor.get("signal") or "N/A")
                 src = str(factor.get("source") or factor.get("data_source") or "risk_scoring")
                 weight = factor.get("weight", 0.0)
@@ -636,9 +638,11 @@ class ProfessionalReportGenerator:
             pillar_total = round(points_sum, 1)
             score_header.append("  " + "─" * 98)
             score_header.append(f"  Pillar weighted total: {pillar_total:.1f}/100")
+            coverage_note = "" if scored_indicators == total_indicators else " - treat with caution"
+            score_header.append(f"  Coverage: scored {scored_indicators}/{total_indicators} indicators{coverage_note}")
 
         env_block = pillar_factors.get("environmental", {}) if isinstance(pillar_factors, dict) else {}
-        _append_pillar_rows(env_block, e_score)
+        _append_pillar_rows(env_block, e_score, 6)
         score_header.extend([
             "",
             f"SOCIAL PILLAR - {s_score:.1f}/100",
@@ -647,7 +651,7 @@ class ProfessionalReportGenerator:
             "  " + "─" * 98,
         ])
         social_block = pillar_factors.get("social", {}) if isinstance(pillar_factors, dict) else {}
-        _append_pillar_rows(social_block, s_score)
+        _append_pillar_rows(social_block, s_score, 5)
         score_header.extend([
             "",
             f"GOVERNANCE PILLAR - {g_score:.1f}/100",
@@ -656,15 +660,50 @@ class ProfessionalReportGenerator:
             "  " + "─" * 98,
         ])
         gov_block = pillar_factors.get("governance", {}) if isinstance(pillar_factors, dict) else {}
-        _append_pillar_rows(gov_block, g_score)
+        _append_pillar_rows(gov_block, g_score, 6)
         score_header.extend([
             "",
             major,
         ])
 
-        section4 = [major, "SECTION 4: CONTRADICTIONS & REGULATORY ALERTS", major]
-        section4.append(f"LEGAL & REGULATORY CONTRADICTIONS  ({v['contradiction_count']} found)")
-        section4.append("-" * 47)
+        risk_driver_lines: List[str] = []
+        explainability = v["scores"].get("explainability_top_3_reasons", []) if isinstance(v.get("scores"), dict) else []
+        if not isinstance(explainability, list):
+            explainability = []
+        for idx, item in enumerate(explainability[:3]):
+            text = str(item).strip()
+            if not text:
+                continue
+            lower = text.lower()
+            direction = "decreases risk" if any(k in lower for k in ["decrease", "reduces", "strong", "improved", "improvement", "high score"]) else "increases risk"
+            impact = "HIGH" if idx == 0 else "MEDIUM"
+            risk_driver_lines.append(f"  {idx + 1}. {text[:70]} | Impact: {impact} | Direction: {direction}")
+
+        if len(risk_driver_lines) < 3:
+            carbon_completeness = "0/15"
+            if isinstance(scope3, dict):
+                categories = scope3.get("categories")
+                if isinstance(categories, dict):
+                    carbon_completeness = f"{len(categories)}/15"
+                elif isinstance(categories, list):
+                    carbon_completeness = f"{len(categories)}/15"
+            fallback_drivers = [
+                f"  1. Contradiction signals ({v['contradiction_count']} found) | Impact: HIGH | Direction: {'increases risk' if v['contradiction_count'] > 0 else 'decreases risk'}",
+                f"  2. Regulatory gaps ({len(v['reg_gaps'])} identified) | Impact: MEDIUM | Direction: {'increases risk' if len(v['reg_gaps']) > 0 else 'decreases risk'}",
+                f"  3. Scope 3 category completeness ({carbon_completeness}) | Impact: MEDIUM | Direction: {'increases risk' if carbon_completeness.startswith('0/') else 'decreases risk'}",
+            ]
+            for row in fallback_drivers:
+                if len(risk_driver_lines) >= 3:
+                    break
+                risk_driver_lines.append(row)
+
+        section6 = [major, "SECTION 6: KEY RISK DRIVERS", major]
+        section6.extend(risk_driver_lines[:3])
+        section6.append(major)
+
+        section4 = [major, "SECTION 7: CONTRADICTIONS & REGULATORY ALERTS", major]
+        section4.append(f"LEGAL CONTRADICTIONS  ({v['contradiction_count']} found)")
+        section4.append("-" * 32)
         if v["contradiction_count"] == 0:
             section4.append("No contradictions detected in available evidence. This reflects evidence")
             section4.append("coverage depth, not confirmation of claim accuracy.")
@@ -710,7 +749,7 @@ class ProfessionalReportGenerator:
         section4.append("  " + "-" * 88)
         section4.append(major)
 
-        section5 = [major, "SECTION 5: CARBON EMISSIONS & CLIMATE DATA", major]
+        section5 = [major, "SECTION 8: CARBON EMISSIONS & CLIMATE DATA", major]
         section5.append(f"  {'Scope':<12} {'Emissions (tCO2e)':<20} {'Year':<6} {'Source':<18} {'Quality':<10}")
         section5.append("  " + "-" * 70)
         missing_scopes = []
@@ -752,7 +791,15 @@ class ProfessionalReportGenerator:
         else:
             sbti_display = "Not submitted"
         section5.append(f"  SBTi Status:          {sbti_display}")
-        section5.append(f"  Carbon Offset Status: {safe_get(carbon, 'offset_transparency', 'status', default='not disclosed')}")
+        section5.append(f"  Offset Transparency:  {safe_get(carbon, 'offset_transparency', 'status', default='not disclosed')}")
+        scope3_categories = scope3.get("categories") if isinstance(scope3, dict) else None
+        if isinstance(scope3_categories, dict):
+            scope3_count = len(scope3_categories)
+        elif isinstance(scope3_categories, list):
+            scope3_count = len(scope3_categories)
+        else:
+            scope3_count = 0
+        section5.append(f"  Scope 3 Completeness: {scope3_count}/15 categories")
         if missing_scopes:
             for m in missing_scopes:
                 section5.append(f"\n  WARNING - {m} not disclosed. Net-zero claim cannot be quantitatively")
@@ -763,61 +810,11 @@ class ProfessionalReportGenerator:
             section5.append("  The PDF ESG section filter may be over-aggressive. Manual review required.")
         section5.append("\n" + major)
 
-        peers = v["same_industry_peers"]
-        section6 = [major, f"SECTION 6: PEER COMPARISON  ({v['industry']} sector - {len(peers)} peers)", major]
-        if len(peers) < 2:
-            section6.append("Peer comparison suppressed - fewer than 2 same-industry peers in database.")
-            section6.append(f"Add peers for {v['industry']} sector using the peer seeding script before")
-            section6.append("running analysis on this sector.")
-            section6.append(major)
-        else:
-            section6.append(f"  {'Company':<22} {'ESG Score':<10} {'E Score':<8} {'S Score':<8} {'G Score':<8} {'Rating':<7} {'Source':<8}")
-            section6.append("  " + "-" * 90)
-            esg_vals = []
-            for p in peers:
-                name = str(p.get("name") or p.get("company") or "Peer")[:22]
-                esg = p.get("esg_score") if p.get("esg_score") is not None else p.get("esg")
-                if isinstance(esg, str):
-                    try:
-                        esg = float(esg)
-                    except Exception:
-                        esg = None
-                e = p.get("environmental_score") if p.get("environmental_score") is not None else p.get("e")
-                s = p.get("social_score") if p.get("social_score") is not None else p.get("s")
-                g = p.get("governance_score") if p.get("governance_score") is not None else p.get("g")
-                r = str(p.get("rating") or p.get("rating_grade") or self._rating_from_esg_score(esg))
-                src = str(p.get("source") or "baseline")[:8]
-                if isinstance(esg, (int, float)):
-                    esg_vals.append(float(esg))
-                section6.append(
-                    f"  {name:<22} {self._fmt_score1(esg):<10} {self._fmt_score1(e):<8} {self._fmt_score1(s):<8} {self._fmt_score1(g):<8} {r:<7} {src:<8}"
-                )
-            avg = sum(esg_vals) / len(esg_vals) if esg_vals else 0.0
-            section6.append("  " + "-" * 90)
-            section6.append(f"  {'Industry average':<22} {avg:.1f}")
-            target_esg = f"{(100.0 - v['gw_score']):.1f}"
-            target_e = f"{e_score:.1f}"
-            target_s = f"{s_score:.1f}"
-            target_g = f"{g_score:.1f}"
-            section6.append(f"  {v['company'][:22] + ' *':<22} {target_esg:<10} {target_e:<8} {target_s:<8} {target_g:<8} {v['rating']:<7} analyzed")
-            rank = 1 + len([x for x in esg_vals if x > (100.0 - v['gw_score'])])
-            total_rank = len(esg_vals) + 1
-            section6.append("  " + "-" * 90)
-            section6.append(f"  * Target company. Rank: {rank} of {total_rank}")
-            section6.append("")
-            section6.append(
-                self._wrap_paragraph(
-                    f"Positioning: {v['company']} ranks {rank} of {total_rank} among same-industry peers by ESG score, "
-                    f"relative to an industry average of {avg:.1f}."
-                )
-            )
-            section6.append(major)
-
         green = state.get("greenwishing_analysis") or {}
         climate = state.get("climatebert_analysis") or v["agents"].get("climatebert_analysis", {}).get("output", {})
         overall_dec = safe_get(green, "overall_deception_risk", "score", default=0)
         overall_lvl = str(safe_get(green, "overall_deception_risk", "level", default="LOW")).upper()
-        section7 = [major, "SECTION 7: DECEPTION PATTERN ANALYSIS", major]
+        section7 = [major, "SECTION 9: DECEPTION PATTERN ANALYSIS", major]
         section7.append(f"  Overall Deception Risk:  {self._fmt_score1(overall_dec)}/100  ({overall_lvl})")
         section7.append("")
         section7.append(f"  {'Tactic':<24} {'Risk Level':<11} {'Score':<8} {'Evidence':<32}")
@@ -850,30 +847,8 @@ class ProfessionalReportGenerator:
         section7.append(f"    Verdict:              {safe_get(climate, 'final_verdict', 'verdict', default=('HIGH_RISK' if cb_level == 'HIGH' else 'MODERATE_RISK' if cb_level in {'MEDIUM', 'MODERATE'} else 'LOW_RISK'))}")
         section7.append("\n" + major)
 
-        section8 = [major, f"SECTION 8: AGENT PIPELINE SUMMARY  ({len(v['agents'])} agents - {len([a for a in v['agents'].values() if isinstance(a, dict) and not a.get('error')])} successful)", major]
-        section8.append(f"  {'Agent':<26} {'Status':<20} {'Confidence':<10} {'Key Finding':<40}")
-        section8.append("  " + "-" * 100)
-        all_agent_names = sorted(v["agents"].keys())
-        for name in all_agent_names:
-            info = v["agents"].get(name, {})
-            if not isinstance(info, dict):
-                continue
-            display_name = AGENT_DISPLAY_NAMES.get(name, name)
-            out = info.get("output") if isinstance(info.get("output"), dict) else {}
-            if info.get("error"):
-                status = "FAILED"
-            elif info.get("has_findings"):
-                status = "SUCCESS"
-            else:
-                status = "NO FINDINGS"
-            conf = self._fmt_pct(info.get("confidence")) if isinstance(info.get("confidence"), (int, float)) else "n/a"
-            finding = self._extract_key_finding(name, out)
-            section8.append(f"  {display_name[:26]:<26} {status[:20]:<20} {conf[:10]:<10} {finding[:40]:<40}")
-        section8.append("  " + "-" * 100)
-        section8.append(major)
-
         cal = v["calibration"]
-        section9 = [major, "SECTION 9: CALIBRATION & CONFIDENCE", major]
+        section9 = [major, "SECTION 10: CALIBRATION & CONFIDENCE", major]
         spearman_r = self._safe_float(cal.get("spearman_r"), 0.7470)
         spearman_p = self._safe_float(cal.get("spearman_p"), 0.0001)
         point_biserial_r = self._safe_float(cal.get("point_biserial_r"), 0.7620)
@@ -914,37 +889,47 @@ class ProfessionalReportGenerator:
             major,
         ])
 
-        section10 = [major, "SECTION 10: CASE-SPECIFIC LIMITATIONS", major]
-        limits = v["limitations"] if isinstance(v["limitations"], list) else []
-        if not limits:
-            limits = ["Evidence availability varies by source and period.", "Peer coverage may be limited for certain sectors.", "Model outputs are probabilistic and require expert review."]
-        for i, lim in enumerate(limits, start=1):
-            section10.append(f"  {i}. {self._wrap_paragraph(str(lim), width=74)}")
+        section10_lines: List[str] = []
+        section10_lines.append(f"Evidence coverage for this run is {len(v['citations'])} source(s), with {v['evidence'].get('verifiable_citations', 0)} verifiable citation(s).")
+        if len(v["same_industry_peers"]) == 0:
+            section10_lines.append("Peer comparison note: 0 same-industry peers were available, so peer benchmarking was not included.")
+        if v["contradiction_count"] == 0:
+            section10_lines.append("No legal contradiction was detected; this may indicate either true consistency or insufficient contrary evidence.")
+        if v["confidence_pct"] < 60:
+            section10_lines.append("Model confidence is below 60%, so borderline outcomes should be treated as preliminary and reviewed manually.")
+        for lim in v["limitations"] if isinstance(v["limitations"], list) else []:
+            txt = str(lim).strip()
+            if txt and txt not in section10_lines:
+                section10_lines.append(txt)
+        section10_lines = section10_lines[:5]
+        while len(section10_lines) < 3:
+            section10_lines.append("The score is probabilistic and does not constitute legal or regulatory determination.")
+
+        section10 = [major, "SECTION 11: LIMITATIONS", major]
+        for i, lim in enumerate(section10_lines, start=1):
+            section10.append(f"  - {self._wrap_paragraph(str(lim), width=74)}")
         section10.append("\n" + major)
 
         appendix_a = [major, "APPENDIX A: VALIDATION & CALIBRATION STATUS", major, self._plain_textify(self._generate_validation_metadata_section(v.get("calibration", {}))), "", major]
         appendix_b = [major, "APPENDIX B: TEMPORAL ESG CONSISTENCY", major, self._plain_textify(self._generate_temporal_consistency_section(state)), "", major]
-        appendix_c = [major, "APPENDIX C: REALISM DIAGNOSTICS", major, self._plain_textify(self._generate_realism_diagnostics_section(state)), "", major]
+        appendix_c = [major, "APPENDIX C: EVIDENCE & OFFSET INTEGRITY", major, self._plain_textify(self._generate_realism_diagnostics_section(state)), "", major]
 
         blocks = {
             "cover": "\n".join([
                 major,
                 "ESG GREENWASHING RISK ASSESSMENT REPORT",
                 major,
-                "Prepared by:   ESGLens Multi-Agent Analysis System v4.0",
-                f"Report ID:     {report_id}",
-                f"Analysis Date: {date_line}",
-                "Confidential - For institutional use only",
-                major,
-                "",
-                "REPORT METADATA",
+                "REPORT HEADER",
                 minor,
                 f"Company:            {v['company']}",
-                f"Ticker:             {v['ticker']:<24}Industry: {v['industry']}",
+                f"Ticker:             {v['ticker']}",
+                f"Industry:           {v['industry']}",
                 claim_line,
                 *claim_tail,
-                f"Report Confidence:  {v['report_confidence']:<24}Quality Warnings: {len(v['quality_warnings'])}",
-                f"Pipeline:           {v['workflow']}",
+                f"Report ID:          {report_id}",
+                f"Date:               {date_line}",
+                f"Confidence:         {v['confidence_pct']:.1f}% ({v['report_confidence']})",
+                f"Version:            {report_version}",
                 minor,
             ]),
             "verdict": "\n".join([
@@ -962,22 +947,17 @@ class ProfessionalReportGenerator:
                 self._wrap_paragraph(summary_sentence, width=80),
                 "",
                 "  Key findings at a glance:",
-                verdict_findings[0],
-                verdict_findings[1],
-                verdict_findings[2],
-                verdict_findings[3],
-                verdict_findings[4],
+                *[f"  - {line}" for line in verdict_findings],
                 "",
                 major,
             ]),
-            "section1": "\n".join([major, "SECTION 1: EXECUTIVE SUMMARY", major, self._wrap_paragraph(section1_text, width=80), "", major]),
+            "section1": "\n".join([major, "SECTION 3: EXECUTIVE SUMMARY", major, self._wrap_paragraph(section1_text, width=80), "", major]),
             "section2": "\n".join(sec2_lines),
             "section3": "\n".join(score_header),
+            "section6": "\n".join(section6),
             "section4": "\n".join(section4),
             "section5": "\n".join(section5),
-            "section6": "\n".join(section6),
             "section7": "\n".join(section7),
-            "section8": "\n".join(section8),
             "section9": "\n".join(section9),
             "section10": "\n".join(section10),
             "appendix_a": "\n".join(appendix_a),
@@ -987,13 +967,13 @@ class ProfessionalReportGenerator:
         }
 
         ordered_keys = [
-            "cover", "verdict", "section1", "section2", "section3", "section4", "section5",
-            "section6", "section7", "section8", "section9", "section10", "appendix_a", "appendix_b", "appendix_c", "end",
+            "cover", "verdict", "section1", "section2", "section3", "section6", "section4", "section5",
+            "section7", "section9", "section10", "appendix_a", "appendix_b", "appendix_c", "end",
         ]
         report = "\n\n".join(blocks[k] for k in ordered_keys)
 
         if len(report.encode("utf-8")) > 500_000:
-            blocks["section8"] = "\n".join([major, "SECTION 8: AGENT PIPELINE SUMMARY", major, "[TRUNCATED: pipeline section reduced due to file-size cap]", major])
+            blocks["appendix_c"] = "\n".join([major, "APPENDIX C: EVIDENCE & OFFSET INTEGRITY", major, "[TRUNCATED DUE TO FILE-SIZE CAP]", major])
             report = "\n\n".join(blocks[k] for k in ordered_keys)
 
         if len(report.encode("utf-8")) > 500_000:
@@ -1663,7 +1643,7 @@ class ProfessionalReportGenerator:
                 sev = str(c.get("severity", "")).upper()
                 desc = str(c.get("description") or c.get("contradiction_text", "")).strip()
                 if sev == "HIGH" and len(desc) > 10:
-                    findings.append(f"[!] {desc[:120]} - severity HIGH")
+                    findings.append(f"[!] HIGH - {desc[:110]}")
 
         if not any(f.startswith("[!]") for f in findings) and isinstance(contradictions, list):
             for c in contradictions[:2]:
@@ -1671,7 +1651,9 @@ class ProfessionalReportGenerator:
                     desc = str(c.get("description") or c.get("contradiction_text", "")).strip()
                     sev = str(c.get("severity", "MEDIUM")).upper()
                     if len(desc) > 10:
-                        findings.append(f"[~] {desc[:120]} - severity {sev}")
+                        level = "HIGH" if sev == "HIGH" else "MEDIUM"
+                        tag = "[!]" if level == "HIGH" else "[~]"
+                        findings.append(f"{tag} {level} - {desc[:110]}")
 
         reg_output = ((agents.get("regulatory_scanning", {}) or {}).get("output", {}) or {})
         gaps = 0
@@ -1679,24 +1661,24 @@ class ProfessionalReportGenerator:
             cs = reg_output.get("compliance_score", {})
             gaps = cs.get("gaps", 0) if isinstance(cs, dict) else 0
         if gaps:
-            findings.append(f"[~] {gaps} regulatory framework gap(s) identified")
+            findings.append(f"[~] MEDIUM - {gaps} regulatory framework gap(s) identified")
 
         evidence_out = ((agents.get("evidence_retrieval", {}) or {}).get("output", {}) or {})
         total_sources = len(evidence_out.get("citations", []) or evidence_out.get("evidence", []) or [])
-        findings.append(f"[i] {total_sources} total sources retrieved")
+        findings.append(f"[i] INFO - {total_sources} total sources retrieved")
 
         if isinstance(scores, dict):
             gw_score = scores.get("greenwashing_risk_score")
             if isinstance(gw_score, (int, float)):
-                findings.append(f"[i] Calibrated greenwashing risk score: {float(gw_score):.1f}/100")
+                findings.append(f"[i] INFO - Calibrated greenwashing risk score: {float(gw_score):.1f}/100")
 
         if not any("regulatory framework gap" in f.lower() for f in findings):
-            findings.append("[i] Regulatory framework screening completed")
+            findings.append("[i] INFO - Regulatory framework screening completed")
 
         if not any("contradiction" in f.lower() for f in findings):
-            findings.append("[i] Contradiction screening completed")
+            findings.append("[i] INFO - Contradiction screening completed")
 
-        return findings[:5]
+        return findings[:4]
 
     def _extract_key_finding(self, agent_name: str, output: Dict[str, Any]) -> str:
         if not isinstance(output, dict):
@@ -3416,15 +3398,14 @@ Industry Baseline Adjustment: {industry_adj:+.1f} points
         }
 
     def _generate_realism_diagnostics_section(self, state: Dict[str, Any]) -> str:
-        """Generate a concise diagnostics panel for report realism and trustworthiness."""
+        """Generate a concise diagnostics panel for evidence and offset integrity."""
         diagnostics = self._collect_realism_diagnostics(state)
 
         evidence_diag = diagnostics.get("evidence_composition", {})
         temporal_diag = diagnostics.get("temporal_reliability", {})
-        dei_diag = diagnostics.get("dei_progress", {})
 
         return f"""
-REALISM DIAGNOSTICS
+EVIDENCE & OFFSET INTEGRITY
 {'─'*80}
 
 Overall Realism Confidence: {diagnostics.get('realism_score', 0)}/100 ({str(diagnostics.get('realism_label', 'unknown')).upper()})
@@ -3432,13 +3413,6 @@ Overall Realism Confidence: {diagnostics.get('realism_score', 0)}/100 ({str(diag
 Offset Integrity:
   - Classification: {str(diagnostics.get('offset_integrity', 'unknown')).upper()} ({diagnostics.get('offset_status', 'unknown')})
   - Penalty Applied: {diagnostics.get('offset_penalty', 0)} point(s)
-
-DEI Execution Quality:
-  - Execution Mode: {str(diagnostics.get('dei_execution', 'insufficient')).upper()}
-  - Target Declared: {'Yes' if dei_diag.get('has_target') else 'No'}
-  - Actual Progress Disclosed: {'Yes' if dei_diag.get('has_actual') else 'No'}
-  - YoY Progress: {dei_diag.get('yoy_change') if dei_diag.get('yoy_change') is not None else 'N/A'}
-  - Gap to Target: {dei_diag.get('target_gap') if dei_diag.get('target_gap') is not None else 'N/A'}
 
 Evidence Composition:
   - Total Source Items: {evidence_diag.get('total_evidence_sources', 0)}
