@@ -393,9 +393,13 @@ class ProfessionalReportGenerator:
         conf_label = self._confidence_label(conf_pct)
         report_confidence = quality.get("report_confidence_level", "MEDIUM")
 
-        threshold = float(calibration.get("optimal_threshold") or 50.0)
-        delta = gw_score - threshold
-        cal_status = f"Score is {abs(delta):.1f} pts {'above' if delta >= 0 else 'below'} the {threshold:.1f} threshold"
+        _raw_threshold = calibration.get("optimal_threshold")
+        threshold = float(_raw_threshold) if isinstance(_raw_threshold, (int, float)) else None
+        if threshold is not None:
+            delta = gw_score - threshold
+            cal_status = f"Score is {abs(delta):.1f} pts {'above' if delta >= 0 else 'below'} the {threshold:.1f} threshold"
+        else:
+            cal_status = "Calibration not available — threshold not computed"
 
         contradiction_output = agents.get("contradiction_analysis", {}).get("output", {}) if isinstance(agents.get("contradiction_analysis"), dict) else {}
         contradiction_list = []
@@ -849,45 +853,103 @@ class ProfessionalReportGenerator:
 
         cal = v["calibration"]
         section9 = [major, "SECTION 10: CALIBRATION & CONFIDENCE", major]
-        spearman_r = self._safe_float(cal.get("spearman_r"), 0.7470)
-        spearman_p = self._safe_float(cal.get("spearman_p"), 0.0001)
-        point_biserial_r = self._safe_float(cal.get("point_biserial_r"), 0.7620)
-        mannwhitney_p = self._safe_float(cal.get("mannwhitney_p"), 0.0005)
-        if v["gw_score"] >= v["threshold"] + 10:
-            zone_text = (
-                f"Sits {v['gw_score'] - v['threshold']:.1f}pts above threshold - in the "
-                "calibration sample, scores this high are predominantly associated "
-                "with confirmed greenwashing cases."
-            )
-        elif v["gw_score"] <= v["threshold"] - 10:
-            zone_text = (
-                f"Sits {v['threshold'] - v['gw_score']:.1f}pts below threshold - in the "
-                "calibration sample, scores this low are more commonly associated "
-                "with legitimate ESG disclosures than with greenwashing."
-            )
+        cal_state = cal.get("calibration_status", "NOT_AVAILABLE")
+        dataset_size = cal.get("dataset_size")
+        industries_repr = cal.get("industries_represented") or []
+        sector_counts = cal.get("sector_counts") or {}
+        company_industry = v["industry"]
+
+        if cal_state == "NOT_AVAILABLE":
+            # Suppress calibration numbers entirely
+            section9.extend([
+                "Calibration not available \u2014 ground truth dataset not found or empty.",
+                "Scores should be treated as indicative only.",
+                "",
+                "  The rating should be interpreted alongside qualitative context and sector",
+                "  expertise. This is a probabilistic risk indicator, not a legal determination.",
+                "",
+                major,
+            ])
         else:
-            zone_text = (
-                "Sits near the 50.0 threshold in the grey zone - both legitimate "
-                "firms and greenwashers are observed at this score level. "
-                "Additional human review is recommended."
-            )
-        section9.extend([
-            "Calibration dataset:    Ground Truth ESG v1.0 - 21 verified company-claim pairs",
-            f"Spearman correlation:   r = {spearman_r:.4f}  (p = {spearman_p:.4f})",
-            f"Point-biserial:         r = {point_biserial_r:.4f}  (Mann-Whitney p = {mannwhitney_p:.4f})",
-            f"Optimal threshold:      {v['threshold']:.1f}/100",
-            f"Mean - greenwashing:    {self._fmt_score1(cal.get('mean_score_greenwashing')).replace('N/A', '55.1')}   Mean - legitimate: {self._fmt_score1(cal.get('mean_score_legitimate')).replace('N/A', '40.3')}",
-            "Known cases database:   17 verified regulatory actions",
-            "",
-            "Score interpretation:",
-            f"  {v['gw_score']:.1f} / 100  ->  {'above' if v['gw_score'] >= v['threshold'] else 'below'} the {v['threshold']:.1f} threshold",
-            "\n".join("  " + line for line in self._wrap_paragraph(zone_text, width=76).split("\n")),
-            "",
-            "  The rating should be interpreted alongside qualitative context and sector",
-            "  expertise. This is a probabilistic risk indicator, not a legal determination.",
-            "",
-            major,
-        ])
+            # CALIBRATED or PROVISIONAL — show computed values
+            spearman_r = cal.get("spearman_r")
+            spearman_p = cal.get("spearman_p")
+            point_biserial_r = cal.get("point_biserial_r")
+            mannwhitney_p = cal.get("mannwhitney_p")
+            mean_gw = cal.get("mean_score_greenwashing")
+            mean_leg = cal.get("mean_score_legitimate")
+
+            if cal_state == "CALIBRATED":
+                status_label = f"CALIBRATED (n={dataset_size} cases)"
+            else:
+                status_label = f"PROVISIONAL (n={dataset_size} cases \u2014 insufficient sample, treat with caution)"
+
+            if v["threshold"] is not None:
+                if v["gw_score"] >= v["threshold"] + 10:
+                    zone_text = (
+                        f"Sits {v['gw_score'] - v['threshold']:.1f}pts above threshold - in the "
+                        "calibration sample, scores this high are predominantly associated "
+                        "with confirmed greenwashing cases."
+                    )
+                elif v["gw_score"] <= v["threshold"] - 10:
+                    zone_text = (
+                        f"Sits {v['threshold'] - v['gw_score']:.1f}pts below threshold - in the "
+                        "calibration sample, scores this low are more commonly associated "
+                        "with legitimate ESG disclosures than with greenwashing."
+                    )
+                else:
+                    zone_text = (
+                        f"Sits near the {v['threshold']:.1f} threshold in the grey zone - both legitimate "
+                        "firms and greenwashers are observed at this score level. "
+                        "Additional human review is recommended."
+                    )
+            else:
+                zone_text = "Threshold not available \u2014 score interpretation requires manual review."
+
+            section9.append(f"Status:                 {status_label}")
+            section9.append(f"Calibration dataset:    Ground Truth ESG v1.0 - {dataset_size} verified company-claim pairs")
+            if isinstance(spearman_r, (int, float)) and isinstance(spearman_p, (int, float)):
+                section9.append(f"Spearman correlation:   r = {spearman_r:.4f}  (p = {spearman_p:.4f})")
+            if isinstance(point_biserial_r, (int, float)) and isinstance(mannwhitney_p, (int, float)):
+                section9.append(f"Point-biserial:         r = {point_biserial_r:.4f}  (Mann-Whitney p = {mannwhitney_p:.4f})")
+            if v["threshold"] is not None:
+                section9.append(f"Optimal threshold:      {v['threshold']:.1f}/100")
+            if isinstance(mean_gw, (int, float)) and isinstance(mean_leg, (int, float)):
+                section9.append(f"Mean - greenwashing:    {mean_gw:.1f}   Mean - legitimate: {mean_leg:.1f}")
+
+            section9.append("")
+            if v["threshold"] is not None:
+                section9.append("Score interpretation:")
+                section9.append(f"  {v['gw_score']:.1f} / 100  ->  {'above' if v['gw_score'] >= v['threshold'] else 'below'} the {v['threshold']:.1f} threshold")
+                section9.append("\n".join("  " + line for line in self._wrap_paragraph(zone_text, width=76).split("\n")))
+            else:
+                section9.append("Score interpretation:")
+                section9.append(f"  {v['gw_score']:.1f} / 100  (no calibrated threshold available)")
+
+            section9.append("")
+            section9.append("  The rating should be interpreted alongside qualitative context and sector")
+            section9.append("  expertise. This is a probabilistic risk indicator, not a legal determination.")
+
+            # Company-specific sector representativeness note
+            if dataset_size and industries_repr:
+                ind_key = company_industry.strip().lower()
+                n_sector = 0
+                for k, cnt in sector_counts.items():
+                    if k.strip().lower() == ind_key:
+                        n_sector = cnt
+                        break
+                representativeness = "well-represented" if n_sector >= 3 else "underrepresented"
+                industries_str = ", ".join(sorted(set(industries_repr)))
+                section9.append("")
+                note = (
+                    f"Note: Calibration was computed on {dataset_size} cases across "
+                    f"{industries_str}. This company's sector ({company_industry}) has "
+                    f"{n_sector} / {dataset_size} representatives in the dataset \u2014 "
+                    f"{representativeness}."
+                )
+                section9.append(self._wrap_paragraph(note, width=78))
+
+            section9.extend(["", major])
 
         section10_lines: List[str] = []
         section10_lines.append(f"Evidence coverage for this run is {len(v['citations'])} source(s), with {v['evidence'].get('verifiable_citations', 0)} verifiable citation(s).")
@@ -910,7 +972,7 @@ class ProfessionalReportGenerator:
             section10.append(f"  - {self._wrap_paragraph(str(lim), width=74)}")
         section10.append("\n" + major)
 
-        appendix_a = [major, "APPENDIX A: VALIDATION & CALIBRATION STATUS", major, self._plain_textify(self._generate_validation_metadata_section(v.get("calibration", {}))), "", major]
+        appendix_a = [major, "APPENDIX A: VALIDATION & CALIBRATION STATUS", major, self._plain_textify(self._generate_validation_metadata_section(v.get("calibration", {}), company_industry=v.get("industry", "Unknown"))), "", major]
         appendix_b = [major, "APPENDIX B: TEMPORAL ESG CONSISTENCY", major, self._plain_textify(self._generate_temporal_consistency_section(state)), "", major]
         appendix_c = [major, "APPENDIX C: EVIDENCE & OFFSET INTEGRITY", major, self._plain_textify(self._generate_realism_diagnostics_section(state)), "", major]
 
@@ -941,7 +1003,7 @@ class ProfessionalReportGenerator:
                 f"  ESG Rating:               {v['rating']}",
                 f"  Risk Band:                {v['band']}",
                 f"  Confidence:               {v['confidence_pct']:.1f}%",
-                f"  Calibration Status:       {v['calibration_status']}",
+                f"  Calibration Status:       {v['calibration_status']}  [{cal.get('calibration_status', 'N/A')}]",
                 "",
                 "  One-sentence plain-English summary:",
                 self._wrap_paragraph(summary_sentence, width=80),
@@ -1833,56 +1895,122 @@ class ProfessionalReportGenerator:
         }
 
     def _extract_calibration_info(self, scores: Dict[str, Any]) -> Dict[str, Any]:
-        calibration_report: Dict[str, Any] = {}
-        calib_path = os.path.join(os.path.dirname(__file__), '../reports/calibration_report.json')
+        """Load ground truth CSV and compute calibration metrics live.
 
+        Returns a dict with calibration_status = CALIBRATED | PROVISIONAL | NOT_AVAILABLE.
+        All metric values are None when NOT_AVAILABLE (never hardcoded fallbacks).
+        """
+        import pandas as pd
+        from scipy.stats import spearmanr, pointbiserialr, mannwhitneyu
+        from sklearn.metrics import roc_curve
+
+        gt_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'ground_truth_dataset.csv')
+
+        # ---- NOT_AVAILABLE: file missing or empty ----
+        if not os.path.exists(gt_path):
+            return self._empty_calibration(scores)
         try:
-            if os.path.exists(calib_path):
-                with open(calib_path, 'r', encoding='utf-8') as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    calibration_report = loaded
-            else:
-                generated = run_calibration()
-                if isinstance(generated, dict):
-                    calibration_report = generated
+            df = pd.read_csv(gt_path)
         except Exception:
-            calibration_report = {}
+            return self._empty_calibration(scores)
+        if df.empty or len(df) == 0:
+            return self._empty_calibration(scores)
 
-        linguistic_cal = calibration_report.get("linguistic_scorer") or {}
+        # ---- Compute live calibration from dataset ----
+        try:
+            from ml_models.score_calibrator import linguistic_greenwashing_score
+            sc_scores = [
+                linguistic_greenwashing_score(
+                    str(row.get('claim_text', '')),
+                    str(row.get('company_name', '')),
+                    str(row.get('sector', '')),
+                )
+                for _, row in df.iterrows()
+            ]
+            labels = df['greenwashing_label'].values
 
-        default_calibration = {
-            "spearman_r": 0.747,
-            "spearman_p": 0.0001,
-            "point_biserial_r": 0.762,
-            "mannwhitney_p": 0.0005,
-            "optimal_threshold": 50.0,
-            "mean_score_greenwashing": 55.1,
-            "mean_score_legitimate": 40.3,
-            "calibration_status": "CALIBRATED",
-        }
+            spearman = spearmanr(sc_scores, labels)
+            try:
+                pointb = pointbiserialr(labels, sc_scores)
+                pb_r = float(pointb[0])
+            except Exception:
+                pb_r = None
+            try:
+                mw = mannwhitneyu(
+                    [s for s, l in zip(sc_scores, labels) if l == 1],
+                    [s for s, l in zip(sc_scores, labels) if l == 0],
+                    alternative='greater',
+                )
+                mw_p = float(mw.pvalue)
+            except Exception:
+                mw_p = None
 
-        gw_score = scores.get("greenwashing_risk_score")
-        confidence_region = "unknown"
-        if isinstance(gw_score, (int, float)):
-            threshold = linguistic_cal.get("optimal_threshold") or 50
-            if gw_score >= threshold + 10:
-                confidence_region = "high_suspicion_zone"
-            elif gw_score <= threshold - 10:
-                confidence_region = "likely_legitimate_zone"
+            import numpy as np
+            scores_norm = np.array(sc_scores) / 100.0
+            fpr, tpr, thresholds = roc_curve(labels, scores_norm)
+            j_scores = tpr - fpr
+            optimal_idx = np.argmax(j_scores)
+            optimal_threshold = float(thresholds[optimal_idx] * 100)
+
+            gw_mask = labels == 1
+            leg_mask = labels == 0
+            mean_gw = float(np.mean([s for s, m in zip(sc_scores, gw_mask) if m])) if gw_mask.any() else None
+            mean_leg = float(np.mean([s for s, m in zip(sc_scores, leg_mask) if m])) if leg_mask.any() else None
+
+            dataset_size = int(len(df))
+            industries = df['sector'].dropna().unique().tolist() if 'sector' in df.columns else []
+            sector_counts = dict(df['sector'].value_counts()) if 'sector' in df.columns else {}
+
+            # Determine status based on sample size
+            if dataset_size >= 10:
+                calibration_status = "CALIBRATED"
             else:
-                confidence_region = "grey_zone"
+                calibration_status = "PROVISIONAL"
 
+            # Confidence region
+            gw_score = scores.get("greenwashing_risk_score")
+            confidence_region = "unknown"
+            if isinstance(gw_score, (int, float)):
+                if gw_score >= optimal_threshold + 10:
+                    confidence_region = "high_suspicion_zone"
+                elif gw_score <= optimal_threshold - 10:
+                    confidence_region = "likely_legitimate_zone"
+                else:
+                    confidence_region = "grey_zone"
+
+            return {
+                "spearman_r": float(spearman.correlation),
+                "spearman_p": float(spearman.pvalue),
+                "point_biserial_r": pb_r,
+                "mannwhitney_p": mw_p,
+                "optimal_threshold": optimal_threshold,
+                "mean_score_greenwashing": mean_gw,
+                "mean_score_legitimate": mean_leg,
+                "calibration_status": calibration_status,
+                "confidence_region": confidence_region,
+                "dataset_size": dataset_size,
+                "industries_represented": industries,
+                "sector_counts": sector_counts,
+            }
+        except Exception:
+            return self._empty_calibration(scores)
+
+    def _empty_calibration(self, scores: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a NOT_AVAILABLE calibration dict with all values as None."""
+        gw_score = scores.get("greenwashing_risk_score")
         return {
-            "spearman_r": linguistic_cal.get("spearman_r", default_calibration["spearman_r"]),
-            "spearman_p": linguistic_cal.get("spearman_p", default_calibration["spearman_p"]),
-            "point_biserial_r": linguistic_cal.get("point_biserial_r", default_calibration["point_biserial_r"]),
-            "mannwhitney_p": linguistic_cal.get("mannwhitney_p", default_calibration["mannwhitney_p"]),
-            "optimal_threshold": linguistic_cal.get("optimal_threshold", default_calibration["optimal_threshold"]),
-            "mean_score_greenwashing": linguistic_cal.get("mean_score_greenwashing", default_calibration["mean_score_greenwashing"]),
-            "mean_score_legitimate": linguistic_cal.get("mean_score_legitimate", default_calibration["mean_score_legitimate"]),
-            "calibration_status": linguistic_cal.get("calibration_status", default_calibration["calibration_status"]),
-            "confidence_region": confidence_region,
+            "spearman_r": None,
+            "spearman_p": None,
+            "point_biserial_r": None,
+            "mannwhitney_p": None,
+            "optimal_threshold": None,
+            "mean_score_greenwashing": None,
+            "mean_score_legitimate": None,
+            "calibration_status": "NOT_AVAILABLE",
+            "confidence_region": "unknown",
+            "dataset_size": None,
+            "industries_represented": [],
+            "sector_counts": {},
         }
 
     def _infer_limitations(
@@ -2636,10 +2764,15 @@ Score: {score:.1f}/100 — {level}
 {detail}
 """
 
-    def _generate_validation_metadata_section(self, calibration: Dict[str, Any] = None) -> str:
+    def _generate_validation_metadata_section(self, calibration: Dict[str, Any] = None, company_industry: str = "Unknown") -> str:
         """Add validation & calibration status section."""
         if calibration is None:
             calibration = {}
+        cal_state = calibration.get("calibration_status", "NOT_AVAILABLE")
+        dataset_size = calibration.get("dataset_size")
+        industries_repr = calibration.get("industries_represented") or []
+        sector_counts = calibration.get("sector_counts") or {}
+
         lines = [
             "VALIDATION & CALIBRATION STATUS",
             "─" * 52,
@@ -2648,14 +2781,13 @@ Score: {score:.1f}/100 — {level}
         # Ground Truth
         lines.append("")
         lines.append("Ground Truth Validation:")
-        gt_path = os.path.join(os.path.dirname(__file__), '../data/ground_truth_dataset.csv')
-        if os.path.exists(gt_path):
-            import pandas as pd
-            df = pd.read_csv(gt_path)
-            lines.append(f"  Dataset:           Ground Truth ESG Dataset v1.0 (data/ground_truth_dataset.csv)")
-            lines.append(f"  Verified Cases:    {len(df)} company-claim pairs with regulatory verdicts")
+        if cal_state == "NOT_AVAILABLE":
+            lines.append("  Dataset:           Not available — ground truth dataset not found or empty")
+            lines.append("  Status:            NOT_AVAILABLE — calibration numbers suppressed")
         else:
-            lines.append("  Dataset:           Not available — run run_validation.py first")
+            lines.append(f"  Dataset:           Ground Truth ESG Dataset v1.0 (data/ground_truth_dataset.csv)")
+            lines.append(f"  Verified Cases:    {dataset_size} company-claim pairs with regulatory verdicts")
+            lines.append(f"  Status:            {cal_state}")
 
         # ML Model Performance
         lines.append("")
@@ -2677,22 +2809,41 @@ Score: {score:.1f}/100 — {level}
         lines.append("")
         lines.append("Score Calibration:")
         spearman_r = calibration.get("spearman_r")
-        calib_status = calibration.get("calibration_status", "UNKNOWN")
-        if isinstance(spearman_r, (int, float)):
-            lines.append(f"  Spearman r:        {spearman_r:.4f} ({calib_status})")
-        else:
-            lines.append("  Spearman r:        Not available — run run_validation.py first")
-        optimal = calibration.get("optimal_threshold")
-        if isinstance(optimal, (int, float)):
-            lines.append(f"  Optimal Threshold: {optimal}/100")
-        else:
+        if cal_state == "NOT_AVAILABLE":
+            lines.append("  Spearman r:        Not available — no ground truth data")
             lines.append("  Optimal Threshold: Not available")
+        elif isinstance(spearman_r, (int, float)):
+            lines.append(f"  Spearman r:        {spearman_r:.4f} ({cal_state})")
+            optimal = calibration.get("optimal_threshold")
+            if isinstance(optimal, (int, float)):
+                lines.append(f"  Optimal Threshold: {optimal:.1f}/100")
+            else:
+                lines.append("  Optimal Threshold: Not available")
+        else:
+            lines.append("  Spearman r:        Computation failed")
+
+        # Company-specific sector note
+        if cal_state != "NOT_AVAILABLE" and dataset_size and industries_repr:
+            ind_key = company_industry.strip().lower()
+            n_sector = 0
+            for k, cnt in sector_counts.items():
+                if k.strip().lower() == ind_key:
+                    n_sector = cnt
+                    break
+            representativeness = "well-represented" if n_sector >= 3 else "underrepresented"
+            industries_str = ", ".join(sorted(set(industries_repr)))
+            lines.append("")
+            lines.append(f"  Sector Coverage:   {company_industry} has {n_sector}/{dataset_size} cases — {representativeness}")
+            lines.append(f"  Industries:        {industries_str}")
 
         # Contradiction DB
         lines.append("")
         lines.append("Contradiction Database:")
-        from data.known_cases import KNOWN_GREENWASHING_CASES
-        lines.append(f"  Known Cases:       {sum(len(v) for v in KNOWN_GREENWASHING_CASES.values())} verified regulatory actions")
+        try:
+            from data.known_cases import KNOWN_GREENWASHING_CASES
+            lines.append(f"  Known Cases:       {sum(len(v) for v in KNOWN_GREENWASHING_CASES.values())} verified regulatory actions")
+        except Exception:
+            lines.append("  Known Cases:       Not available")
         lines.append("  Data Sources:      UK ASA, Dutch Courts, US FTC, US SEC, InfluenceMap, ClientEarth")
 
         return "\n".join(lines)
