@@ -49,7 +49,7 @@ export default function DashboardPage() {
         {[
           { 
             title: "Total Analyses Run", 
-            value: "2,405", 
+            value: "58", 
             change: "+12.5%", 
             positive: true,
             icon: <Activity className="w-4 h-4 text-primary-600" />
@@ -63,14 +63,14 @@ export default function DashboardPage() {
           },
           { 
             title: "Greenwashing Alerts", 
-            value: "142", 
+            value: "102", 
             change: "-5.4%", 
             positive: true,
             icon: <AlertTriangle className="w-4 h-4 text-red-500" />
           },
           { 
             title: "Companies Monitored", 
-            value: "840", 
+            value: "15", 
             change: "+34 new", 
             positive: true,
             icon: <Building2 className="w-4 h-4 text-primary-600" />

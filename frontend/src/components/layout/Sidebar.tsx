@@ -3,12 +3,13 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { 
-  LayoutDashboard, 
-  SearchCode, 
-  FileText, 
-  History, 
-  Settings, 
+import {
+  LayoutDashboard,
+  SearchCode,
+  FileText,
+  History,
+  AlertTriangle,
+  Settings,
   LogOut,
   ShieldCheck,
   Menu,
@@ -20,7 +21,7 @@ import { Button } from "@/components/ui/button";
 export default function Sidebar({ mobileOpen, setMobileOpen }: { mobileOpen: boolean, setMobileOpen: (open: boolean) => void }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [user, setUser] = useState<{name: string, email: string} | null>(null);
+  const [user, setUser] = useState<{ name: string, email: string } | null>(null);
 
   useEffect(() => {
     const userData = localStorage.getItem("user");
@@ -34,6 +35,7 @@ export default function Sidebar({ mobileOpen, setMobileOpen }: { mobileOpen: boo
   const navItems = [
     { name: "Dashboard", href: "/dashboard", icon: <LayoutDashboard className="w-5 h-5" /> },
     { name: "Analyze Company", href: "/dashboard/analyze", icon: <SearchCode className="w-5 h-5" /> },
+    { name: "Mismatch Detector", href: "/dashboard/mismatch", icon: <AlertTriangle className="w-5 h-5" /> },
     { name: "My Reports", href: "/dashboard/reports", icon: <FileText className="w-5 h-5" /> },
     { name: "History", href: "/dashboard/history", icon: <History className="w-5 h-5" /> },
     { name: "Settings", href: "/dashboard/settings", icon: <Settings className="w-5 h-5" /> },
@@ -54,7 +56,7 @@ export default function Sidebar({ mobileOpen, setMobileOpen }: { mobileOpen: boo
           ESG Intel
         </span>
         {/* Mobile Close Button */}
-        <button 
+        <button
           className="md:hidden ml-auto text-neutral-400 hover:text-white"
           onClick={() => setMobileOpen(false)}
         >
@@ -71,11 +73,10 @@ export default function Sidebar({ mobileOpen, setMobileOpen }: { mobileOpen: boo
               key={item.name}
               href={item.href}
               onClick={() => setMobileOpen(false)}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors group ${
-                isActive 
-                  ? "bg-primary-900/50 text-primary-400 font-medium" 
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors group ${isActive
+                  ? "bg-primary-900/50 text-primary-400 font-medium"
                   : "hover:bg-neutral-800 hover:text-white"
-              }`}
+                }`}
             >
               <div className={`${isActive ? "text-primary-400" : "text-neutral-500 group-hover:text-neutral-300"}`}>
                 {item.icon}
@@ -96,7 +97,7 @@ export default function Sidebar({ mobileOpen, setMobileOpen }: { mobileOpen: boo
             <div className="text-xs text-neutral-500 truncate">{user?.email || "user@example.com"}</div>
           </div>
         </div>
-        <button 
+        <button
           onClick={handleLogout}
           className="flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors w-full text-left text-sm hover:bg-neutral-800 hover:text-white text-neutral-400"
         >
