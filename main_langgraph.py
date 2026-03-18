@@ -12,6 +12,11 @@ from datetime import datetime
 from dotenv import load_dotenv
 import json
 
+from agents.industry_comparator import initialize_peer_database
+
+# Seed peer DB before workflow classes are constructed.
+initialize_peer_database()
+
 if sys.version_info < (3, 11):
     print("WARNING: Python 3.11+ recommended. Current:", sys.version)
 
@@ -35,6 +40,8 @@ class ESGGreenwashingDetectorLangGraph:
         print("🌱 ESG GREENWASHING DETECTION SYSTEM v3.0 (LangGraph)")
         print("Agentic AI | Dynamic Routing | Multi-Agent Debate | Professional Reports")
         print("="*80)
+
+        initialize_peer_database()
         
         if not USE_LANGGRAPH:
             print("⚠️  LangGraph disabled. Use main.py instead.")

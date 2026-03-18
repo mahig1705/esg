@@ -194,3 +194,50 @@ def get_reliability_tier(url: str) -> int:
 def get_reliability_score(tier: int) -> float:
     """Convert tier number to 0-1 reliability score."""
     return {1: 1.0, 2: 0.8, 3: 0.6, 4: 0.3, 0: 0.0}.get(tier, 0.3)
+
+
+def normalize_industry_label(raw: Any) -> str:
+    """Convert internal industry key to a user-facing display label."""
+    text = str(raw or "general").strip()
+    key = text.lower().replace("_", " ").replace("&", " and ")
+    key = " ".join(key.split())
+
+    display_labels = {
+        "oil and gas": "Oil & Gas",
+        "energy": "Energy",
+        "banking": "Banking",
+        "financial services": "Financial Services",
+        "consumer goods": "Consumer Goods",
+        "fmcg": "Consumer Goods",
+        "technology": "Technology",
+        "healthcare": "Healthcare",
+        "manufacturing": "Manufacturing",
+        "automotive": "Automotive",
+        "retail": "Retail",
+        "utilities": "Utilities",
+        "general": "General",
+    }
+    return display_labels.get(key, text.replace("_", " ").title())
+
+
+def normalize_industry_key(raw: Any) -> str:
+    """Convert display/internal industry values to a canonical persistence key."""
+    key = str(raw or "general").strip().lower().replace("_", " ").replace("&", " and ")
+    key = " ".join(key.split())
+
+    aliases = {
+        "oil and gas": "oil & gas",
+        "energy": "oil & gas",
+        "banking": "banking",
+        "financial services": "banking",
+        "consumer goods": "consumer goods",
+        "fmcg": "consumer goods",
+        "technology": "technology",
+        "healthcare": "healthcare",
+        "manufacturing": "manufacturing",
+        "automotive": "automotive",
+        "retail": "retail",
+        "utilities": "utilities",
+        "general": "general",
+    }
+    return aliases.get(key, key)

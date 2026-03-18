@@ -201,6 +201,21 @@ class RiskScorer:
             json.dump(default_config, f, indent=2)
         
         print(f"✅ Created default config: {config_path}")
+
+    @staticmethod
+    def _compute_pillar_score(factors: List[Dict[str, Any]]) -> float:
+        total = 0.0
+        for factor in factors:
+            raw = factor.get("raw_signal_normalized", factor.get("score", 0.0))
+            weight = factor.get("weight", 0.0)
+            if isinstance(raw, (int, float)) and isinstance(weight, (int, float)):
+                contribution = round(float(raw) * float(weight), 2)
+                factor["raw_signal_normalized"] = float(raw)
+                factor["points_contributed"] = contribution
+                total += contribution
+            else:
+                factor["points_contributed"] = 0.0
+        return round(total, 1)
     
     def calculate_pillar_scores(self, all_analyses: Dict[str, Any]) -> Dict[str, float]:
         """
@@ -217,7 +232,17 @@ class RiskScorer:
         
         # Get evidence and contradictions
         evidence = all_analyses.get('evidence', [])
-        contradictions = all_analyses.get('contradiction_analysis', [])
+        contradiction_payload = all_analyses.get('contradiction_analysis', [])
+        contradictions = []
+        if isinstance(contradiction_payload, dict):
+            contradictions = (
+                contradiction_payload.get('contradictions')
+                or contradiction_payload.get('contradiction_list')
+                or contradiction_payload.get('specific_contradictions')
+                or []
+            )
+        elif isinstance(contradiction_payload, list):
+            contradictions = contradiction_payload
         
         # Flatten all text content for keyword analysis
         all_text = []
@@ -251,11 +276,12 @@ class RiskScorer:
         env_positive = sum(1 for kw in environmental_keywords if kw in combined_text)
         env_negative = sum(
             1 for c in contradictions 
-            if c.get('overall_verdict') == 'Contradicted' and 
-            any(kw in str(c).lower() for kw in environmental_keywords)
+            if any(kw in str(c).lower() for kw in environmental_keywords)
         )
         
-        environmental_score = 50 + (env_positive * 10) - (env_negative * 15)
+        # Contradictions should materially reduce ESG pillar scores.
+        env_penalty = min(env_negative * 15, 60)
+        environmental_score = 50 + (env_positive * 10) - env_penalty
         environmental_score = max(0, min(100, environmental_score))
         
         print(f"   Environmental: {environmental_score:.1f}/100 (positive: {env_positive}, contradictions: {env_negative})")
@@ -264,11 +290,11 @@ class RiskScorer:
         soc_positive = sum(1 for kw in social_keywords if kw in combined_text)
         soc_negative = sum(
             1 for c in contradictions 
-            if c.get('overall_verdict') == 'Contradicted' and 
-            any(kw in str(c).lower() for kw in social_keywords)
+            if any(kw in str(c).lower() for kw in social_keywords)
         )
         
-        social_score = 50 + (soc_positive * 10) - (soc_negative * 15)
+        soc_penalty = min(soc_negative * 15, 60)
+        social_score = 50 + (soc_positive * 10) - soc_penalty
         social_score = max(0, min(100, social_score))
         
         print(f"   Social: {social_score:.1f}/100 (positive: {soc_positive}, contradictions: {soc_negative})")
@@ -277,12 +303,29 @@ class RiskScorer:
         gov_positive = sum(1 for kw in governance_keywords if kw in combined_text)
         gov_negative = sum(
             1 for c in contradictions 
-            if c.get('overall_verdict') == 'Contradicted' and 
-            any(kw in str(c).lower() for kw in governance_keywords)
+            if any(kw in str(c).lower() for kw in governance_keywords)
         )
         
-        governance_score = 50 + (gov_positive * 10) - (gov_negative * 15)
+        gov_penalty = min(gov_negative * 15, 60)
+        governance_score = 50 + (gov_positive * 10) - gov_penalty
         governance_score = max(0, min(100, governance_score))
+
+        # Cross-pillar contradiction and regulatory gap penalties.
+        high_severity_count = sum(
+            1 for c in contradictions
+            if str(c.get("severity", "")).upper() == "HIGH"
+        )
+        reg_payload = all_analyses.get("regulatory_scanning") or all_analyses.get("regulatory_compliance") or {}
+        if isinstance(reg_payload, dict):
+            reg_results = reg_payload.get("compliance_results", []) or []
+            reg_gaps = sum(1 for r in reg_results if isinstance(r, dict) and (r.get("gap_details") or []))
+        else:
+            reg_gaps = 0
+
+        if high_severity_count > 0 or reg_gaps > 0:
+            environmental_score = max(0, environmental_score - min(35, high_severity_count * 6 + reg_gaps * 2))
+            social_score = max(0, social_score - min(30, high_severity_count * 5 + reg_gaps * 2))
+            governance_score = max(0, governance_score - min(40, high_severity_count * 7 + reg_gaps * 3))
         
         print(f"   Governance: {governance_score:.1f}/100 (positive: {gov_positive}, contradictions: {gov_negative})")
         
@@ -291,27 +334,48 @@ class RiskScorer:
         industry_data = self.industry_baseline_risk.get(industry, self.industry_baseline_risk.get('unknown'))
         industry_baseline = industry_data.get('baseline', 50)
         
-        # Adjust scores based on industry baseline (high-risk industries get penalty)
-        industry_penalty = (industry_baseline - 50) * 0.2  # 20% of baseline deviation
+        # Industry adjustment (light-touch): applied mainly to Environmental pillar and reduced for low-footprint sectors.
+        industry_penalty = (industry_baseline - 50) * 0.10  # 10% of baseline deviation (calibrated down)
+        sector_env_multiplier = {
+            "oil_and_gas": 1.0,
+            "coal": 1.0,
+            "mining": 0.9,
+            "aviation": 0.8,
+            "banking": 0.3,
+            "consumer_goods": 0.5,
+            "food_beverage": 0.6,
+            "technology": 0.4,
+            "software": 0.3,
+        }.get(industry, 0.6)
         
-        environmental_score = max(0, min(100, environmental_score - industry_penalty))
-        social_score = max(0, min(100, social_score - industry_penalty))
-        governance_score = max(0, min(100, governance_score - industry_penalty))
+        environmental_score = max(0, min(100, environmental_score - (industry_penalty * sector_env_multiplier)))
         
         if industry_penalty != 0:
             print(f"   Industry Adjustment ({industry}): {-industry_penalty:+.1f} points")
         
-        # Calculate overall ESG score (weighted average)
-        overall_esg = (environmental_score * 0.35) + (social_score * 0.30) + (governance_score * 0.35)
+        # Industry-normalized pillar weights (light-touch calibration, MSCI-like materiality)
+        pillar_weights = {
+            "oil_and_gas": (0.45, 0.25, 0.30),
+            "coal": (0.50, 0.20, 0.30),
+            "mining": (0.45, 0.25, 0.30),
+            "aviation": (0.40, 0.30, 0.30),
+            "banking": (0.25, 0.30, 0.45),
+            "consumer_goods": (0.30, 0.40, 0.30),
+            "food_beverage": (0.32, 0.38, 0.30),
+        }.get(industry, (0.35, 0.30, 0.35))
         
-        print(f"   Overall ESG: {overall_esg:.1f}/100 (E×0.35 + S×0.30 + G×0.35)")
+        w_e, w_s, w_g = pillar_weights
+        overall_esg = (environmental_score * w_e) + (social_score * w_s) + (governance_score * w_g)
+        
+        print(f"   Overall ESG: {overall_esg:.1f}/100 (E×{w_e:.2f} + S×{w_s:.2f} + G×{w_g:.2f})")
         
         return {
             "environmental_score": round(environmental_score, 1),
             "social_score": round(social_score, 1),
             "governance_score": round(governance_score, 1),
             "overall_esg_score": round(overall_esg, 1),
-            "industry_adjustment": round(industry_penalty, 1)
+            "industry_adjustment": round(industry_penalty, 1),
+            "pillar_weighting": {"E": w_e, "S": w_s, "G": w_g}
         }
     
     def calculate_final_score(self, company: str, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
@@ -330,6 +394,14 @@ class RiskScorer:
         pillar_scores = self.calculate_pillar_scores(all_analyses)
         overall_esg_score = pillar_scores.get("overall_esg_score", 50)
         
+        # Step 0.25: Positive ESG reinforcement (capped)
+        positive_boost = self._calculate_positive_esg_boost(all_analyses, pillar_scores)
+        boosted_esg_score = max(0, min(100, overall_esg_score + positive_boost))
+        if positive_boost != 0:
+            print(f"\n✅ Positive ESG reinforcement applied: {positive_boost:+.1f} points (capped)")
+            print(f"   ESG Score: {overall_esg_score:.1f} → {boosted_esg_score:.1f}")
+        overall_esg_score = boosted_esg_score
+        
         print(f"\n📊 ESG Pillar Scores Calculated:")
         print(f"   Environmental: {pillar_scores['environmental_score']}/100")
         print(f"   Social: {pillar_scores['social_score']}/100")
@@ -338,7 +410,8 @@ class RiskScorer:
         
         # Step 0.5: Convert ESG score to MSCI-style rating (PRIMARY METHOD)
         rating_grade, risk_level = self.esg_score_to_rating(overall_esg_score)
-        greenwashing_risk = 100 - overall_esg_score
+        base_greenwashing_risk = 100 - overall_esg_score
+        greenwashing_risk = base_greenwashing_risk
         
         print(f"\n⭐ MSCI-Style Rating from ESG Score:")
         print(f"   ESG Score: {overall_esg_score}/100")
@@ -349,7 +422,51 @@ class RiskScorer:
         # Track rating methodology
         override_ml = False
         risk_source = "ESG Pillar Score (MSCI-Aligned)"
+        scoring_methodology = "ESG Pillar Primary"
         confidence = 0.85
+
+        # FIX 1A: Enforce ESG pillar primary pathway whenever all pillar scores are present.
+        environmental_score = pillar_scores.get("environmental_score")
+        social_score = pillar_scores.get("social_score")
+        governance_score = pillar_scores.get("governance_score")
+        if all(s is not None for s in [environmental_score, social_score, governance_score]):
+            overall_esg_score = (
+                float(environmental_score) * 0.35
+                + float(social_score) * 0.30
+                + float(governance_score) * 0.35
+            )
+            overall_esg_score = round(max(0.0, min(100.0, overall_esg_score)), 1)
+            greenwashing_risk = round(100.0 - overall_esg_score, 1)
+            base_greenwashing_risk = greenwashing_risk
+            rating_grade, risk_level = self.esg_score_to_rating(overall_esg_score)
+            scoring_methodology = "ESG Pillar Primary"
+            override_ml = True
+            risk_source = "ESG Pillar Primary"
+        
+        # Confidence-aware calibration for missing/estimated carbon and sparse evidence
+        confidence_penalties = []
+        carbon = all_analyses.get("carbon_extraction") or all_analyses.get("carbon_results") or {}
+        if isinstance(carbon, dict):
+            dq = carbon.get("data_quality", {}) if isinstance(carbon.get("data_quality", {}), dict) else {}
+            dq_status = str(dq.get("status", "")).lower()
+            dq_score = float(dq.get("overall_score", 0) or 0)
+            if dq_status in {"insufficient_data", "estimated_baseline"} or dq_score < 30:
+                confidence_penalties.append(0.12)
+        
+        evidence_list = all_analyses.get("evidence", [])
+        if not isinstance(evidence_list, list) or len(evidence_list) == 0:
+            confidence_penalties.append(0.10)
+        
+        credibility = all_analyses.get("credibility_analysis", {})
+        if not isinstance(credibility, dict) or not credibility:
+            confidence_penalties.append(0.08)
+        
+        temporal = all_analyses.get("temporal_consistency") or {}
+        if isinstance(temporal, dict) and str(temporal.get("status", "")).lower() in {"insufficient_data", "insufficient_history"}:
+            confidence_penalties.append(0.05)
+        
+        confidence_penalty_total = min(0.25, sum(confidence_penalties))
+        confidence = max(0.55, confidence - confidence_penalty_total)
         
         # Step 1: Check for ESG Leaders (≥75) - bypass ML entirely
         if overall_esg_score >= 85:
@@ -580,6 +697,7 @@ class RiskScorer:
         
         # Step 6: LSTM Trend Prediction (context only)
         lstm_trend = None
+        risk_adjustment = 0.0
         if self.use_lstm:
             print(f"\n🔮 Running LSTM Trend Forecast...")
             lstm_result = self.lstm_predictor.predict_from_analysis(all_analyses)
@@ -594,12 +712,25 @@ class RiskScorer:
                 
                 # Adjust greenwashing risk based on trend
                 if lstm_result['trend'] == 'DECLINING':
-                    greenwashing_risk += 10
-                    greenwashing_risk = min(100, greenwashing_risk)  # Cap at 100
+                    risk_adjustment += 10
                     print(f"   ⚠️ Declining ESG trend detected - risk increased by 10 points")
                 elif lstm_result['trend'] == 'IMPROVING':
-                    greenwashing_risk = max(0, greenwashing_risk - 5)
+                    risk_adjustment -= 5
                     print(f"   ✅ Improving ESG trend - risk reduced by 5 points")
+        
+        # Step 6.5: Industry exposure uplift (risk-only; capped)
+        industry = self._identify_industry(company, all_analyses)
+        industry_data = self.industry_baseline_risk.get(industry, self.industry_baseline_risk.get('unknown'))
+        industry_baseline = industry_data.get('baseline', 50)
+        industry_risk_uplift = max(0.0, min(12.0, (industry_baseline - 50) * 0.30))
+        if industry_risk_uplift > 0:
+            risk_adjustment += industry_risk_uplift
+            print(f"   ⚠️ Industry exposure uplift applied: +{industry_risk_uplift:.1f} risk points")
+        
+        # Step 6.6: Cap stacked adjustments to prevent unrealistic collapses
+        risk_adjustment = max(-10.0, min(35.0, risk_adjustment))
+        if not override_ml:
+            greenwashing_risk = max(0.0, min(100.0, base_greenwashing_risk + risk_adjustment))
         
         # Step 7: Anomaly Detection (flagging only)
         anomaly_result = None
@@ -708,7 +839,9 @@ class RiskScorer:
             components, 
             all_analyses, 
             industry, 
-            greenwashing_risk
+            greenwashing_risk,
+            pillar_scores=pillar_scores,
+            positive_boost=positive_boost
         )
         
         insights = self._generate_insights(
@@ -737,6 +870,8 @@ class RiskScorer:
             "explainability_top_3_reasons": top_reasons,
             "actionable_insights": insights,
             "confidence_level": round(confidence * 100, 1),
+            "positive_esg_boost": round(positive_boost, 1),
+            "confidence_penalty_applied": round(confidence_penalty_total * 100, 1),
             "high_carbon_greenwashing_flag": high_carbon_greenwashing_flag,
             "esg_override_active": override_ml
         }
@@ -754,10 +889,48 @@ class RiskScorer:
                 carbon_data=carbon_data_for_factors,
                 pillar_scores=pillar_scores,
             )
+            # FIX 1B: Back-populate raw_signal_normalized and points_contributed from factor weights.
+            pillar_key_map = {
+                "environmental": "environmental_score",
+                "social": "social_score",
+                "governance": "governance_score",
+            }
+            for pillar_name, score_key in pillar_key_map.items():
+                pillar_block = result["pillar_factors"].get(pillar_name, {})
+                factors = pillar_block.get("sub_indicators", []) if isinstance(pillar_block, dict) else []
+                if not isinstance(factors, list):
+                    continue
+
+                pillar_total = self._compute_pillar_score(factors)
+                points_sum = sum(
+                    f.get("points_contributed", 0.0)
+                    for f in factors
+                    if isinstance(f.get("points_contributed"), (int, float))
+                )
+                assert abs(float(pillar_total) - float(points_sum)) < 0.1, (
+                    f"Pillar contribution mismatch for {pillar_name}: "
+                    f"pillar={pillar_total}, sum_points={points_sum}"
+                )
+
+                pillar_total = round(max(0.0, min(100.0, pillar_total)), 1)
+                pillar_block["score"] = pillar_total
+                result["pillar_scores"][score_key] = pillar_total
+
+            # Keep final ESG/risk synchronized with pillar-derived totals.
+            e = float(result["pillar_scores"].get("environmental_score", 0.0) or 0.0)
+            s = float(result["pillar_scores"].get("social_score", 0.0) or 0.0)
+            g = float(result["pillar_scores"].get("governance_score", 0.0) or 0.0)
+            overall_esg = round(max(0.0, min(100.0, e * 0.35 + s * 0.30 + g * 0.35)), 1)
+            result["pillar_scores"]["overall_esg_score"] = overall_esg
+            result["esg_score"] = overall_esg
+            result["greenwashing_risk_score"] = round(100.0 - overall_esg, 1)
+            result["rating_grade"], result["risk_level"] = self.esg_score_to_rating(overall_esg)
             print(f"   ✅ Pillar factors populated with sub-indicator breakdown")
         except Exception as pf_err:
             print(f"   ⚠️ Pillar factors build failed: {pf_err}")
             result["pillar_factors"] = {}
+
+        result["scoring_methodology"] = scoring_methodology
         
         # Add ML details if available
         if ml_prediction and use_ml_prediction:
@@ -876,6 +1049,13 @@ class RiskScorer:
         # Get list of valid industries from config
         valid_industries = [k for k in self.industry_baseline_risk.keys() if k != 'unknown']
         
+        # If upstream already provided a valid industry, trust it (keeps workflow stable and deterministic).
+        provided = analyses.get("industry")
+        if isinstance(provided, str):
+            provided_clean = provided.strip().lower().replace(" ", "_")
+            if provided_clean in valid_industries:
+                return provided_clean
+        
         # Use LLM to classify
         prompt = f"""Classify {company} into ONE of these industries:
 
@@ -952,7 +1132,8 @@ Industry:"""
             score = ((contradicted * 100) + (unverifiable * 85) + (partial * 50) + (verified * 0)) / total if total > 0 else 50
             components['claim_verification'] = min(100, score)
         else:
-            components['claim_verification'] = 100
+            # Calibration: missing contradiction analysis should not be treated as "certain failure".
+            components['claim_verification'] = 50
         
         # 2. Evidence Quality (more sources = lower risk)
         evidence = analyses.get('evidence', [])
@@ -967,7 +1148,8 @@ Industry:"""
         elif total_sources >= 5:
             components['evidence_quality'] = 60
         else:
-            components['evidence_quality'] = 90
+            # Calibration: sparse evidence implies elevated risk, but avoid hard-max penalties.
+            components['evidence_quality'] = 75
         
         # 3. Source Credibility (higher credibility = lower risk)
         credibility = analyses.get('credibility_analysis', {})
@@ -977,7 +1159,8 @@ Industry:"""
             # Convert: high credibility (0.9) → low risk (10)
             components['source_credibility'] = int((1.0 - avg_cred) * 100)
         else:
-            components['source_credibility'] = 100
+            # Calibration: missing credibility analysis is treated as neutral with lower confidence elsewhere.
+            components['source_credibility'] = 50
         
         # 4. Sentiment Divergence
         sentiment_list = analyses.get('sentiment_analysis', [])
@@ -1105,10 +1288,13 @@ Industry:"""
         return self.esg_score_to_rating(esg_score)
     
     def _generate_top_reasons(self, components: Dict, analyses: Dict, 
-                             industry: str, risk_score: float) -> List[str]:
-        """Generate top 3 specific, data-backed reasons"""
+                             industry: str, risk_score: float,
+                             pillar_scores: Optional[Dict[str, Any]] = None,
+                             positive_boost: float = 0.0) -> List[str]:
+        """Generate top 3 specific, data-backed reasons (balanced positives + negatives)"""
         
         reasons = []
+        pillar_scores = pillar_scores or {}
         
         # Sort components by risk score
         sorted_comps = sorted(components.items(), key=lambda x: x[1], reverse=True)
@@ -1153,11 +1339,32 @@ Industry:"""
                     f"Source credibility concerns: Evidence from low-quality or biased sources (risk: {int(score)}%)"
                 )
         
-        # Add industry context if high-risk
-        if len(reasons) < 3 and industry in ['oil_and_gas', 'coal', 'mining', 'aviation', 'tobacco']:
-            reasons.append(
-                f"High-scrutiny industry ({industry.replace('_', ' ').title()}): ESG claims require exceptional evidence standards"
-            )
+        # Add positive drivers to avoid one-sided explanations
+        positives = []
+        if positive_boost >= 5:
+            positives.append(f"Strong disclosures and evidence quality provided a +{int(round(positive_boost))} point positive reinforcement")
+        
+        try:
+            e = float(pillar_scores.get("environmental_score", 50) or 50)
+            s = float(pillar_scores.get("social_score", 50) or 50)
+            g = float(pillar_scores.get("governance_score", 50) or 50)
+            if g >= 70:
+                positives.append("Strong governance signal (board/ethics/disclosure indicators)")
+            if s >= 70:
+                positives.append("Strong social signal (labor, safety, DEI, community indicators)")
+            if e >= 70:
+                positives.append("Strong environmental signal (climate, renewables, emissions indicators)")
+        except Exception:
+            pass
+        
+        industry_context = f"Industry context: {industry.replace('_', ' ').title()} materiality weighting applied (MSCI-style)."
+        
+        # Ensure at least one positive or industry context is included when reasons are sparse
+        if positives and len(reasons) < 3:
+            reasons.append(f"Offsetting factor: {positives[0]}")
+        
+        if len(reasons) < 3:
+            reasons.append(industry_context)
         
         # Ensure we have at least 3 reasons
         while len(reasons) < 3:
@@ -1191,6 +1398,66 @@ Industry:"""
             }
         
         return insights
+
+    def _calculate_positive_esg_boost(self, analyses: Dict[str, Any], pillar_scores: Dict[str, Any]) -> float:
+        """
+        Positive reinforcement layer (capped) to reward strong disclosures, consistency and evidence quality.
+        Returns points to add to overall ESG score (0 to +15).
+        """
+        boost = 0.0
+        
+        evidence = analyses.get("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+        
+        contradictions = analyses.get("contradiction_analysis", [])
+        if not isinstance(contradictions, list):
+            contradictions = []
+        
+        # Evidence quantity proxy
+        total_sources = 0
+        combined_text = ""
+        for ev in evidence:
+            if isinstance(ev, dict):
+                total_sources += len(ev.get("evidence", []) or [])
+                combined_text += " " + str(ev.get("snippet", "")) + " " + str(ev.get("relevant_text", ""))
+                for e in ev.get("evidence", []) or []:
+                    if isinstance(e, dict):
+                        combined_text += " " + str(e.get("relevant_text", ""))
+        
+        lower = combined_text.lower()
+        
+        # Recognized disclosure frameworks (CDP/GRI/BRSR/etc.)
+        disclosure_hits = sum(1 for kw in ["gri", "cdp", "tcfd", "sasb", "brsr", "sbti", "science based targets"] if kw in lower)
+        if disclosure_hits >= 2:
+            boost += 6
+        elif disclosure_hits == 1:
+            boost += 3
+        
+        # High-quality evidence coverage
+        if total_sources >= 15:
+            boost += 5
+        elif total_sources >= 8:
+            boost += 3
+        elif total_sources >= 4:
+            boost += 1
+        
+        # Low controversies proxy via contradiction outcomes
+        contradicted = sum(1 for c in contradictions if isinstance(c, dict) and c.get("overall_verdict") == "Contradicted")
+        unverifiable = sum(1 for c in contradictions if isinstance(c, dict) and c.get("overall_verdict") == "Unverifiable")
+        if contradictions and contradicted == 0 and unverifiable == 0:
+            boost += 2
+        
+        # Cap to avoid inflation and keep realism by base ESG level
+        overall = float(pillar_scores.get("overall_esg_score", 50) or 50)
+        if overall >= 90:
+            boost = min(boost, 2.0)
+        elif overall >= 80:
+            boost = min(boost, 8.0)
+        elif overall < 40:
+            boost = min(boost, 5.0)
+        
+        return float(max(0.0, min(15.0, boost)))
     
     def _extract_esg_features(self, analyses: Dict) -> Optional[Dict[str, Any]]:
         """

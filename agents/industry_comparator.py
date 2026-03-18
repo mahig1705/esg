@@ -68,9 +68,118 @@ from typing import Dict, Any, List, Optional
 from utils.enterprise_data_sources import enterprise_fetcher
 from core.llm_client import llm_client
 from core.evidence_cache import evidence_cache
+from core.safe_utils import normalize_industry_key, normalize_industry_label
 import json
+import os
 import numpy as np
 from datetime import datetime
+
+PEER_DB_PATH = "data/peer_database.json"
+
+STATIC_PEER_BASELINES = {
+    "banking": [
+        {"name": "HSBC", "ticker": "HSBC", "esg_score": 60.0, "greenwashing_risk_score": 40.0, "environmental_score": 58.0, "social_score": 62.0, "governance_score": 60.0, "rating": "BBB", "source": "baseline"},
+        {"name": "Barclays", "ticker": "BCS", "esg_score": 58.0, "greenwashing_risk_score": 42.0, "environmental_score": 55.0, "social_score": 60.0, "governance_score": 59.0, "rating": "BBB", "source": "baseline"},
+        {"name": "Citigroup", "ticker": "C", "esg_score": 55.0, "greenwashing_risk_score": 45.0, "environmental_score": 52.0, "social_score": 57.0, "governance_score": 56.0, "rating": "BB", "source": "baseline"},
+        {"name": "Bank of America", "ticker": "BAC", "esg_score": 52.0, "greenwashing_risk_score": 48.0, "environmental_score": 48.0, "social_score": 55.0, "governance_score": 53.0, "rating": "BB", "source": "baseline"},
+        {"name": "Wells Fargo", "ticker": "WFC", "esg_score": 44.0, "greenwashing_risk_score": 56.0, "environmental_score": 40.0, "social_score": 46.0, "governance_score": 46.0, "rating": "B", "source": "baseline"},
+    ],
+    "oil & gas": [
+        {"name": "BP", "ticker": "BP", "esg_score": 42.0, "greenwashing_risk_score": 68.0, "environmental_score": 38.0, "social_score": 44.0, "governance_score": 44.0, "rating": "B", "source": "baseline"},
+        {"name": "TotalEnergies", "ticker": "TTE", "esg_score": 50.0, "greenwashing_risk_score": 54.0, "environmental_score": 48.0, "social_score": 52.0, "governance_score": 50.0, "rating": "BB", "source": "baseline"},
+        {"name": "ExxonMobil", "ticker": "XOM", "esg_score": 38.0, "greenwashing_risk_score": 72.0, "environmental_score": 32.0, "social_score": 42.0, "governance_score": 40.0, "rating": "CCC", "source": "baseline"},
+        {"name": "Chevron", "ticker": "CVX", "esg_score": 41.0, "greenwashing_risk_score": 65.0, "environmental_score": 36.0, "social_score": 44.0, "governance_score": 43.0, "rating": "B", "source": "baseline"},
+    ],
+    "consumer goods": [
+        {"name": "Procter & Gamble", "ticker": "PG", "esg_score": 62.0, "greenwashing_risk_score": 38.0, "environmental_score": 60.0, "social_score": 64.0, "governance_score": 62.0, "rating": "BBB", "source": "baseline"},
+        {"name": "Nestle", "ticker": "NESN", "esg_score": 58.0, "greenwashing_risk_score": 46.0, "environmental_score": 55.0, "social_score": 60.0, "governance_score": 59.0, "rating": "BBB", "source": "baseline"},
+        {"name": "Reckitt", "ticker": "RKT", "esg_score": 55.0, "greenwashing_risk_score": 48.0, "environmental_score": 52.0, "social_score": 57.0, "governance_score": 56.0, "rating": "BB", "source": "baseline"},
+        {"name": "Colgate-Palmolive", "ticker": "CL", "esg_score": 60.0, "greenwashing_risk_score": 40.0, "environmental_score": 58.0, "social_score": 62.0, "governance_score": 60.0, "rating": "BBB", "source": "baseline"},
+    ],
+    "technology": [
+        {"name": "Microsoft", "ticker": "MSFT", "esg_score": 75.0, "greenwashing_risk_score": 28.0, "environmental_score": 80.0, "social_score": 72.0, "governance_score": 73.0, "rating": "AA", "source": "baseline"},
+        {"name": "Apple", "ticker": "AAPL", "esg_score": 70.0, "greenwashing_risk_score": 33.0, "environmental_score": 75.0, "social_score": 68.0, "governance_score": 67.0, "rating": "A", "source": "baseline"},
+        {"name": "Alphabet", "ticker": "GOOGL", "esg_score": 65.0, "greenwashing_risk_score": 38.0, "environmental_score": 70.0, "social_score": 63.0, "governance_score": 62.0, "rating": "A", "source": "baseline"},
+    ],
+    "general": [
+        {"name": "Average (general)", "ticker": "-", "esg_score": 50.0, "greenwashing_risk_score": 50.0, "environmental_score": 48.0, "social_score": 51.0, "governance_score": 51.0, "rating": "BB", "source": "baseline"},
+    ],
+}
+
+
+def save_peer_database(db: Dict[str, Any]):
+    os.makedirs("data", exist_ok=True)
+    with open(PEER_DB_PATH, "w", encoding="utf-8") as f:
+        json.dump(db, f, indent=2)
+
+
+def initialize_peer_database():
+    print(f"[PeerDB] Writing to: {os.path.abspath(PEER_DB_PATH)}")
+    if not os.path.exists(PEER_DB_PATH):
+        db = {"peers": STATIC_PEER_BASELINES, "initialized": datetime.now().isoformat()}
+        save_peer_database(db)
+        print(f"[PeerDB] Initialized with {sum(len(v) for v in STATIC_PEER_BASELINES.values())} baseline peers")
+        return
+
+    # Upgrade existing DB with missing baseline sectors/rows.
+    try:
+        db = load_peer_database()
+        peers_map = db.setdefault("peers", {})
+        changed = False
+        for sector_key, baseline_rows in STATIC_PEER_BASELINES.items():
+            existing_rows = peers_map.setdefault(sector_key, [])
+            existing_names = {str(r.get("name", "")).lower() for r in existing_rows if isinstance(r, dict)}
+            for row in baseline_rows:
+                nm = str(row.get("name", "")).lower()
+                if nm and nm not in existing_names:
+                    existing_rows.append(row)
+                    changed = True
+        if changed:
+            save_peer_database(db)
+            print("[PeerDB] Existing database upgraded with missing baseline peers")
+    except Exception as e:
+        print(f"[PeerDB] Upgrade skipped: {e}")
+
+
+def load_peer_database() -> Dict[str, Any]:
+    if os.path.exists(PEER_DB_PATH):
+        try:
+            with open(PEER_DB_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    db = {"peers": STATIC_PEER_BASELINES}
+    save_peer_database(db)
+    return db
+
+
+def add_company_to_peer_database(company: str, industry: str, scores: Dict[str, Any]):
+    db = load_peer_database()
+    industry_key = normalize_industry_key(industry)
+    entry = {
+        "name": company,
+        "industry": normalize_industry_label(industry_key),
+        "esg_score": scores.get("esg_score"),
+        "greenwashing_risk_score": scores.get("greenwashing_risk_score"),
+        "environmental_score": scores.get("environmental_score"),
+        "social_score": scores.get("social_score"),
+        "governance_score": scores.get("governance_score"),
+        "rating": scores.get("esg_rating") or scores.get("rating"),
+        "source": "analyzed",
+        "last_updated": datetime.now().isoformat(),
+    }
+
+    peers_map = db.setdefault("peers", {})
+    peers_map.setdefault(industry_key, [])
+    industry_rows = peers_map[industry_key]
+
+    existing = next((p for p in industry_rows if str(p.get("name", "")).lower() == company.lower()), None)
+    if existing:
+        existing.update(entry)
+    else:
+        industry_rows.append(entry)
+
+    save_peer_database(db)
 
 # ChromaDB imports
 try:
@@ -87,6 +196,7 @@ class IndustryComparator:
         self.name = "Peer Comparison & Industry Benchmark Specialist"
         self.fetcher = enterprise_fetcher
         self.llm = llm_client
+        initialize_peer_database()
         
         # Initialize ChromaDB client for peer history
         self.peer_db_available = False
@@ -141,7 +251,7 @@ class IndustryComparator:
         
         try:
             # Normalize industry name
-            industry_normalized = industry.lower().replace(' ', '_').replace('&', 'and')
+            industry_normalized = normalize_industry_key(industry).replace(' ', '_')
             
             # Create document
             doc_id = f"{company}_{industry_normalized}_{datetime.now().strftime('%Y%m%d')}"
@@ -183,7 +293,7 @@ class IndustryComparator:
         
         try:
             # Normalize industry
-            industry_normalized = industry.lower().replace(' ', '_').replace('&', 'and')
+            industry_normalized = normalize_industry_key(industry).replace(' ', '_')
             
             # Query ChromaDB for peers in same industry
             results = self.peer_collection.get(
@@ -229,7 +339,7 @@ class IndustryComparator:
         Generate estimated peer scores using industry baseline + variance
         Used as fallback when insufficient real peer data exists
         """
-        industry_key = industry.lower().replace(' ', '_').replace('&', 'and')
+        industry_key = normalize_industry_key(industry).replace(' ', '_')
         
         # Get industry config
         industry_data = self.industry_config.get(industry_key, self.industry_config.get('unknown', {}))
@@ -335,8 +445,32 @@ class IndustryComparator:
         """
         print(f"\n📊 Generating dynamic peer comparison for {company} ({industry})...")
         
-        # Step 1: Try to get real peers from database
-        real_peers = self.get_real_peers_from_db(industry, exclude_company=company, max_peers=10)
+        # Step 1: Try persistent JSON peer database first.
+        industry_key = normalize_industry_key(industry)
+        peer_db = load_peer_database()
+        db_rows = (peer_db.get("peers", {}) or {}).get(industry_key, [])
+        real_peers = []
+        for row in db_rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("name", "")).lower() == company.lower():
+                continue
+            real_peers.append(
+                {
+                    "company": row.get("name"),
+                    "esg": row.get("esg_score"),
+                    "e": row.get("environmental_score"),
+                    "s": row.get("social_score"),
+                    "g": row.get("governance_score"),
+                    "rating": row.get("rating"),
+                    "source": row.get("source", "baseline"),
+                    "industry": normalize_industry_label(industry_key),
+                }
+            )
+
+        # ChromaDB fallback if persistent DB has no peers for the industry.
+        if not real_peers:
+            real_peers = self.get_real_peers_from_db(industry, exclude_company=company, max_peers=10)
         
         # Step 2: Determine if we need estimated peers
         use_estimates = len(real_peers) < 3
@@ -457,6 +591,21 @@ class IndustryComparator:
         print(f"   ✅ Peer table generated: {real_count} real + {estimated_count} estimated peers")
         if target_rank:
             print(f"   📊 Company Rank: {target_rank}")
+
+        # Persist analyzed company so peers survive across runs.
+        if esg_score is not None and pillar_scores:
+            add_company_to_peer_database(
+                company=company,
+                industry=industry_key,
+                scores={
+                    "esg_score": round(float(esg_score), 1),
+                    "greenwashing_risk_score": round(100.0 - float(esg_score), 1),
+                    "environmental_score": round(float(pillar_scores.get("environmental_score", 50)), 1),
+                    "social_score": round(float(pillar_scores.get("social_score", 50)), 1),
+                    "governance_score": round(float(pillar_scores.get("governance_score", 50)), 1),
+                    "esg_rating": self._calculate_rating(float(esg_score)),
+                },
+            )
         
         return {
             "available": True,

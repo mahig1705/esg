@@ -141,7 +141,68 @@ KNOWN_GREENWASHING_CASES: Dict[str, List[Dict]] = {
             "severity": "high",
             "regulatory_body": "InfluenceMap"
         }
+    ],
+    "jpmorgan chase": [
+        {
+            "claim_pattern": r"net.?zero|paris|alignment|sustainable|climate",
+            "description": "Left the Net Zero Banking Alliance (NZBA) in January 2024",
+            "contradiction_text": "Withdrew from net-zero banking coalition while publicly claiming Paris Agreement alignment",
+            "source": "NZBA / Reuters",
+            "year": 2024,
+            "severity": "high",
+            "regulatory_body": "NZBA"
+        },
+        {
+            "claim_pattern": r"climate action|net.?zero|engagement|transition",
+            "description": "Left Climate Action 100+ in February 2024",
+            "contradiction_text": "Exited world's largest investor climate engagement initiative",
+            "source": "Financial Times",
+            "year": 2024,
+            "severity": "high",
+            "regulatory_body": "Climate Action 100+"
+        },
+        {
+            "claim_pattern": r"2030|absolute|intensity|target|decarbon",
+            "description": "Shifted 2030 targets from absolute cuts to cost-based intensity metrics",
+            "contradiction_text": "Replaced absolute emission commitments with weaker intensity targets",
+            "source": "Bloomberg / JPMC 2024 Climate Report",
+            "year": 2024,
+            "severity": "high",
+            "regulatory_body": "Public disclosure"
+        },
+        {
+            "claim_pattern": r"net.?zero|fossil|sustainable|paris|climate",
+            "description": "$429B fossil fuel financing since Paris Agreement - ranked #1 globally",
+            "contradiction_text": "World's largest fossil fuel financier while claiming sustainable low-carbon alignment",
+            "source": "Banking on Climate Chaos 2023 - RAN/BankTrack/Sierra Club",
+            "year": 2023,
+            "severity": "high",
+            "regulatory_body": "NGO investigation"
+        },
+        {
+            "claim_pattern": r"expansion|fossil|transition|low.?carbon|financing",
+            "description": "Financed $38.1B in fossil fuel expansion in 2022 alone",
+            "contradiction_text": "Continued large-scale fossil fuel expansion financing",
+            "source": "Banking on Climate Chaos 2023",
+            "year": 2023,
+            "severity": "high",
+            "regulatory_body": "NGO investigation"
+        }
     ]
+}
+
+COMPANY_ALIASES = {
+    "JPMC": "JPMorgan Chase",
+    "JPM": "JPMorgan Chase",
+    "J.P. Morgan": "JPMorgan Chase",
+    "JP Morgan": "JPMorgan Chase",
+    "JPMorgan": "JPMorgan Chase",
+    "Shell PLC": "Shell",
+    "Shell plc": "Shell",
+    "BP plc": "BP",
+    "BP PLC": "BP",
+    "Unilever PLC": "Unilever",
+    "unilever": "Unilever",
 }
 
 def get_known_contradictions(company_name: str, claim_text: str) -> List[Dict]:
@@ -150,7 +211,9 @@ def get_known_contradictions(company_name: str, claim_text: str) -> List[Dict]:
     Returns list of matching contradiction dicts.
     Matching is case-insensitive on company name and regex on claim text.
     """
-    company_key = company_name.lower().strip()
+    alias_map = {k.lower(): v for k, v in COMPANY_ALIASES.items()}
+    canonical = alias_map.get(str(company_name).lower(), company_name)
+    company_key = canonical.lower().strip()
     # fuzzy match: check if any key is a substring of company name or vice versa
     matched_key = None
     for key in KNOWN_GREENWASHING_CASES:

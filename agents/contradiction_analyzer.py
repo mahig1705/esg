@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Dict, Any, List, Optional
 
 from core.llm_client import llm_client
@@ -7,10 +8,33 @@ from config.agent_prompts import CONTRADICTION_ANALYSIS_PROMPT
 
 logger = logging.getLogger(__name__)
 
+
+def clean_snippet_text(text: str) -> str:
+    """Fix common encoding/scrape artifacts in snippet text."""
+    if not text:
+        return text
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(text))
+    text = re.sub(r"(?<=[,.;:])(?=[A-Za-z])", " ", text)
+    text = re.sub(r"(net)\s*-?\s*(zero)", r"\1-\2", text, flags=re.IGNORECASE)
+    text = re.sub(r"(zero)\s*(by)", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(r"(climate)\s*(change)", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(r"(commitment)\s*(to)", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(r"(due)\s*(to)", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(r"(due)\s*(to)\s*(rising)", r"\1 \2 \3", text, flags=re.IGNORECASE)
+    text = re.sub(r"(rising)\s*(emissions)", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(r"(across)\s*(its)", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 class ContradictionAnalyzer:
     def __init__(self):
         self.name = "Contradiction & Verification Analyst"
         self.llm = llm_client
+        try:
+            total_cases = sum(len(v) for v in KNOWN_GREENWASHING_CASES.values())
+            print(f"[ContradictionDB] Loaded {total_cases} known cases for {len(KNOWN_GREENWASHING_CASES)} companies")
+        except Exception:
+            pass
 
     def analyze(self, claim_text: str, evidence: List[Dict[str, Any]], company: str = "") -> Dict[str, Any]:
         """Compatibility entrypoint used by wrappers."""
@@ -98,6 +122,7 @@ class ContradictionAnalyzer:
 
     def _normalize_known_case(self, case: Dict[str, Any]) -> Dict[str, Any]:
         desc = case.get("contradiction_text") or case.get("description") or "Known contradiction case"
+        desc = clean_snippet_text(desc)
         sev = str(case.get("severity", "LOW")).upper()
         return {
             "severity": sev,
@@ -117,7 +142,7 @@ class ContradictionAnalyzer:
                 continue
             contradictions.append({
                 "severity": "MEDIUM",
-                "description": description[:300],
+                "description": clean_snippet_text(description)[:300],
                 "source": item.get("source_name") or item.get("source") or "Evidence retrieval",
                 "source_url": item.get("url", ""),
                 "year": item.get("year"),
@@ -149,10 +174,19 @@ class ContradictionAnalyzer:
         for c in found:
             if not isinstance(c, dict):
                 continue
+            severity = str(c.get("severity", "LOW")).upper()
+            description = clean_snippet_text(c.get("description") or c.get("contradiction_text") or "Potential contradiction")
+            source = c.get("source", "LLM evidence synthesis")
+
+            if description in ("Potential contradiction", ""):
+                continue
+            if source == "LLM evidence synthesis" and severity not in ("HIGH", "MEDIUM"):
+                continue
+
             normalized.append({
-                "severity": str(c.get("severity", "LOW")).upper(),
-                "description": c.get("description") or c.get("contradiction_text") or "Potential contradiction",
-                "source": c.get("source", "LLM evidence synthesis"),
+                "severity": severity,
+                "description": description,
+                "source": source,
                 "source_url": c.get("source_url", ""),
                 "year": c.get("year"),
                 "confidence": c.get("confidence", "LOW"),
@@ -260,11 +294,12 @@ class ContradictionAnalyzer:
 
 # === Enhanced Contradiction Analysis ===
 try:
-    from data.known_cases import get_known_contradictions
+    from data.known_cases import get_known_contradictions, KNOWN_GREENWASHING_CASES
 except ImportError:
     def _fallback_get_known_contradictions(company_name: str, claim_text: str) -> list:
         return []
     get_known_contradictions = _fallback_get_known_contradictions
+    KNOWN_GREENWASHING_CASES = {}
 
 import requests
 import hashlib

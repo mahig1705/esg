@@ -51,6 +51,14 @@ class TemporalConsistencyAgent:
         self.EMISSION_TREND_WEIGHT = 0.30
         self.PEER_COMPARISON_WEIGHT = 0.20
         self.FINANCIAL_ALIGNMENT_WEIGHT = 0.15
+
+    @staticmethod
+    def _clean_years_list(years: List[Any]) -> List[int]:
+        current_year = datetime.now().year
+        return sorted(
+            [y for y in years if isinstance(y, int) and 2000 <= y < current_year],
+            reverse=True,
+        )
     
     def analyze_temporal_consistency(self, 
                                     company_name: str,
@@ -101,7 +109,7 @@ class TemporalConsistencyAgent:
                 "message": "No report claims by year available"
             }
 
-        years_for_trend = [y for y in report_claims_by_year.keys() if y != "unknown"]
+        years_for_trend = self._clean_years_list([y for y in report_claims_by_year.keys() if y != "unknown"])
         has_multi_year_claims = len(years_for_trend) >= 2
         
         # ============================================================
@@ -142,16 +150,31 @@ class TemporalConsistencyAgent:
 
         # Recent-report fallback mode: if claims are single-year, still produce temporal snapshot
         if not has_multi_year_claims:
-            snapshot = self._recent_report_temporal_snapshot(
-                company_name=company_name,
-                report_claims_by_year=report_claims_by_year,
-                agent_outputs=agent_outputs,
-                emissions_trend=emissions_trend,
-                esg_score_trend=esg_score_trend,
-                temporal_quality=temporal_quality,
-            )
-            print(f"\n📌 Recent-report temporal snapshot mode active")
-            return snapshot
+            # Calibration: With <2 years, temporal should be neutral and low-impact.
+            # We still return a structured output for explainability, but do not penalize the final ESG.
+            years = years_for_trend
+            latest_year = years[0] if years else "unknown"
+            print(f"\n📌 Single-year temporal mode: neutral scoring applied")
+            return {
+                "temporal_consistency_score": 50.0,
+                "temporal_mode": "snapshot",
+                "data_quality": temporal_quality.get("level", "low"),
+                "temporal_weight": 0.0,
+                "risk_level": "MODERATE",
+                "claim_trend": "insufficient_history",
+                "environmental_trend": emissions_trend or esg_score_trend or "unknown",
+                "temporal_inconsistency_detected": False,
+                "years_analyzed": [latest_year] if isinstance(latest_year, int) else [],
+                "evidence": [],
+                "explanation": "Temporal analysis neutral (only one year of report claims available).",
+                "status": "insufficient_history",
+                "timestamp": datetime.now().isoformat(),
+                "component_scores": {
+                    "note": "neutral_single_year",
+                    "emissions_signal": emissions_trend or "unknown",
+                    "esg_signal": esg_score_trend or "unknown"
+                }
+            }
         
         print(f"   Emissions trend: {emissions_trend}")
         print(f"   ESG score trend: {esg_score_trend}")
@@ -281,10 +304,7 @@ class TemporalConsistencyAgent:
             "claim_strength_by_year": claim_strength_by_year,
             "emissions_trend": emissions_trend or "unknown",
             "esg_score_trend": esg_score_trend or "unknown",
-            "years_analyzed": sorted(
-                [y for y in report_claims_by_year.keys() if y != "unknown"],
-                reverse=True
-            ),
+            "years_analyzed": years_for_trend,
             "evidence": evidence,
             "explanation": explanation,
             "status": "success",
@@ -298,7 +318,7 @@ class TemporalConsistencyAgent:
                                      esg_score_trend: Optional[str],
                                      has_multi_year_claims: bool) -> Dict[str, Any]:
         """Assess reliability of temporal signal and return recommended score weight."""
-        years = [y for y in report_claims_by_year.keys() if y != "unknown"]
+        years = self._clean_years_list([y for y in report_claims_by_year.keys() if y != "unknown"])
         claim_count = sum(len(v) for y, v in report_claims_by_year.items() if y != "unknown")
 
         quantified_claims = 0

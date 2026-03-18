@@ -1412,13 +1412,34 @@ def credibility_analysis_node(state: ESGState) -> ESGState:
         analyst = CredibilityAnalyst()
         
         print(f"🔒 Assessing source credibility...")
+
+        evidence = state.get("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+
+        # Normalize evidence items to CredibilityAnalyst expected schema.
+        # Many upstream agents store evidence as {title, snippet, source, url, relevant_text}.
+        normalized_evidence = []
+        for idx, ev in enumerate(evidence, start=1):
+            if not isinstance(ev, dict):
+                continue
+            normalized_evidence.append({
+                "source_id": ev.get("source_id") or ev.get("id") or idx,
+                "source_name": ev.get("source_name") or ev.get("source") or ev.get("publisher") or ev.get("title") or "Unknown",
+                "source_type": ev.get("source_type") or ev.get("reliability_tier") or "Web Source",
+                "url": ev.get("url") or ev.get("link") or "",
+                "relevant_text": ev.get("relevant_text") or ev.get("snippet") or ev.get("content") or "",
+                "data_freshness_days": ev.get("data_freshness_days", 999),
+            })
         
-        if hasattr(analyst, 'analyze'):
-            result = analyst.analyze(state["evidence"])
+        if hasattr(analyst, 'analyze_sources'):
+            result = analyst.analyze_sources(normalized_evidence)
+        elif hasattr(analyst, 'analyze'):
+            result = analyst.analyze(normalized_evidence)
         elif hasattr(analyst, 'assess'):
-            result = analyst.assess(state["evidence"])
+            result = analyst.assess(normalized_evidence)
         else:
-            result = {"credibility_score": 0.5, "confidence": 0.5}
+            result = {"overall_credibility": 50, "aggregate_metrics": {"average_credibility": 0.5, "total_sources": len(normalized_evidence)}, "confidence": 0.5}
         
         confidence = result.get("confidence", 0.75) if isinstance(result, dict) else 0.75
         print(f"✅ Credibility assessment complete")
@@ -1531,6 +1552,11 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
     
     state["agent_outputs"].append({
         "agent": "confidence_scoring",
+        "output": {
+            "average_confidence": avg_confidence,
+            "agent_count": agent_count,
+            "agents_included": sorted(unique_agent_confidences.keys()),
+        },
         "confidence": avg_confidence,
         "timestamp": datetime.now().isoformat()
     })
