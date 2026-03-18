@@ -126,17 +126,33 @@ class ESGGreenwashingDetectorLangGraph:
         print("⏳ Estimated time: 60-120 seconds (live API calls)")
         print("─" * 80)
         
-        # Execute workflow (with hard timeout to prevent indefinite hangs)
+        # Execute workflow with configurable timeout and graceful fallback.
         import concurrent.futures
-        WORKFLOW_TIMEOUT = int(os.getenv("ESG_WORKFLOW_TIMEOUT", "600"))  # default 10 min
+        WORKFLOW_TIMEOUT = int(os.getenv("ESG_WORKFLOW_TIMEOUT", "1800"))  # default 30 min
+        ALLOW_PARTIAL_ON_TIMEOUT = os.getenv("ESG_ALLOW_PARTIAL_ON_TIMEOUT", "1").lower() in {"1", "true", "yes"}
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
-                _future = _executor.submit(self.workflow.invoke, initial_state, config)
-                try:
-                    result = _future.result(timeout=WORKFLOW_TIMEOUT)
-                except concurrent.futures.TimeoutError:
-                    print(f"\n⚠️  Workflow timed out after {WORKFLOW_TIMEOUT}s. Cancelling...")
-                    raise TimeoutError(f"Analysis timed out after {WORKFLOW_TIMEOUT // 60} minutes")
+            _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            _future = _executor.submit(self.workflow.invoke, initial_state, config)
+            try:
+                timeout_arg = WORKFLOW_TIMEOUT if WORKFLOW_TIMEOUT > 0 else None
+                result = _future.result(timeout=timeout_arg)
+                _executor.shutdown(wait=True)
+            except concurrent.futures.TimeoutError:
+                print(f"\n⚠️  Workflow timed out after {WORKFLOW_TIMEOUT}s. Cancelling background task...")
+                _future.cancel()
+                _executor.shutdown(wait=False, cancel_futures=True)
+
+                if not ALLOW_PARTIAL_ON_TIMEOUT:
+                    raise TimeoutError(f"Analysis timed out after {max(1, WORKFLOW_TIMEOUT // 60)} minutes")
+
+                # Return a bounded partial result so callers still receive a report artifact.
+                result = dict(initial_state)
+                result["workflow_timeout"] = True
+                result["timeout_seconds"] = WORKFLOW_TIMEOUT
+                result["final_verdict"] = {
+                    "status": "TIMEOUT_PARTIAL",
+                    "message": f"Workflow exceeded timeout ({WORKFLOW_TIMEOUT}s); generated partial output.",
+                }
             
             print("\n" + "="*80)
             print("✅ LANGGRAPH ANALYSIS COMPLETE")
@@ -525,9 +541,10 @@ def run_esg_analysis(company: str, claim: str, industry: str) -> dict:
         app = build_phase2_graph()
         print("✅ Workflow ready\n")
         
-        # Run the graph (with timeout to prevent indefinite hangs)
+        # Run the graph with configurable timeout and graceful fallback.
         import concurrent.futures
-        WORKFLOW_TIMEOUT = int(os.getenv("ESG_WORKFLOW_TIMEOUT", "600"))
+        WORKFLOW_TIMEOUT = int(os.getenv("ESG_WORKFLOW_TIMEOUT", "1800"))
+        ALLOW_PARTIAL_ON_TIMEOUT = os.getenv("ESG_ALLOW_PARTIAL_ON_TIMEOUT", "1").lower() in {"1", "true", "yes"}
         print("🚀 Starting agent execution...\n")
         final_state = None
 
@@ -541,13 +558,27 @@ def run_esg_analysis(company: str, claim: str, industry: str) -> dict:
                     _final = node_output
             return _final
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
-            _future = _executor.submit(_run_stream)
-            try:
-                final_state = _future.result(timeout=WORKFLOW_TIMEOUT)
-            except concurrent.futures.TimeoutError:
-                print(f"\n⚠️  Workflow timed out after {WORKFLOW_TIMEOUT}s.")
-                raise TimeoutError(f"Analysis timed out after {WORKFLOW_TIMEOUT // 60} minutes")
+        _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        _future = _executor.submit(_run_stream)
+        try:
+            timeout_arg = WORKFLOW_TIMEOUT if WORKFLOW_TIMEOUT > 0 else None
+            final_state = _future.result(timeout=timeout_arg)
+            _executor.shutdown(wait=True)
+        except concurrent.futures.TimeoutError:
+            print(f"\n⚠️  Workflow timed out after {WORKFLOW_TIMEOUT}s. Cancelling background task...")
+            _future.cancel()
+            _executor.shutdown(wait=False, cancel_futures=True)
+
+            if not ALLOW_PARTIAL_ON_TIMEOUT:
+                raise TimeoutError(f"Analysis timed out after {max(1, WORKFLOW_TIMEOUT // 60)} minutes")
+
+            final_state = dict(initial_state)
+            final_state["workflow_timeout"] = True
+            final_state["timeout_seconds"] = WORKFLOW_TIMEOUT
+            final_state["final_verdict"] = {
+                "status": "TIMEOUT_PARTIAL",
+                "message": f"Workflow exceeded timeout ({WORKFLOW_TIMEOUT}s); generated partial output.",
+            }
 
         if final_state is None:
             final_state = initial_state
