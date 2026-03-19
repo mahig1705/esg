@@ -4,13 +4,13 @@ Handles contradictory evidence from multiple sources
 """
 
 from typing import Dict, Any, List
-from core.llm_client import llm_client
+from core.llm_call import call_llm
+import asyncio
 import json
 
 class ConflictResolver:
     def __init__(self):
         self.name = "Evidence Conflict Resolver"
-        self.llm = llm_client
     
     def resolve_conflicts(self, claim: Dict, evidence: List[Dict]) -> Dict[str, Any]:
         """
@@ -87,7 +87,10 @@ Which evidence is more reliable? Consider:
 
 Return JSON: {{"more_reliable": "supporting|contradicting", "reason": "brief explanation", "confidence": 0-100}}"""
 
-        response = self.llm.call_groq([{"role": "user", "content": prompt}], use_fast=True)
+        try:
+            response = asyncio.run(call_llm("conflict_resolution", prompt))
+        except Exception as e:
+            response = ""
         
         llm_analysis = self._parse_llm_response(response)
         

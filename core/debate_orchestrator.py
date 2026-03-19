@@ -5,16 +5,12 @@ Implements voting-based consensus mechanism
 import os
 from typing import List, Dict, Tuple
 from collections import Counter
-from langchain_groq import ChatGroq
 from core.state_schema import ESGState
+from core.llm_call import call_llm
+import asyncio
 
 class DebateOrchestrator:
     def __init__(self):
-        self.llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            temperature=0.7,  # Higher for diverse reasoning
-            api_key=os.getenv("GROQ_API_KEY")
-        )
         self.max_rounds = 3
         self.conflict_threshold = 0.3  # Agents must differ by 30% to trigger debate
     
@@ -181,10 +177,10 @@ Cite specific data points, timestamps, or regulatory violations if applicable.
 Provide a concise argument (3-4 sentences)."""
 
             try:
-                response = self.llm.invoke(prompt)
-                argument = response.content
+                argument = asyncio.run(call_llm("debate_orchestrator", prompt))
                 
-                round_arguments.append({
+                if argument:
+                    round_arguments.append({
                     "round": round_num + 1,
                     "agent": agent_name,
                     "position": position["verdict"],

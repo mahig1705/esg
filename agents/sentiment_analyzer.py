@@ -3,15 +3,16 @@ from typing import Dict, Any, List
 from textblob import TextBlob
 import re
 import logging
-from core.llm_client import llm_client
+from core.llm_call import call_llm
 from config.agent_prompts import SENTIMENT_ANALYSIS_PROMPT
+import asyncio
 
 logger = logging.getLogger(__name__)
 
 class SentimentAnalyzer:
     def __init__(self):
         self.name = "Sentiment & Linguistic Analysis Expert"
-        self.llm = llm_client
+        self.name = "Sentiment & Linguistic Analysis Expert"
         
         # Greenwashing buzzwords
         self.buzzwords = [
@@ -214,13 +215,8 @@ class SentimentAnalyzer:
         
         prompt = SENTIMENT_ANALYSIS_PROMPT.format(text=claim_text)
         
-        # Use fast Groq model
         try:
-            response = self.llm.call_groq(
-                [{"role": "user", "content": prompt}],
-                temperature=0.1,
-                use_fast=True
-            )
+            response = asyncio.run(call_llm("sentiment_analysis", prompt))
         except Exception as exc:
             logger.warning("Sentiment LLM call failed: %s", exc)
             return {

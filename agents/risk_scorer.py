@@ -6,7 +6,9 @@ Industry-adjusted risk scoring matching MSCI/Sustainalytics methodology
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from core.llm_client import llm_client
+from core.llm_call import call_llm
+import asyncio
+from config.agent_prompts import RISK_SCORING_PROMPT
 from core.pillar_factors_builder import build_pillar_factors
 import json
 import os
@@ -27,8 +29,7 @@ class RiskScorer:
     }
     
     def __init__(self):
-        self.name = "Greenwashing Risk Scoring & ESG Rating Specialist"
-        self.llm = llm_client
+        self.name = "Multi-Dimensional ESG Risk & Integrity Scorer"
         
         # Load ALL configuration from external file (NO HARDCODING)
         self.config = self._load_config()
@@ -1074,10 +1075,7 @@ Company: {company}
 Industry:"""
 
         try:
-            response = self.llm.call_groq(
-                [{"role": "user", "content": prompt}],
-                use_fast=True
-            )
+            response = asyncio.run(call_llm("risk_scoring", prompt))
             
             if response:
                 # Clean response

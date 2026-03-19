@@ -8,7 +8,6 @@ import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from urllib.parse import urlparse
-from core.llm_client import llm_client
 from core.vector_store import vector_store
 from utils.enterprise_data_sources import enterprise_fetcher
 from utils.web_search import classify_source
@@ -73,7 +72,6 @@ def _is_generic_source_name(name: str) -> bool:
 class EvidenceRetriever:
     def __init__(self):
         self.name = "Evidence Retrieval & Cross-Verification Specialist"
-        self.llm = llm_client
         self.vector_store = vector_store
         self.enterprise_fetcher = enterprise_fetcher
         from utils.free_data_sources import free_data_aggregator
@@ -476,23 +474,8 @@ class EvidenceRetriever:
         if not evidence or len(evidence) < 20:
             return "Neutral"
         
-        prompt = EVIDENCE_RETRIEVAL_PROMPT.format(
-            claim=claim[:200],
-            evidence=evidence[:500]
-        )
-        
-        # Use fast Groq model for speed
-        response = self.llm.call_groq(
-            [{"role": "user", "content": prompt}],
-            temperature=0,
-            use_fast=True
-        )
-        
-        if response and any(word in response for word in ["Supports", "Contradicts", "Neutral", "Partial"]):
-            for word in ["Supports", "Contradicts", "Partial", "Neutral"]:
-                if word in response:
-                    return word
-        
+        # LLM disabled as per instructions; using Pinecone/BM25 and simple keyword check implicitly.
+        # Fallback relationship
         return "Neutral"
     
     def _calculate_freshness(self, date_str: str) -> int:

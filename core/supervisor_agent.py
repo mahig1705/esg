@@ -4,17 +4,14 @@ Implements dynamic routing based on claim complexity
 """
 import os
 from typing import Literal
-from langchain_groq import ChatGroq
 from core.state_schema import ESGState
+from core.llm_call import call_llm
+import asyncio
 from core.evidence_cache import evidence_cache
 
 class SupervisorAgent:
     def __init__(self):
-        self.llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            temperature=0,
-            api_key=os.getenv("GROQ_API_KEY")
-        )
+        pass
     
     def assess_complexity(self, state: ESGState) -> ESGState:
         """
@@ -44,8 +41,8 @@ Examples:
 Return ONLY a single float between 0.0 and 1.0, nothing else."""
 
         try:
-            response = self.llm.invoke(prompt)
-            complexity = float(response.content.strip())
+            response = asyncio.run(call_llm("supervisor", prompt))
+            complexity = float(response.strip())
             
             # Clamp between 0 and 1
             complexity = max(0.0, min(1.0, complexity))

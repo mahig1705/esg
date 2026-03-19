@@ -217,8 +217,8 @@ def extract_promises(report_text: str, company_name: str = "") -> List[Dict]:
         return []
     
     try:
-        from core.llm_client import LLMClient
-        llm = LLMClient()
+        from core.llm_call import call_llm
+        import asyncio
     except ImportError:
         return _fallback_extract_promises(report_text, company_name)
     
@@ -253,9 +253,8 @@ def extract_promises(report_text: str, company_name: str = "") -> List[Dict]:
     
     result = None
     try:
-        # Notice we would theoretically set temperature=0 here if supported by call_with_fallback directly. 
-        # But we rely on the very strict prompt.
-        result = llm.call_with_fallback(prompt, use_gemini_first=True)
+        # We rely on the very strict prompt.
+        result = asyncio.run(call_llm("esg_mismatch", prompt))
     except Exception as e:
         print(f"LLM Call failed: {e}")
         

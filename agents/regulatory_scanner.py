@@ -16,7 +16,8 @@ import json
 import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from core.llm_client import llm_client
+from core.llm_call import call_llm
+import asyncio
 from core.vector_store import vector_store
 from config.agent_prompts import REGULATORY_COMPLIANCE_PROMPT
 
@@ -28,8 +29,7 @@ class RegulatoryHorizonScanner:
     """
     
     def __init__(self):
-        self.name = "Regulatory Horizon Scanner"
-        self.llm = llm_client
+        self.name = "Regulatory Horizon & Policy Disclosure Scanner"
         self.vector_store = vector_store
         
         # Initialize regulation database
@@ -616,10 +616,10 @@ EVIDENCE:
 
 Analyze regulatory compliance risks. Return JSON."""
         
-        response = self.llm.call_with_fallback(prompt, use_gemini_first=True)
-        
-        if not response:
-            return {"analysis_performed": False, "error": "LLM call failed"}
+        try:
+            response = asyncio.run(call_llm("regulatory_scanning", prompt, system=REGULATORY_COMPLIANCE_PROMPT))
+        except Exception as e:
+            return {"analysis_performed": False, "error": f"LLM call failed: {e}"}
         
         try:
             cleaned = re.sub(r'```\s*json?\s*', '', response)

@@ -13,8 +13,9 @@ Supports: Global companies + Indian enterprises (SEBI BRSR, MCA compliance)
 import json
 import re
 from typing import Dict, Any, List, Optional, Tuple
-from core.llm_client import llm_client
+from core.llm_call import call_llm
 from config.agent_prompts import CARBON_EXTRACTION_PROMPT
+import asyncio
 
 
 UNIT_MULTIPLIERS = {
@@ -98,7 +99,6 @@ class CarbonExtractor:
     
     def __init__(self):
         self.name = "Carbon Emissions Extraction Specialist"
-        self.llm = llm_client
         
         # Industry-level emissions baselines (order-of-magnitude only) used when disclosures are missing.
         # Purpose: prevent downstream "score collapse" due to missing data while clearly flagging low confidence.
@@ -1078,9 +1078,7 @@ class CarbonExtractor:
         
         claim_text = claim.get("claim_text", "") if claim else ""
         
-        prompt = f"""{CARBON_EXTRACTION_PROMPT}
-
-COMPANY: {company}
+        user_prompt = f"""COMPANY: {company}
 CLAIM BEING VERIFIED: {claim_text}
 
 EVIDENCE TO ANALYZE:
@@ -1088,7 +1086,11 @@ EVIDENCE TO ANALYZE:
 
 Extract ALL carbon emission data. Return ONLY valid JSON."""
         
-        response = self.llm.call_with_fallback(prompt, use_gemini_first=True)
+        try:
+            response = asyncio.run(call_llm("carbon_extraction", user_prompt, system=CARBON_EXTRACTION_PROMPT))
+        except Exception as e:
+            print(f"❌ LLM extraction failed: {e}")
+            return {}
         
         if not response:
             print("❌ LLM extraction failed")

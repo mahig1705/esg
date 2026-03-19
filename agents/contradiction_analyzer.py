@@ -3,8 +3,9 @@ import logging
 import re
 from typing import Dict, Any, List, Optional
 
-from core.llm_client import llm_client
+from core.llm_call import call_llm
 from config.agent_prompts import CONTRADICTION_ANALYSIS_PROMPT
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,6 @@ def clean_snippet_text(text: str) -> str:
 class ContradictionAnalyzer:
     def __init__(self):
         self.name = "Contradiction & Verification Analyst"
-        self.llm = llm_client
         try:
             total_cases = sum(len(v) for v in KNOWN_GREENWASHING_CASES.values())
             print(f"[ContradictionDB] Loaded {total_cases} known cases for {len(KNOWN_GREENWASHING_CASES)} companies")
@@ -160,7 +160,11 @@ class ContradictionAnalyzer:
             evidence=evidence_summary,
             claim_id="C1",
         )
-        response = self.llm.call_gemini(prompt, temperature=0, use_pro=True)
+        try:
+            response = asyncio.run(call_llm("contradiction_analysis", prompt))
+        except Exception as e:
+            logger.error(f"LLM call failed: {e}")
+            return []
         if not response:
             return []
 

@@ -1,7 +1,6 @@
 import json
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
-from core.llm_client import llm_client
 from utils.enterprise_data_sources import enterprise_fetcher
 from config.agent_prompts import HISTORICAL_ANALYSIS_PROMPT
 from core.evidence_cache import evidence_cache
@@ -9,7 +8,6 @@ from core.evidence_cache import evidence_cache
 class HistoricalAnalyst:
     def __init__(self):
         self.name = "Historical ESG Pattern & Controversy Analyst"
-        self.llm = llm_client
         self.fetcher = enterprise_fetcher
     
     def analyze_company_history(self, company: str) -> Dict[str, Any]:

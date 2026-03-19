@@ -4,8 +4,11 @@ import re
 import time
 import textwrap
 import traceback as _tb
+import asyncio
+import logging
 from urllib.parse import urlparse
 from datetime import datetime, timezone
+from core.carbon_validator import CarbonDataValidator
 from typing import Dict, Any, List, Tuple
 from core.safe_utils import safe_get, safe_number, parse_source_name, normalize_industry_label, normalize_industry_key
 
@@ -218,6 +221,12 @@ class ProfessionalReportGenerator:
         warnings = []
         generation_status = "success"
 
+        # Safety: define company/industry/ticker at method scope so sub-methods
+        # that inadvertently reference them as free variables won't crash.
+        company = str(state.get("company") or "Unknown").strip() or "Unknown"
+        industry = str(state.get("industry") or "Unknown").strip() or "Unknown"
+        ticker = str(state.get("ticker") or state.get("symbol") or "N/A").strip() or "N/A"
+
         try:
             stages_completed.append("structured_build")
             structured = self._build_structured_report(state)
@@ -427,9 +436,67 @@ class ProfessionalReportGenerator:
             compliance_results = []
         reg_gaps = [r for r in compliance_results if isinstance(r, dict) and len(r.get("gap_details", []) or []) > 0]
 
-        carbon = state.get("carbon_results") or state.get("carbon_extraction") or agents.get("carbon_extraction", {}).get("output", {}) or {}
-        if not isinstance(carbon, dict):
-            carbon = {}
+        raw_carbon = state.get("carbon_results") or state.get("carbon_extraction") or agents.get("carbon_extraction", {}).get("output", {}) or {}
+        if not isinstance(raw_carbon, dict):
+            raw_carbon = {}
+            
+        validator = CarbonDataValidator()
+        emissions_obj = raw_carbon.get("emissions") if isinstance(raw_carbon.get("emissions"), dict) else {}
+        scope1_obj = emissions_obj.get("scope1") if isinstance(emissions_obj.get("scope1"), dict) else {}
+        scope2_obj = emissions_obj.get("scope2") if isinstance(emissions_obj.get("scope2"), dict) else {}
+        scope3_obj = emissions_obj.get("scope3") if isinstance(emissions_obj.get("scope3"), dict) else {}
+        
+        flat_carbon = {
+            "scope1": scope1_obj.get("value") if isinstance(scope1_obj, dict) else None,
+            "scope2": scope2_obj.get("value") if isinstance(scope2_obj, dict) else None,
+            "scope3": (scope3_obj.get("total") or scope3_obj.get("value")) if isinstance(scope3_obj, dict) else None,
+            "data_year": scope1_obj.get("year") if isinstance(scope1_obj, dict) else None,
+            "data_quality": raw_carbon.get("data_quality", {}).get("overall_score", 0) if isinstance(raw_carbon.get("data_quality"), dict) else 0,
+            "source": scope1_obj.get("source", "PDF extraction") if isinstance(scope1_obj, dict) else "PDF extraction"
+        }
+        
+        validated_carbon = validator.validate(flat_carbon, company, industry, report_year=datetime.now().year)
+        
+        if not validated_carbon["validation"]["passed"]:
+            logger = logging.getLogger(__name__)
+            logger.warning("Carbon data rejected for %s | reasons: %s", company, validated_carbon["validation"]["rejection_reasons"])
+            try:
+                from core.carbon_retrieval import fetch_carbon_with_fallback
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop and loop.is_running():
+                    import threading
+                    _res = []
+                    def _run():
+                        _res.append(asyncio.run(
+                            fetch_carbon_with_fallback(company, ticker, industry, "US", datetime.now().year)
+                        ))
+                    _t = threading.Thread(target=_run)
+                    _t.start()
+                    _t.join()
+                    fallback_carbon = _res[0]
+                else:
+                    fallback_carbon = asyncio.run(
+                        fetch_carbon_with_fallback(company, ticker, industry, "US", datetime.now().year)
+                    )
+                validated_carbon = fallback_carbon
+            except Exception as e:
+                logger.error(f"Fallback fetch failed: {e}")
+
+        carbon = dict(raw_carbon)
+        if "emissions" not in carbon:
+            carbon["emissions"] = {}
+        carbon["emissions"]["scope1"] = {"value": validated_carbon.get("scope1"), "year": validated_carbon.get("data_year"), "source": validated_carbon.get("source")}
+        carbon["emissions"]["scope2"] = {"value": validated_carbon.get("scope2"), "year": validated_carbon.get("data_year"), "source": validated_carbon.get("source")}
+        carbon["emissions"]["scope3"] = {"total": validated_carbon.get("scope3"), "year": validated_carbon.get("data_year"), "source": validated_carbon.get("source")}
+        if "data_quality" not in carbon:
+            carbon["data_quality"] = {}
+        carbon["data_quality"]["overall_score"] = validated_carbon.get("data_quality", 0)
+        carbon["validation"] = validated_carbon.get("validation", {})
+        carbon["source_chain"] = validated_carbon.get("source_chain", [])
 
         citations = evidence.get("citations", []) or []
         premium = 0
@@ -754,32 +821,90 @@ class ProfessionalReportGenerator:
         section4.append(major)
 
         section5 = [major, "SECTION 8: CARBON EMISSIONS & CLIMATE DATA", major]
-        section5.append(f"  {'Scope':<12} {'Emissions (tCO2e)':<20} {'Year':<6} {'Source':<18} {'Quality':<10}")
-        section5.append("  " + "-" * 70)
-        missing_scopes = []
-        numeric_vals = []
-        quality_tier = str(safe_get(carbon, "data_quality", "data_confidence", default="Unknown") or "Unknown").title()
-        for name, row, key in [("Scope 1", scope1, "value"), ("Scope 2", scope2, "value"), ("Scope 3", scope3, "total")]:
-            value = row.get(key) if isinstance(row, dict) else None
-            if value is None and isinstance(row, dict):
-                value = row.get("value")
-            year = (row.get("year") if isinstance(row, dict) else None) or (row.get("reporting_year") if isinstance(row, dict) else None) or "N/A"
-            source = (row.get("source") if isinstance(row, dict) else None) or (row.get("data_source") if isinstance(row, dict) else None) or "PDF extraction"
-            quality = (row.get("confidence") if isinstance(row, dict) else None) or (row.get("data_confidence") if isinstance(row, dict) else None) or quality_tier
-            if isinstance(value, (int, float)):
-                numeric_vals.append(float(value))
-                vtxt = f"{int(value):,}"
+        carbon_validation = carbon.get("validation", {})
+        
+        if carbon_validation.get("passed") is False and carbon_validation.get("fallback_estimate"):
+            fb = carbon_validation["fallback_estimate"]
+            section5.extend([
+                "  ┌" + "─" * 57 + "┐",
+                "  │  CARBON DATA — ESTIMATED (primary source unavailable)   │",
+                "  │                                                         │",
+                "  │  Scope 1: Data not verified                             │",
+                "  │  Scope 2: Data not verified                             │",
+                "  │  Scope 3: Data not verified                             │",
+                "  │                                                         │",
+                f"  │  Industry benchmark estimate for {carbon_validation.get('floor_used', industry)[:19]:<19}:  │",
+                f"  │  Scope 1 typical range: {fb.get('scope1_estimated_low', 0)//1000000}M – {fb.get('scope1_estimated_high', 0)//1000000}M tCO2e/year        │",
+                "  │                                                         │",
+                "  │  Rejection reasons:                                     │"
+            ])
+            for r in carbon_validation.get("rejection_reasons", []):
+                wrapped_rs = textwrap.wrap(r, width=51)
+                for i, w in enumerate(wrapped_rs):
+                    prefix = "  │    - " if i == 0 else "  │      "
+                    section5.append(f"{prefix}{w:<51} │")
+            
+            sc = " → ".join(carbon.get("source_chain", ["CDP", "Company IR", "Regulatory filing"]))
+            section5.extend([
+                "  │                                                         │",
+                f"  │  Sources tried: {sc[:40]:<40}│",
+                "  │  All sources returned insufficient data.                │",
+                "  │                                                         │",
+                f"  │  To resolve: Upload {v['company'][:20]}'s latest Annual Report │",
+                "  │  or CDP submission PDF to get verified emissions data.  │",
+                "  └" + "─" * 57 + "┘"
+            ])
+            
+            v["quality_warnings"].append(
+                "Carbon data could not be verified from primary sources. "
+                "Emissions figures in this report are estimated ranges only. "
+                "Net-zero claim evaluation is INDICATIVE."
+            )
+            report_confidence = "TIER_2 (Indicative)"
+            v["report_confidence"] = "TIER_2 (Indicative)"
+            missing_scopes = ["Scope 1", "Scope 2", "Scope 3"]
+        else:
+            section5.append(f"  {'Scope':<12} {'Emissions (tCO2e)':<20} {'Year':<6} {'Source':<18} {'Quality':<10}")
+            section5.append("  " + "-" * 70)
+            missing_scopes = []
+            numeric_vals = []
+            quality_tier = str(safe_get(carbon, "data_quality", "data_confidence", default="Unknown") or "Unknown").title()
+            for name, row, key in [("Scope 1", scope1, "value"), ("Scope 2", scope2, "value"), ("Scope 3", scope3, "total")]:
+                value = row.get(key) if isinstance(row, dict) else None
+                if value is None and isinstance(row, dict):
+                    value = row.get("value")
+                year = (row.get("year") if isinstance(row, dict) else None) or (row.get("reporting_year") if isinstance(row, dict) else None) or "N/A"
+                source = (row.get("source") if isinstance(row, dict) else None) or (row.get("data_source") if isinstance(row, dict) else None) or "PDF extraction"
+                quality = (row.get("confidence") if isinstance(row, dict) else None) or (row.get("data_confidence") if isinstance(row, dict) else None) or quality_tier
+                if isinstance(value, (int, float)):
+                    numeric_vals.append(float(value))
+                    vtxt = f"{int(value):,}"
+                else:
+                    vtxt = "N/A"
+                    missing_scopes.append(name)
+                section5.append(f"  {name:<12} {vtxt:<20} {str(year):<6} {str(source)[:18]:<18} {str(quality)[:10]:<10}")
+            section5.append("  " + "-" * 70)
+            total_val = sum(numeric_vals) if numeric_vals else None
+            section5.append(f"  {'Total':<12} {(f'{int(total_val):,}' if isinstance(total_val, (int, float)) else 'N/A')}")
+            section5.append("  " + "-" * 70)
+            dq = self._safe_float(safe_get(carbon, "data_quality", "overall_score"), 0.0)
+            dq_conf = str(safe_get(carbon, "data_quality", "data_confidence", default="Low"))
+            
+            p_score = carbon_validation.get("validated_quality_score", dq)
+            if p_score >= 70:
+                badge = "[Verified]"
+            elif p_score >= 40:
+                badge = "[Indicative]"
             else:
-                vtxt = "N/A"
-                missing_scopes.append(name)
-            section5.append(f"  {name:<12} {vtxt:<20} {str(year):<6} {str(source)[:18]:<18} {str(quality)[:10]:<10}")
-        section5.append("  " + "-" * 70)
-        total_val = sum(numeric_vals) if numeric_vals else None
-        section5.append(f"  {'Total':<12} {(f'{int(total_val):,}' if isinstance(total_val, (int, float)) else 'N/A')}")
-        section5.append("  " + "-" * 70)
-        dq = self._safe_float(safe_get(carbon, "data_quality", "overall_score"), 0.0)
-        dq_conf = str(safe_get(carbon, "data_quality", "data_confidence", default="Low"))
-        section5.append(f"\n  Data Quality Score:   {int(dq)}/100 ({dq_conf} confidence)")
+                badge = ""
+                
+            section5.append(f"\n  Data Quality Score:   {int(p_score)}/100 ({dq_conf} confidence) {badge}")
+            
+            if carbon_validation.get("warnings"):
+                section5.append("")
+                for w in carbon_validation["warnings"]:
+                    section5.append(f"  ⚠ {w}")
+
         renewable_txt = self._fmt_pct(renewable_pct) if isinstance(renewable_pct, (int, float)) else "NOT DISCLOSED"
         section5.append(f"  Renewable Energy:     {renewable_txt} of operational electricity")
         section5.append(f"  Net-Zero Target:      {carbon.get('net_zero_target') or 'None declared'}")
@@ -3665,7 +3790,7 @@ KEY PERFORMANCE METRICS
                 used_baseline = bool(carbon_data.get("used_baseline_estimate", False))
                 note_prefix = "Estimated from industry baselines; underlying disclosures are missing for: " if used_baseline else "Missing scope disclosures: "
                 # If carbon is non-material to the sector, keep this note out of the main body.
-                if industry.lower().replace(" ", "_") in ["oil_and_gas", "coal", "mining", "aviation", "power", "cement", "steel", "energy", "utilities", "banking"]:
+                if v["industry"].lower().replace(" ", "_") in ["oil_and_gas", "coal", "mining", "aviation", "power", "cement", "steel", "energy", "utilities", "banking"]:
                     section += f"\nNote: {note_prefix}{', '.join(missing_scope_rows)}\n"
                 else:
                     section += f"\nNote (non-material carbon context): {', '.join(missing_scope_rows)}\n"
@@ -3767,7 +3892,7 @@ KEY PERFORMANCE METRICS
                         "aviation": 0.03, "manufacturing": 0.015, "technology": 0.005,
                         "finance": 0.001, "healthcare": 0.008,
                     }
-                    industry_key = industry.lower().replace(" ", "_").replace("&", "and")
+                    industry_key = v["industry"].lower().replace(" ", "_").replace("&", "and")
                     industry_avg = carbon_benchmarks.get(industry_key, 0.01)
                     status = "Above Avg" if carbon_intensity > industry_avg else "Below Avg"
                     section += f"| {'Carbon Intensity':<30} | {carbon_intensity:.6f} tCO2/${'':>8} | {status:<15} |\n"
@@ -3778,7 +3903,7 @@ KEY PERFORMANCE METRICS
                         "oil_and_gas": 0.002, "energy": 0.0015, "automotive": 0.001,
                         "manufacturing": 0.0008, "food_beverage": 0.003,
                     }
-                    industry_key = industry.lower().replace(" ", "_").replace("&", "and")
+                    industry_key = v["industry"].lower().replace(" ", "_").replace("&", "and")
                     industry_avg = water_benchmarks.get(industry_key, 0.001)
                     status = "Above Avg" if water_efficiency > industry_avg else "Below Avg"
                     section += f"| {'Water Intensity':<30} | {water_efficiency:.6f} L/${'':>10} | {status:<15} |\n"
@@ -3788,7 +3913,7 @@ KEY PERFORMANCE METRICS
                         "oil_and_gas": 0.003, "energy": 0.0025, "manufacturing": 0.002,
                         "technology": 0.0008, "finance": 0.0005,
                     }
-                    industry_key = industry.lower().replace(" ", "_").replace("&", "and")
+                    industry_key = v["industry"].lower().replace(" ", "_").replace("&", "and")
                     industry_avg = energy_benchmarks.get(industry_key, 0.0015)
                     status = "Above Avg" if energy_efficiency > industry_avg else "Below Avg"
                     section += f"| {'Energy Intensity':<30} | {energy_efficiency:.6f} kWh/${'':>8} | {status:<15} |\n"
@@ -3796,8 +3921,8 @@ KEY PERFORMANCE METRICS
                 section += "\n"
                 section += "Interpretation:\n"
                 section += "  • Lower intensity = Better environmental efficiency\n"
-                section += f"  • {company} carbon footprint per revenue dollar\n"
-                section += f"  • Benchmarked against {industry} sector averages\n\n"
+                section += f"  • {v['company']} carbon footprint per revenue dollar\n"
+                section += f"  • Benchmarked against {v['industry']} sector averages\n\n"
 
         if not has_carbon_data:
             section += "ENVIRONMENTAL METRICS\n"

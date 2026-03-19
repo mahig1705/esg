@@ -1,12 +1,13 @@
 import json
+import asyncio
 from typing import Dict, Any, List
-from core.llm_client import llm_client
+from core.evidence_cache import evidence_cache
 from config.agent_prompts import SOURCE_CREDIBILITY_PROMPT
+from core.llm_call import call_llm
 
 class CredibilityAnalyst:
     def __init__(self):
         self.name = "Source Credibility & Bias Analyst"
-        self.llm = llm_client
         
         # Base credibility scores by source type
         self.base_scores = {
@@ -84,61 +85,48 @@ class CredibilityAnalyst:
         }
     
     def _analyze_single_source(self, evidence: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze a single source for credibility and bias"""
+        """Analyze a single source for credibility and bias using LLM"""
         
         source_type = evidence.get('source_type', 'Web Source')
         source_name = evidence.get('source_name', 'Unknown')
         url = evidence.get('url', '')
         content = evidence.get('relevant_text', '')
         
-        # Get base credibility
-        base_credibility = self.base_scores.get(source_type, 0.50)
+        prompt = f"SOURCE: {source_name}\nTYPE: {source_type}\nURL: {url}\nCONTENT: {content[:2000]}"
         
-        # Apply adjustments
-        adjustments = []
-        final_score = base_credibility
-        
-        # Freshness bonus
-        freshness = evidence.get('data_freshness_days', 999)
-        if freshness < 180:  # Less than 6 months
-            adjustments.append("+0.05 (recent)")
-            final_score += 0.05
-        elif freshness > 1095:  # More than 3 years
-            adjustments.append("-0.10 (outdated)")
-            final_score -= 0.10
-        
-        # Detect paid content
-        paid_content = self._detect_paid_content(content, source_name)
-        if paid_content:
-            adjustments.append("-0.20 (sponsored)")
-            final_score -= 0.20
-        
-        # Company-controlled penalty
-        if source_type == "Company-Controlled" or "tesla.com" in url.lower():
-            adjustments.append("-0.15 (company source)")
-            final_score -= 0.15
-        
-        # Regulatory/Academic bonus
-        if source_type in ["Government/Regulatory", "Academic"]:
-            if any(term in content.lower() for term in ["study", "research", "analysis", "data"]):
-                adjustments.append("+0.05 (primary data)")
-                final_score += 0.05
-        
-        # Cap between 0 and 1
-        final_score = max(0.0, min(1.0, final_score))
-        
-        # Detect bias
-        bias_direction = self._detect_bias(content, source_type)
+        try:
+            response = asyncio.run(call_llm("credibility_analysis", prompt, system=SOURCE_CREDIBILITY_PROMPT))
+            if response:
+                import re
+                cleaned = re.sub(r'```\s*json?\s*', '', response)
+                cleaned = re.sub(r'```\s*', '', cleaned)
+                start = cleaned.find('{')
+                end = cleaned.rfind('}') + 1
+                if start != -1 and end > start:
+                    llm_result = json.loads(cleaned[start:end])
+                else:
+                    llm_result = json.loads(cleaned)
+            else:
+                llm_result = {}
+        except Exception as e:
+            print(f"      ⚠️ LLM credibility analysis failed: {e}")
+            llm_result = {}
+            
+        base_cred = llm_result.get("base_credibility", self.base_scores.get(source_type, 0.50))
+        final_score = llm_result.get("final_credibility_score", base_cred)
+        paid = llm_result.get("paid_content_detected", False)
+        bias = llm_result.get("bias_direction", "Neutral")
+        adjustments = llm_result.get("adjustments", [])
         
         return {
             "source_id": evidence.get('source_id'),
             "source_name": source_name,
             "source_type": source_type,
-            "base_credibility": base_credibility,
+            "base_credibility": base_cred,
             "adjustments": adjustments,
             "final_credibility_score": round(final_score, 2),
-            "paid_content_detected": paid_content,
-            "bias_direction": bias_direction,
+            "paid_content_detected": paid,
+            "bias_direction": bias,
             "url": url
         }
     

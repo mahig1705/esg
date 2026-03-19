@@ -8,7 +8,8 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
-from core.llm_client import llm_client
+import asyncio
+from core.llm_call import call_llm
 
 # Try importing yfinance
 try:
@@ -27,7 +28,7 @@ class FinancialAnalyst:
     
     def __init__(self):
         self.name = "ESG-Financial Correlation Analyst"
-        self.llm = llm_client
+        self.name = "ESG-Financial Correlation Analyst"
         
         # Stock symbol mappings (extend as needed)
         self.symbol_map = {
@@ -785,7 +786,7 @@ Return ONLY valid JSON:
 }}"""
 
         try:
-            response = self.llm.call_with_fallback(prompt, use_gemini_first=False)
+            response = asyncio.run(call_llm("financial_analysis", prompt))
             
             if response:
                 # Extract JSON
