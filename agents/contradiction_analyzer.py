@@ -137,7 +137,13 @@ class ContradictionAnalyzer:
     def _extract_contradictions_from_evidence(self, evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         contradictions = []
         for item in evidence or []:
-            description = item.get("snippet") or item.get("relevant_text") or item.get("title") or ""
+            description = (
+                item.get("full_text")
+                or item.get("relevant_text")
+                or item.get("snippet")
+                or item.get("title")
+                or ""
+            )
             if not description:
                 continue
             contradictions.append({
@@ -155,6 +161,27 @@ class ContradictionAnalyzer:
         self, claim: str, evidence: List[Dict[str, Any]], temperature: float = 0
     ) -> List[Dict[str, Any]]:
         evidence_summary = self._prepare_evidence_summary(evidence)
+        
+        temporal_violations = [
+            e for e in evidence
+            if e.get("origin") == "temporal_analysis"
+        ]
+        
+        if temporal_violations:
+            violations_text = "\n".join([
+                f"[{e.get('type','Violation')} - "
+                f"Year: {e.get('year','Unknown')} - "
+                f"Source: {e.get('source','')}]: {e.get('text','')}"
+                for e in temporal_violations
+            ])
+            evidence_summary = (
+                evidence_summary
+                + "\n\nADDITIONAL VERIFIED VIOLATIONS FROM REGULATORY DATABASES:\n"
+                + violations_text
+            )
+            
+        print("CONTRADICTION EVIDENCE SENT:", evidence_summary[:800])
+        
         prompt = CONTRADICTION_ANALYSIS_PROMPT.format(
             claim=claim,
             evidence=evidence_summary,
@@ -179,7 +206,7 @@ class ContradictionAnalyzer:
             if not isinstance(c, dict):
                 continue
             severity = str(c.get("severity", "LOW")).upper()
-            description = clean_snippet_text(c.get("description") or c.get("contradiction_text") or "Potential contradiction")
+            description = clean_snippet_text(c.get("description") or c.get("contradiction_text") or c.get("aspect") or c.get("evidence_shows") or "Potential contradiction")
             source = c.get("source", "LLM evidence synthesis")
 
             if description in ("Potential contradiction", ""):
@@ -241,8 +268,15 @@ class ContradictionAnalyzer:
         for source_type, items in by_type.items():
             summary_parts.append(f"\n{source_type} Sources:")
             for ev in items[:5]:  # Top 5 per type
+                text = (
+                    ev.get("full_text")
+                    or ev.get("relevant_text")
+                    or ev.get("snippet")
+                    or ev.get("title")
+                    or ""
+                )
                 summary_parts.append(
-                    f"- {ev.get('source_name')}: {ev.get('relevant_text')[:200]}"
+                    f"- {ev.get('source_name')}: {text[:200]}"
                 )
         return "\n".join(summary_parts)
 

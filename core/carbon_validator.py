@@ -40,6 +40,38 @@ class CarbonDataValidator:
             "fallback_estimate": None,
             "validated_quality_score": 0
         }
+
+        scope1 = carbon_data.get("scope1")
+        scope2 = carbon_data.get("scope2")
+        scope3 = carbon_data.get("scope3")
+
+        # Treat combined Scope 1+2 totals as real extracted data signals.
+        emissions_detail = carbon_data.get("emissions_detail", {})
+        total_combined = (
+            (emissions_detail.get("total") or {}).get("scope1_2")
+            or (emissions_detail.get("total") or {}).get("all_scopes")
+        )
+
+        truly_null = (
+            scope1 is None
+            and scope2 is None
+            and scope3 is None
+            and total_combined is None
+        )
+
+        if truly_null:
+            result["validation"]["rejection_reasons"].append(
+                "All carbon scope values are null and no combined total was found. "
+                "PDF chunks may not contain emissions data, or the ESG section filter "
+                "excluded the relevant pages."
+            )
+            result["validation"]["fallback_triggered"] = True
+            floors = self._get_floors(industry)
+            result["validation"]["floor_used"] = industry if industry in self._load_all_floors() else "Default"
+            result["validation"]["fallback_estimate"] = self._build_fallback(
+                company, industry, floors
+            )
+            return result
         
         floors = self._get_floors(industry)
         result["validation"]["floor_used"] = industry if industry in self._load_all_floors() else "Default"
@@ -59,7 +91,6 @@ class CarbonDataValidator:
             )
 
         # CHECK 2: Scope 1 floor check (most critical)
-        scope1 = carbon_data.get("scope1")
         if scope1 is None or scope1 == 0:
             result["validation"]["rejection_reasons"].append(
                 f"Scope 1 is missing or zero. Cannot evaluate net-zero claim "
@@ -91,13 +122,48 @@ class CarbonDataValidator:
                 )
 
         # CHECK 4: Scope 3 completeness (for net-zero claims)
-        scope3 = carbon_data.get("scope3")
-        if scope3 and scope3 < (scope1 or 0):
-            result["validation"]["warnings"].append(
-                f"Scope 3 ({scope3:,.0f}) is LESS than Scope 1 ({scope1:,.0f}). "
-                f"For most industries, Scope 3 is 5-20x larger than Scope 1. "
-                f"Possible incomplete Scope 3 calculation."
-            )
+        if scope1 and scope3 is not None and scope3 > 0:
+            ratio = scope3 / scope1
+            is_finance = industry in ("Banking / Finance", "Insurance")
+
+            if ratio < 0.0001 and not is_finance:
+                # Physically impossible - almost certainly unit error
+                corrected_kt = scope3 * 1_000
+                corrected_mt = scope3 * 1_000_000
+
+                if corrected_kt / scope1 > 0.0001:
+                    hint = (
+                        f"Likely ktCO2e unit error. "
+                        f"Corrected: {corrected_kt:,.0f} tCO2e "
+                        f"({corrected_kt/scope1:.1%} of Scope 1)."
+                    )
+                    result["scope3_corrected"] = corrected_kt
+                    result["scope3_correction_unit"] = "ktCO2e"
+                elif corrected_mt / scope1 > 0.01:
+                    hint = (
+                        f"Likely MtCO2e unit error. "
+                        f"Corrected: {corrected_mt:,.0f} tCO2e."
+                    )
+                    result["scope3_corrected"] = corrected_mt
+                    result["scope3_correction_unit"] = "MtCO2e"
+                else:
+                    hint = "Cannot auto-correct - manual review required."
+                    result["scope3_corrected"] = None
+
+                result["validation"]["rejection_reasons"].append(
+                    f"Scope 3 ({scope3:,.2f} tCO2e) is {ratio:.6%} of "
+                    f"Scope 1 ({scope1:,.0f} tCO2e). "
+                    f"Physically implausible for {industry}. {hint}"
+                )
+
+            elif ratio < 1.0 and not is_finance:
+                # Smaller than Scope 1 but not impossibly so - warn only
+                result["validation"]["warnings"].append(
+                    f"Scope 3 ({scope3:,.0f}) is less than "
+                    f"Scope 1 ({scope1:,.0f}). "
+                    f"For most industries Scope 3 is 5-20x larger. "
+                    f"Possible incomplete calculation (check category coverage)."
+                )
 
         # CHECK 5: Data quality score threshold
         if carbon_data.get("data_quality", 0) < 40:

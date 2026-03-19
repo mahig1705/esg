@@ -22,6 +22,63 @@ from core.vector_store import vector_store
 from config.agent_prompts import REGULATORY_COMPLIANCE_PROMPT
 
 
+def calculate_compliance_score(compliance_results: list[dict]) -> dict:
+    """
+    Proportional compliance score with materiality-weighted gap penalties.
+
+    Each item in compliance_results must have:
+      status:      "COMPLIANT" | "GAP" | "PARTIAL" | "UNKNOWN"
+      materiality: "HIGH" | "MEDIUM" | "LOW"
+
+    Returns dict with score (0-100), risk_level, counts, breakdown string.
+    """
+    if not compliance_results:
+        return {
+            "score": 0,
+            "risk_level": "High",
+            "compliant_count": 0,
+            "gap_count": 0,
+            "total_count": 0,
+            "score_breakdown": "No frameworks checked",
+        }
+
+    total = len(compliance_results)
+    compliant = sum(1 for r in compliance_results if r.get("status") == "COMPLIANT")
+    partial = sum(1 for r in compliance_results if r.get("status") == "PARTIAL")
+    gaps = [r for r in compliance_results if r.get("status") == "GAP"]
+    gap_count = len(gaps)
+
+    base_score = ((compliant + (partial * 0.5)) / total) * 100
+
+    penalty_map = {"HIGH": 15, "MEDIUM": 8, "LOW": 3}
+    penalty = sum(penalty_map.get(g.get("materiality", "MEDIUM"), 8) for g in gaps)
+
+    final_score = max(0, round(base_score - penalty))
+
+    if final_score >= 75:
+        risk_level = "Low"
+    elif final_score >= 45:
+        risk_level = "Medium"
+    else:
+        risk_level = "High"
+
+    breakdown = (
+        f"{compliant}/{total} frameworks compliant "
+        f"(+{round(base_score)}pts base) "
+        f"minus {gap_count} gap penalties (-{penalty}pts) "
+        f"= {final_score}/100"
+    )
+
+    return {
+        "score": final_score,
+        "risk_level": risk_level,
+        "compliant_count": compliant,
+        "gap_count": gap_count,
+        "total_count": total,
+        "score_breakdown": breakdown,
+    }
+
+
 class RegulatoryHorizonScanner:
     """
     ESG Regulatory Compliance Scanner
@@ -439,7 +496,7 @@ class RegulatoryHorizonScanner:
         regulatory_risks = self._identify_regulatory_risks(compliance_results)
         
         # 5. Generate compliance score
-        compliance_score = self._calculate_compliance_score(compliance_results)
+        score_result = calculate_compliance_score(compliance_results)
         
         result = {
             "company": company,
@@ -449,15 +506,21 @@ class RegulatoryHorizonScanner:
             "compliance_results": compliance_results,
             "llm_analysis": llm_analysis,
             "regulatory_risks": regulatory_risks,
-            "compliance_score": compliance_score,
+            "compliance_score": score_result,
             "recommendations": self._generate_compliance_recommendations(compliance_results),
             "upcoming_regulations": self._get_upcoming_regulations(jurisdiction)
         }
+
+        result["risk_level"] = score_result["risk_level"]
+        result["gaps"] = score_result["gap_count"]
+        result["total_regulations"] = score_result["total_count"]
+        result["compliant_regulations"] = score_result["compliant_count"]
+        result["score_breakdown"] = score_result["score_breakdown"]
         
         print(f"\n✅ Regulatory scan complete:")
         print(f"   Applicable regulations: {len(applicable_regs)}")
-        print(f"   Compliance score: {compliance_score['score']}/100")
-        print(f"   Risk level: {compliance_score['risk_level']}")
+        print(f"   Compliance score: {score_result['score']}/100")
+        print(f"   Risk level: {score_result['risk_level']}")
         
         return result
     
@@ -657,64 +720,8 @@ Analyze regulatory compliance risks. Return JSON."""
         return risks
 
     def _calculate_compliance_score(self, compliance_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Calculate overall compliance score and derived risk level."""
-        if not compliance_results:
-            return {
-                "score": 0,
-                "risk_level": "Unknown",
-                "gaps": 0,
-                "total_regulations": 0,
-                "compliant_regulations": 0,
-            }
-
-        total = len(compliance_results)
-        gaps = 0
-        compliant = 0
-        high_risk_gaps = 0
-        medium_risk_gaps = 0
-        critical_gaps = 0
-
-        for result in compliance_results:
-            gap_count = len(result.get("gap_details", []) or [])
-            if gap_count > 0:
-                gaps += 1
-                status = str(result.get("compliance_status", "")).lower()
-                if "non-compliant" in status:
-                    high_risk_gaps += 1
-                else:
-                    medium_risk_gaps += 1
-                if bool(result.get("critical_gap")):
-                    critical_gaps += 1
-            else:
-                compliant += 1
-
-        base_score = int((compliant / total) * 100)
-        penalty = (high_risk_gaps * 15) + (medium_risk_gaps * 8) + (critical_gaps * 30)
-        score = max(0, base_score - penalty)
-
-        if score >= 70:
-            risk_level = "Low"
-        elif score >= 40:
-            risk_level = "Medium"
-        else:
-            risk_level = "High"
-
-        if gaps > 0 and score == 100:
-            raise ValueError(
-                f"Compliance score inconsistency: score=100 but gaps={gaps}. "
-                f"Check gap_details population in regulation scan."
-            )
-
-        return {
-            "score": score,
-            "risk_level": risk_level,
-            "gaps": gaps,
-            "total_regulations": total,
-            "compliant_regulations": compliant,
-            "high_risk_gaps": high_risk_gaps,
-            "medium_risk_gaps": medium_risk_gaps,
-            "critical_gaps": critical_gaps,
-        }
+        """Backward-compatible class method wrapper for module-level score function."""
+        return calculate_compliance_score(compliance_results)
 
     def _generate_compliance_recommendations(self, compliance_results: List[Dict]) -> List[str]:
         """Generate actionable compliance recommendations"""
@@ -785,11 +792,12 @@ def compute_compliance_score(regulation_results: list) -> dict:
     if not regulation_results:
         return {
             "score": 0,
-            "risk_level": "Unknown",
+            "risk_level": "High",
             "per_regulation_status": [],
             "gaps": 0,
             "total_regulations": 0,
             "compliant_regulations": 0,
+            "score_breakdown": "No frameworks checked",
         }
 
     total = len(regulation_results)
@@ -818,42 +826,28 @@ def compute_compliance_score(regulation_results: list) -> dict:
             "gaps": gap_details,
         })
 
-    compliant_count = total - gaps
-    high_risk_gaps = 0
-    medium_risk_gaps = 0
-    critical_gaps = 0
+    # Build canonical list for the shared proportional scoring logic.
+    canonical_results = []
     for r in regulation_results:
         gap_details = r.get("gap_details") if isinstance(r, dict) else []
         if gap_details is None:
             gap_details = r.get("gaps_found", []) if isinstance(r, dict) else []
         if not isinstance(gap_details, list):
             gap_details = [str(gap_details)] if gap_details else []
-        if not gap_details:
-            continue
-        compliance_status = str((r or {}).get("compliance_status", "")).lower()
-        if "non-compliant" in compliance_status:
-            high_risk_gaps += 1
-        else:
-            medium_risk_gaps += 1
-        if bool((r or {}).get("critical_gap")):
-            critical_gaps += 1
 
-    base = int((compliant_count / total) * 100)
-    penalty = (high_risk_gaps * 15) + (medium_risk_gaps * 8) + (critical_gaps * 30)
-    score = max(0, base - penalty)
+        status = "GAP" if gap_details else "COMPLIANT"
+        materiality = "HIGH" if bool((r or {}).get("critical_gap")) else "MEDIUM"
+        canonical_results.append({"status": status, "materiality": materiality})
 
-    if score >= 70:
+    score_payload = calculate_compliance_score(canonical_results)
+    compliant_count = score_payload["compliant_count"]
+    score = score_payload["score"]
+    if score >= 75:
         risk_level = "Low"
-    elif score >= 40:
+    elif score >= 45:
         risk_level = "Medium"
     else:
         risk_level = "High"
-
-    if gaps > 0 and score == 100:
-        raise ValueError(
-            f"Compliance score inconsistency: score=100 but gaps={gaps}. "
-            f"Check gap_details population in regulation scan."
-        )
 
     return {
         "score": score,
@@ -862,13 +856,8 @@ def compute_compliance_score(regulation_results: list) -> dict:
         "gaps": gaps,
         "total_regulations": total,
         "compliant_regulations": compliant_count,
-        "high_risk_gaps": high_risk_gaps,
-        "medium_risk_gaps": medium_risk_gaps,
-        "critical_gaps": critical_gaps,
+        "score_breakdown": score_payload["score_breakdown"],
     }
-
-# Alias for backward compatibility with tests and other modules
-calculate_compliance_score = compute_compliance_score
 
 
 def detect_regulation_gaps(company_name: str, claim_text: str, regulation_name: str, carbon_data: dict = None) -> dict:

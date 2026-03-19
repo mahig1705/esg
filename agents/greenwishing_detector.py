@@ -178,7 +178,13 @@ class GreenwishingDetector:
         texts = []
         for ev in evidence[:15]:
             title = ev.get("title", "")
-            snippet = ev.get("snippet", ev.get("relevant_text", ""))
+            snippet = (
+                ev.get("full_text")
+                or ev.get("relevant_text")
+                or ev.get("snippet")
+                or ev.get("title")
+                or ""
+            )
             texts.append(f"{title}: {snippet}")
         return "\n\n".join(texts)[:10000]
 

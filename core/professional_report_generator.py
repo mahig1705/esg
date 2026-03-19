@@ -302,6 +302,75 @@ class ProfessionalReportGenerator:
             return f"{float(value):.1f}{suffix}"
         return f"N/A{suffix}" if suffix else "N/A"
 
+    def _resolve_floor_label(self, carbon_validation: Any, industry_label: str) -> str:
+        """Resolve a printable industry label for fallback carbon estimates."""
+        floor_used = carbon_validation.get("floor_used") if isinstance(carbon_validation, dict) else None
+        if floor_used is None:
+            return str(industry_label or "Unknown").strip() or "Unknown"
+        floor_label = str(floor_used).strip()
+        return floor_label or (str(industry_label or "Unknown").strip() or "Unknown")
+
+    def _render_esg_mismatch_section(self, state: Dict[str, Any], major: str) -> List[str]:
+        """Render a dedicated mismatch section so it is always visible in text reports."""
+        section = [major, "SECTION 12: ESG MISMATCH DETECTOR", major]
+        mismatch = state.get("esg_mismatch_analysis")
+
+        if not isinstance(mismatch, dict) or not mismatch:
+            section.append("No ESG mismatch analysis payload was provided for this run.")
+            section.append(major)
+            return section
+
+        company = str(mismatch.get("Company Analyzed") or state.get("company") or "Unknown").strip() or "Unknown"
+        overall = str(mismatch.get("Overall Greenwashing Risk") or mismatch.get("overall_risk_level") or "N/A").strip() or "N/A"
+        summary = str(mismatch.get("Executive Summary") or mismatch.get("summary") or "No mismatch summary available.").strip()
+
+        section.append(f"Company analyzed: {company}")
+        section.append(f"Mismatch risk level: {overall}")
+        section.append("")
+        section.append("Summary:")
+        section.append(self._wrap_paragraph(summary, width=80))
+        section.append("")
+
+        future = mismatch.get("1. Future Commitments & Progress") or mismatch.get("future_commitments") or []
+        if not isinstance(future, list):
+            future = []
+
+        gaps = mismatch.get("2. Past Promise-Implementation Gaps (Mismatches)") or mismatch.get("past_gaps") or []
+        if not isinstance(gaps, list):
+            gaps = []
+
+        if future:
+            section.append("Future commitments and progress:")
+            for idx, item in enumerate(future[:3], start=1):
+                if not isinstance(item, dict):
+                    continue
+                pledge = str(item.get("Pledge") or item.get("pledge") or "Unspecified pledge").strip()
+                status = str(item.get("Status Trend") or item.get("status") or "Under verification").strip()
+                progress = str(item.get("Progress/Trend") or item.get("progress") or "No progress detail provided").strip()
+                section.append(f"  {idx}. Pledge: {pledge}")
+                section.append(f"     Status: {status} | Progress: {progress}")
+            section.append("")
+
+        if gaps:
+            section.append("Past promise-implementation gaps:")
+            for idx, item in enumerate(gaps[:3], start=1):
+                if not isinstance(item, dict):
+                    continue
+                failed = str(item.get("Failed Pledge") or item.get("failed_pledge") or "Unspecified pledge").strip()
+                flagged = str(item.get("Flagged Status") or item.get("flagged_status") or "No flagged status").strip()
+                risk = str(item.get("Risk Level") or item.get("risk_level") or "Unknown").strip()
+                evidence = str(item.get("Evidence Source") or item.get("evidence_source") or "N/A").strip()
+                section.append(f"  {idx}. Failed pledge: {failed}")
+                section.append(f"     Flag: {flagged} | Risk: {risk}")
+                section.append(f"     Evidence: {evidence}")
+            section.append("")
+
+        if not future and not gaps:
+            section.append("No structured mismatch entries were provided by the mismatch detector.")
+
+        section.append(major)
+        return section
+
     def _confidence_label(self, pct: float) -> str:
         if pct >= 75:
             return "HIGH"
@@ -445,14 +514,39 @@ class ProfessionalReportGenerator:
         scope1_obj = emissions_obj.get("scope1") if isinstance(emissions_obj.get("scope1"), dict) else {}
         scope2_obj = emissions_obj.get("scope2") if isinstance(emissions_obj.get("scope2"), dict) else {}
         scope3_obj = emissions_obj.get("scope3") if isinstance(emissions_obj.get("scope3"), dict) else {}
-        
+
+        scope1_val = scope1_obj.get("value") if isinstance(scope1_obj, dict) else None
+        scope2_val = scope2_obj.get("value") if isinstance(scope2_obj, dict) else None
+        scope3_val = (scope3_obj.get("total") or scope3_obj.get("value")) if isinstance(scope3_obj, dict) else None
+
+        total_dict = emissions_obj.get("total") if isinstance(emissions_obj.get("total"), dict) else {}
+        combined_val = (
+            total_dict.get("scope1_2")
+            or total_dict.get("all_scopes")
+        )
+        if scope1_val is None and scope2_val is None and combined_val:
+            scope1_val = combined_val
+
+        dq = raw_carbon.get("data_quality")
+        if isinstance(dq, dict):
+            dq_score = dq.get("overall_score") or dq.get("score") or 0
+        elif isinstance(dq, (int, float)):
+            dq_score = dq
+        else:
+            dq_score = 0
+
+        has_data = any(v is not None for v in [scope1_val, scope2_val, scope3_val])
+        if has_data and dq_score == 0:
+            dq_score = 55
+
         flat_carbon = {
-            "scope1": scope1_obj.get("value") if isinstance(scope1_obj, dict) else None,
-            "scope2": scope2_obj.get("value") if isinstance(scope2_obj, dict) else None,
-            "scope3": (scope3_obj.get("total") or scope3_obj.get("value")) if isinstance(scope3_obj, dict) else None,
+            "scope1": scope1_val,
+            "scope2": scope2_val,
+            "scope3": scope3_val,
             "data_year": scope1_obj.get("year") if isinstance(scope1_obj, dict) else None,
-            "data_quality": raw_carbon.get("data_quality", {}).get("overall_score", 0) if isinstance(raw_carbon.get("data_quality"), dict) else 0,
-            "source": scope1_obj.get("source", "PDF extraction") if isinstance(scope1_obj, dict) else "PDF extraction"
+            "data_quality": dq_score,
+            "source": scope1_obj.get("source", "PDF extraction") if isinstance(scope1_obj, dict) else "PDF extraction",
+            "emissions_detail": emissions_obj,
         }
         
         validated_carbon = validator.validate(flat_carbon, company, industry, report_year=datetime.now().year)
@@ -562,6 +656,10 @@ class ProfessionalReportGenerator:
         major = self._major_divider()
         minor = self._minor_divider()
         v = self._collect_v4_values(state, structured, quality)
+        industry_label = str(
+            v.get("industry")
+            or safe_get(structured, "company", "industry", default=state.get("industry") or "Unknown")
+        ).strip() or "Unknown"
         ts = v["metadata"].get("timestamp_dt") or datetime.utcnow()
         report_id = str(v["metadata"].get("report_id") or f"{ts.strftime('%Y%m%d-%H%M%S')}-{v['company'][:4].upper()}")
         date_line = ts.strftime("%d %B %Y at %H:%M UTC")
@@ -822,6 +920,7 @@ class ProfessionalReportGenerator:
 
         section5 = [major, "SECTION 8: CARBON EMISSIONS & CLIMATE DATA", major]
         carbon_validation = carbon.get("validation", {})
+        floor_label = self._resolve_floor_label(carbon_validation, industry_label)
         
         if carbon_validation.get("passed") is False and carbon_validation.get("fallback_estimate"):
             fb = carbon_validation["fallback_estimate"]
@@ -833,7 +932,7 @@ class ProfessionalReportGenerator:
                 "  │  Scope 2: Data not verified                             │",
                 "  │  Scope 3: Data not verified                             │",
                 "  │                                                         │",
-                f"  │  Industry benchmark estimate for {carbon_validation.get('floor_used', industry)[:19]:<19}:  │",
+                f"  │  Industry benchmark estimate for {floor_label[:19]:<19}:  │",
                 f"  │  Scope 1 typical range: {fb.get('scope1_estimated_low', 0)//1000000}M – {fb.get('scope1_estimated_high', 0)//1000000}M tCO2e/year        │",
                 "  │                                                         │",
                 "  │  Rejection reasons:                                     │"
@@ -869,6 +968,8 @@ class ProfessionalReportGenerator:
             missing_scopes = []
             numeric_vals = []
             quality_tier = str(safe_get(carbon, "data_quality", "data_confidence", default="Unknown") or "Unknown").title()
+            scope3_corrected = carbon.get("scope3_corrected")
+            scope3_correction_unit = carbon.get("scope3_correction_unit", "unit")
             for name, row, key in [("Scope 1", scope1, "value"), ("Scope 2", scope2, "value"), ("Scope 3", scope3, "total")]:
                 value = row.get(key) if isinstance(row, dict) else None
                 if value is None and isinstance(row, dict):
@@ -876,6 +977,17 @@ class ProfessionalReportGenerator:
                 year = (row.get("year") if isinstance(row, dict) else None) or (row.get("reporting_year") if isinstance(row, dict) else None) or "N/A"
                 source = (row.get("source") if isinstance(row, dict) else None) or (row.get("data_source") if isinstance(row, dict) else None) or "PDF extraction"
                 quality = (row.get("confidence") if isinstance(row, dict) else None) or (row.get("data_confidence") if isinstance(row, dict) else None) or quality_tier
+
+                if name == "Scope 3" and scope3_corrected:
+                    numeric_vals.append(float(scope3_corrected))
+                    vtxt = f"~{int(scope3_corrected):,}"
+                    source = (
+                        f"CORRECTED from raw {value} "
+                        f"({scope3_correction_unit} -> tCO2e)"
+                    )
+                    section5.append(f"  {'Scope 3*':<12} {vtxt:<20} {str(year):<6} {str(source)[:18]:<18} {str(quality)[:10]:<10}")
+                    continue
+
                 if isinstance(value, (int, float)):
                     numeric_vals.append(float(value))
                     vtxt = f"{int(value):,}"
@@ -883,6 +995,16 @@ class ProfessionalReportGenerator:
                     vtxt = "N/A"
                     missing_scopes.append(name)
                 section5.append(f"  {name:<12} {vtxt:<20} {str(year):<6} {str(source)[:18]:<18} {str(quality)[:10]:<10}")
+
+            if scope3_corrected:
+                raw_scope3 = None
+                if isinstance(scope3, dict):
+                    raw_scope3 = scope3.get("total")
+                    if raw_scope3 is None:
+                        raw_scope3 = scope3.get("value")
+                section5.append(
+                    f"  Scope 3    [CORRECTED] ~{scope3_corrected:,.0f} tCO2e  (raw extracted: {raw_scope3} - likely {scope3_correction_unit} error, multiplied to tCO2e. Verify against source document.)"
+                )
             section5.append("  " + "-" * 70)
             total_val = sum(numeric_vals) if numeric_vals else None
             section5.append(f"  {'Total':<12} {(f'{int(total_val):,}' if isinstance(total_val, (int, float)) else 'N/A')}")
@@ -1097,6 +1219,8 @@ class ProfessionalReportGenerator:
             section10.append(f"  - {self._wrap_paragraph(str(lim), width=74)}")
         section10.append("\n" + major)
 
+        section11 = self._render_esg_mismatch_section(state, major)
+
         appendix_a = [major, "APPENDIX A: VALIDATION & CALIBRATION STATUS", major, self._plain_textify(self._generate_validation_metadata_section(v.get("calibration", {}), company_industry=v.get("industry", "Unknown"))), "", major]
         appendix_b = [major, "APPENDIX B: TEMPORAL ESG CONSISTENCY", major, self._plain_textify(self._generate_temporal_consistency_section(state)), "", major]
         appendix_c = [major, "APPENDIX C: EVIDENCE & OFFSET INTEGRITY", major, self._plain_textify(self._generate_realism_diagnostics_section(state)), "", major]
@@ -1147,6 +1271,7 @@ class ProfessionalReportGenerator:
             "section7": "\n".join(section7),
             "section9": "\n".join(section9),
             "section10": "\n".join(section10),
+            "section11": "\n".join(section11),
             "appendix_a": "\n".join(appendix_a),
             "appendix_b": "\n".join(appendix_b),
             "appendix_c": "\n".join(appendix_c),
@@ -1155,7 +1280,7 @@ class ProfessionalReportGenerator:
 
         ordered_keys = [
             "cover", "verdict", "section1", "section2", "section3", "section6", "section4", "section5",
-            "section7", "section9", "section10", "appendix_a", "appendix_b", "appendix_c", "end",
+            "section7", "section9", "section10", "section11", "appendix_a", "appendix_b", "appendix_c", "end",
         ]
         report = "\n\n".join(blocks[k] for k in ordered_keys)
 
@@ -2611,6 +2736,19 @@ class ProfessionalReportGenerator:
                 scope1 = output.get("scope1") or (output.get("emissions", {}).get("scope1", {}).get("value"))
                 scope2 = output.get("scope2") or (output.get("emissions", {}).get("scope2", {}).get("value"))
                 scope3 = output.get("scope3") or (output.get("emissions", {}).get("scope3", {}).get("total"))
+                carbon_data = output
+                scope3_display = carbon_data.get("scope3", scope3)
+                scope3_corrected = carbon_data.get("scope3_corrected")
+
+                if scope3_corrected:
+                    scope3_line = (
+                        f"Scope 3    [CORRECTED] ~{scope3_corrected:,.0f} tCO2e  "
+                        f"(raw extracted: {scope3_display} - likely "
+                        f"{carbon_data.get('scope3_correction_unit','unit')} error, "
+                        f"multiplied to tCO2e. Verify against source document.)"
+                    )
+                else:
+                    scope3_line = f"Scope 3    {scope3_display}"
                 quality = _as_dict(output.get("data_quality"))
                 q_score = quality.get("overall_score") if isinstance(quality, dict) else quality
                 q_conf = quality.get("data_confidence", "Unknown") if isinstance(quality, dict) else "Unknown"
@@ -2620,7 +2758,7 @@ class ProfessionalReportGenerator:
                 lines.append(
                     f"The carbon extractor analyzed {output.get('articles_analyzed', 0)} evidence items and {_as_dict(output.get('source_coverage')).get('report_chunks', 0)} report chunks. "
                     f"Scope 1: {scope1 if scope1 is not None else 'NOT DISCLOSED'} tCO2e. Scope 2: {scope2 if scope2 is not None else 'NOT DISCLOSED'} tCO2e. "
-                    f"Scope 3: {scope3 if scope3 is not None else 'NOT DISCLOSED'}. Data quality: {q_score if q_score is not None else 'N/A'}/100 ({q_conf} confidence). "
+                    f"{scope3_line}. Data quality: {q_score if q_score is not None else 'N/A'}/100 ({q_conf} confidence). "
                     f"Missing disclosures: {missing}."
                 )
                 if scope1 is None and scope2 is None and scope3 is None:
@@ -3056,6 +3194,7 @@ Score: {score:.1f}/100 — {level}
             "REGULATORY COMPLIANCE ASSESSMENT",
             "─" * 52,
             f"Compliance Score: {compliance['score']}/100  (Risk Level: {compliance['risk_level']})",
+            f"Score breakdown: {compliance.get('score_breakdown', 'N/A')}",
             "",
             "| Regulation | Status | Gap Count |",
             "|------------|--------|-----------|",
@@ -4531,9 +4670,15 @@ REGULATORY COMPLIANCE ASSESSMENT
                 risk_level = regulatory.get("risk_level", "N/A")
 
             applicable_regs = regulatory.get("applicable_regulations", [])
+            score_breakdown = (
+                regulatory.get("score_breakdown")
+                or (compliance_score.get("score_breakdown") if isinstance(compliance_score, dict) else None)
+                or "N/A"
+            )
 
             section += f"Jurisdiction: {jurisdiction}\n"
             section += f"Compliance Score: {compliance_score_value}/100\n"
+            section += f"Score breakdown: {score_breakdown}\n"
             section += f"Risk Level: {risk_level}\n\n"
 
             if applicable_regs:

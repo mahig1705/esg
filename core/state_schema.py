@@ -76,6 +76,7 @@ class ESGState(TypedDict):
     climatebert_analysis: Optional[Dict[str, Any]]  # ClimateBERT NLP analysis  
     esg_mismatch_analysis: Optional[Dict[str, Any]]  # Promise vs Actual gap detection
     explainability_report: Optional[Dict[str, Any]]  # SHAP/LIME explanations
+    additional_evidence: Optional[List[Dict[str, Any]]]
     
     # Final output
     final_verdict: Dict[str, Any]

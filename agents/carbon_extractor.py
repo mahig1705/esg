@@ -91,6 +91,58 @@ SCOPE3_ALIASES = [
 ]
 
 
+def backfill_from_total(emissions: dict) -> dict:
+    """
+    When scope1/scope2 individual values are null but a combined
+    scope1+2 total exists, backfill scope1 with the combined figure.
+
+    This preserves found data rather than discarding it.
+    Scope2 is left null to avoid double-counting.
+    The combined flag tells downstream readers what happened.
+    """
+    if not isinstance(emissions, dict):
+        return emissions
+
+    scope1_val = (emissions.get("scope1") or {}).get("value")
+    scope2_val = (emissions.get("scope2") or {}).get("value")
+    total_dict = emissions.get("total") or {}
+    combined = (
+        total_dict.get("scope1_2")
+        or total_dict.get("all_scopes")
+        or total_dict.get("scope1_scope2")
+    )
+
+    # Only backfill when: combined exists AND both scope1/2 are null
+    if combined and scope1_val is None and scope2_val is None:
+
+        # Ensure scope1/scope2 dicts exist before writing to them
+        if not isinstance(emissions.get("scope1"), dict):
+            emissions["scope1"] = {}
+        if not isinstance(emissions.get("scope2"), dict):
+            emissions["scope2"] = {}
+
+        emissions["scope1"]["value"] = combined
+        emissions["scope1"]["source"] = (
+            f"Scope 1+2 combined figure ({combined:,.0f} tCO2e). "
+            "Could not separate individual scopes from source."
+        )
+        emissions["scope1"]["combined_scope1_2"] = True
+        emissions["scope1"]["year"] = (
+            (emissions.get("scope1") or {}).get("year")
+            or total_dict.get("year")
+        )
+
+        # Scope 2 marked as included to avoid double-counting
+        emissions["scope2"]["value"] = None
+        emissions["scope2"]["source"] = (
+            "Included in Scope 1 combined figure. "
+            "See scope1 for combined Scope 1+2 total."
+        )
+        emissions["scope2"]["combined_with_scope1"] = True
+
+    return emissions
+
+
 class CarbonExtractor:
     """
     Scope 1-3 Carbon Emissions Extractor
@@ -602,18 +654,31 @@ class CarbonExtractor:
 
         inferred_net_zero = self.extract_net_zero_year_from_claim(claim_text)
         
+        emissions_dict = {
+            "scope1": validated_data.get("scope1", {}),
+            "scope2": validated_data.get("scope2", {}),
+            "scope3": validated_data.get("scope3", {}),
+            "total": self._calculate_total(validated_data)
+        }
+
+        # Backfill scope1/2 from combined total if individual values are null.
+        emissions_dict = backfill_from_total(emissions_dict)
+
+        # If backfill populated scope1, treat extraction as successful.
+        scope1_after = (emissions_dict.get("scope1") or {}).get("value")
+        scope3_after = (emissions_dict.get("scope3") or {}).get("total")
+        extraction_successful = (
+            not used_baseline_estimate and
+            (scope1_after is not None or scope3_after is not None)
+        )
+
         result = {
             "company": company,
             # Baseline estimates are useful for stability but are not treated as a successful extraction.
-            "extraction_successful": bool(validated_data.get("scope1") or validated_data.get("scope2")) and not used_baseline_estimate,
+            "extraction_successful": extraction_successful,
             "used_baseline_estimate": used_baseline_estimate,
             "baseline_industry": baseline_industry if used_baseline_estimate else None,
-            "emissions": {
-                "scope1": validated_data.get("scope1", {}),
-                "scope2": validated_data.get("scope2", {}),
-                "scope3": validated_data.get("scope3", {}),
-                "total": self._calculate_total(validated_data)
-            },
+            "emissions": emissions_dict,
             "intensity_metrics": intensity_metrics,
             "ghg_compliance": compliance_check,
             "brsr_compliance": brsr_compliance,

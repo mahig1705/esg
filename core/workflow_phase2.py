@@ -97,6 +97,42 @@ def save_peer_to_database_node(state: ESGState) -> ESGState:
     
     return state
 
+def inject_temporal_violations(state: ESGState) -> ESGState:
+    agent_outputs = state.get("agent_outputs", [])
+    temporal_result = next((o.get("output", {}) for o in agent_outputs if o.get("agent") == "temporal_analysis"), {})
+    violations = temporal_result.get("past_violations", [])
+    
+    if not violations:
+        return state
+        
+    company = state.get("company", "").lower()
+    injected = []
+    
+    for v in violations:
+        desc      = v.get("description", "").lower()
+        url       = v.get("url", "").lower()
+        tokens    = [t for t in company.split() if len(t) >= 4]
+        name_match = any(t in desc or t in url for t in tokens)
+        
+        if not name_match:
+            continue
+        
+        injected.append({
+            "text":   v.get("description", ""),
+            "source": v.get("source", ""),
+            "url":    v.get("url", ""),
+            "year":   v.get("year"),
+            "type":   v.get("type", ""),
+            "origin": "temporal_analysis"
+        })
+    
+    if injected:
+        existing = state.get("additional_evidence", []) or []
+        state["additional_evidence"] = existing + injected
+        state["evidence"] = state.get("evidence", []) + injected
+    
+    return state
+
 def build_phase2_graph():
     """
     Phase 2 LangGraph - SIMPLIFIED (no self-correction loop yet)
@@ -139,6 +175,7 @@ def build_phase2_graph():
     workflow.add_node("std_contradiction", contradiction_analysis_node)
     workflow.add_node("std_mismatch", esg_mismatch_node)  # NEW: ESG Mismatch Detector
     workflow.add_node("std_temporal", temporal_analysis_node)
+    workflow.add_node("std_inject_temporal", inject_temporal_violations)
     workflow.add_node("std_peer", peer_comparison_node)
     workflow.add_node("std_credibility", credibility_analysis_node)
     workflow.add_node("std_sentiment", sentiment_analysis_node)
@@ -167,6 +204,7 @@ def build_phase2_graph():
     workflow.add_node("deep_contradiction", contradiction_analysis_node)
     workflow.add_node("deep_mismatch", esg_mismatch_node)  # NEW: ESG Mismatch Detector
     workflow.add_node("deep_temporal", temporal_analysis_node)
+    workflow.add_node("deep_inject_temporal", inject_temporal_violations)
     workflow.add_node("deep_peer", peer_comparison_node)
     workflow.add_node("deep_credibility", credibility_analysis_node)
     workflow.add_node("deep_sentiment", sentiment_analysis_node)
@@ -215,10 +253,11 @@ def build_phase2_graph():
     workflow.add_edge("std_carbon", "std_greenwishing")  # NEW: Greenwishing
     workflow.add_edge("std_greenwishing", "std_regulatory")  # NEW: Regulatory
     workflow.add_edge("std_regulatory", "std_climatebert")  # NEW: ClimateBERT
-    workflow.add_edge("std_climatebert", "std_contradiction")
+    workflow.add_edge("std_climatebert", "std_temporal")
+    workflow.add_edge("std_temporal", "std_inject_temporal")
+    workflow.add_edge("std_inject_temporal", "std_contradiction")
     workflow.add_edge("std_contradiction", "std_mismatch")  # NEW: ESG Mismatch
-    workflow.add_edge("std_mismatch", "std_temporal")
-    workflow.add_edge("std_temporal", "std_peer")
+    workflow.add_edge("std_mismatch", "std_peer")
     workflow.add_edge("std_peer", "std_credibility")
     workflow.add_edge("std_credibility", "std_sentiment")
     workflow.add_edge("std_sentiment", "std_realtime")
@@ -241,10 +280,11 @@ def build_phase2_graph():
     workflow.add_edge("deep_carbon", "deep_greenwishing")  # NEW: Greenwishing
     workflow.add_edge("deep_greenwishing", "deep_regulatory")  # NEW: Regulatory
     workflow.add_edge("deep_regulatory", "deep_climatebert")  # NEW: ClimateBERT
-    workflow.add_edge("deep_climatebert", "deep_contradiction")
+    workflow.add_edge("deep_climatebert", "deep_temporal")
+    workflow.add_edge("deep_temporal", "deep_inject_temporal")
+    workflow.add_edge("deep_inject_temporal", "deep_contradiction")
     workflow.add_edge("deep_contradiction", "deep_mismatch")  # NEW: ESG Mismatch
-    workflow.add_edge("deep_mismatch", "deep_temporal")
-    workflow.add_edge("deep_temporal", "deep_peer")
+    workflow.add_edge("deep_mismatch", "deep_peer")
     workflow.add_edge("deep_peer", "deep_credibility")
     workflow.add_edge("deep_credibility", "deep_sentiment")
     workflow.add_edge("deep_sentiment", "deep_realtime")

@@ -52,7 +52,16 @@ class SentimentAnalyzer:
         
         # Analyze evidence sentiment
         print("📊 Analyzing evidence sentiment...")
-        evidence_texts = [ev.get("relevant_text", "") for ev in evidence[:10]]
+        evidence_texts = [
+            (
+                ev.get("full_text")
+                or ev.get("relevant_text")
+                or ev.get("snippet")
+                or ev.get("title")
+                or ""
+            )
+            for ev in evidence[:10]
+        ]
         combined_evidence = " ".join(evidence_texts)
         evidence_analysis = self._analyze_text(combined_evidence, "evidence")
         
@@ -315,7 +324,13 @@ class SentimentAnalyzer:
     def _sentiment_source_breakdown(self, evidence: List[Dict[str, Any]]) -> Dict[str, int]:
         breakdown = {"positive": 0, "neutral": 0, "negative": 0}
         for ev in evidence:
-            text = (ev.get("relevant_text") or ev.get("snippet") or "").strip()
+            text = (
+                ev.get("full_text")
+                or ev.get("relevant_text")
+                or ev.get("snippet")
+                or ev.get("title")
+                or ""
+            ).strip()
             if not text:
                 continue
             polarity = TextBlob(text).sentiment.polarity

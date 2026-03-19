@@ -90,7 +90,13 @@ class CredibilityAnalyst:
         source_type = evidence.get('source_type', 'Web Source')
         source_name = evidence.get('source_name', 'Unknown')
         url = evidence.get('url', '')
-        content = evidence.get('relevant_text', '')
+        content = (
+            evidence.get("full_text")
+            or evidence.get("relevant_text")
+            or evidence.get("snippet")
+            or evidence.get("title")
+            or ""
+        )
         
         prompt = f"SOURCE: {source_name}\nTYPE: {source_type}\nURL: {url}\nCONTENT: {content[:2000]}"
         
