@@ -183,8 +183,8 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
 
     "temporal_consistency": [
         # Claim trend vs performance trend scoring.
-        # Moderate reasoning. Groq Gemma2 — good at structured analysis.
-        Groq("gemma2-9b-it",
+        # Moderate reasoning. Groq 70B — good at structured analysis.
+        Groq("llama-3.3-70b-versatile",
              max_tokens=600, json_mode=True,
              context_note="moderate reasoning, structured scoring"),
         Cerebras("llama-3.3-70b",
@@ -220,8 +220,8 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
     "regulatory_scanning": [
         # Checks 6 frameworks (SEBI BRSR, SEC, GHG Protocol, 
         # GRI, CDP, SBTi). Needs precise rule-following + JSON.
-        # Groq Gemma2: best at deterministic rule checks.
-        Groq("gemma2-9b-it",
+        # Groq Llama 3.3 70B: best at deterministic rule checks.
+        Groq("llama-3.3-70b-versatile",
              max_tokens=2000, json_mode=True,
              context_note="6 frameworks, deterministic rule-following"),
         Groq("llama-3.3-70b-versatile",
