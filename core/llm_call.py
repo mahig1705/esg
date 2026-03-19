@@ -1,5 +1,5 @@
 import asyncio, logging, os, json
-from core.llm_clients import cerebras, groq_client, openrouter, get_gemini
+from core.llm_clients import cerebras, groq_client, openrouter, gemini_client
 from core.llm_router  import ROUTING_TABLE, NO_LLM_AGENTS, Provider, ModelConfig
 import core.llm_cache as cache
 
@@ -124,22 +124,30 @@ async def _dispatch(config: ModelConfig, prompt: str,
 
 
 async def _call_gemini(config, prompt, system, pdf_bytes) -> str:
-    model = get_gemini(config.model_id)
+    from core.llm_clients import gemini_client
+    from google.genai import types
+
     full_prompt = f"{system}\n\n{prompt}" if system else prompt
     if config.json_mode:
         full_prompt += "\n\nReturn valid JSON only. No markdown, no explanation."
 
-    content = []
+    contents = []
     if pdf_bytes:
-        content.append({"mime_type": "application/pdf", "data": pdf_bytes})
-    content.append(full_prompt)
+        contents.append(
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+        )
+    contents.append(full_prompt)
 
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
-        None, lambda: model.generate_content(content)
+        None,
+        lambda: gemini_client.models.generate_content(
+            model=config.model_id,
+            contents=contents,
+        )
     )
+
     text = response.text.strip()
-    # Strip markdown fences that models sometimes add despite instructions
     if config.json_mode and text.startswith("```"):
         text = "\n".join(
             l for l in text.split("\n")
@@ -153,6 +161,11 @@ async def _call_groq(config, prompt, system) -> str:
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+
+    # Groq requires the word "json" in messages when json_mode=True
+    if config.json_mode:
+        # Append to last user message — guaranteed to contain "json"
+        messages[-1]["content"] += "\n\nRespond with valid JSON only."
 
     kwargs = dict(
         model=config.model_id,
