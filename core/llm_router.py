@@ -65,7 +65,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
     "claim_extraction": [
         # Cerebras Scout: 516 chunks, heavily cached (llm_calls_made≈0),
         # fast model fine, 10M context handles long chunk batches.
-        Cerebras("llama-4-scout",
+        Cerebras("llama3.1-8b",
                  max_tokens=800, json_mode=True,
                  context_note="high chunk volume, cached, speed > intelligence"),
         Groq("llama-3.1-8b-instant",
@@ -76,7 +76,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
 
     "claim_extractor": [
         # Same as claim_extraction — structured JSON from text chunks.
-        Cerebras("llama-4-scout",
+        Cerebras("llama3.1-8b",
                  max_tokens=1000, json_mode=True,
                  context_note="35 claims across 3 years, structured parse"),
         Groq("llama-3.1-8b-instant",
@@ -107,7 +107,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
     "sentiment_analysis": [
         # 42 articles to analyse — speed critical. Cerebras Scout.
         # Sentiment on short snippets doesn't need deep reasoning.
-        Cerebras("llama-4-scout",
+        Cerebras("llama3.1-8b",
                  max_tokens=500,
                  context_note="42 articles per report, speed critical"),
         Groq("llama-3.1-8b-instant",
@@ -120,7 +120,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
         # CALLED ~42 TIMES PER REPORT. Absolute must use fastest provider.
         # Single source URL + snippet → credibility score + tier.
         # Cerebras is the only sensible choice here.
-        Cerebras("llama-4-scout",
+        Cerebras("llama3.1-8b",
                  max_tokens=200, json_mode=True,
                  context_note="called 42x per report — fastest model mandatory"),
         # Fallback: Groq 8B instant (still fast)
@@ -138,7 +138,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
         Groq("llama-3.1-8b-instant",
              max_tokens=300, json_mode=True,
              context_note="single claim, short output, local model preferred"),
-        Cerebras("llama-4-scout",
+        Cerebras("llama3.1-8b",
                  max_tokens=300, json_mode=True),
         OR("microsoft/phi-4-reasoning:free",
            max_tokens=300, json_mode=True),
@@ -164,7 +164,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
              context_note="temporal pledge-vs-implementation analysis"),
         OR("qwen/qwen3-235b-a22b:free",
            max_tokens=1500),
-        Cerebras("llama3.1-70b",
+        Cerebras("llama-3.3-70b",
                  max_tokens=1500, json_mode=True),
     ],
 
@@ -172,7 +172,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
         # Extracts past violations and reputation score.
         # Structured JSON output, company name as input.
         # Fast Cerebras 70B — heavier than Scout for factual recall.
-        Cerebras("llama3.1-70b",
+        Cerebras("llama-3.3-70b",
                  max_tokens=800, json_mode=True,
                  context_note="factual recall of violations — 70B over Scout"),
         Groq("llama-3.1-8b-instant",
@@ -187,7 +187,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
         Groq("gemma2-9b-it",
              max_tokens=600, json_mode=True,
              context_note="moderate reasoning, structured scoring"),
-        Cerebras("llama3.1-70b",
+        Cerebras("llama-3.3-70b",
                  max_tokens=600, json_mode=True),
         OR("mistralai/mistral-small-3.1-24b-instruct:free",
            max_tokens=600, json_mode=True),
@@ -199,7 +199,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
              context_note="fast contradiction rewriting"),
         OR("mistralai/mistral-small-3.1-24b-instruct:free",
            max_tokens=800, json_mode=True),
-        Cerebras("llama-4-scout",
+        Cerebras("llama3.1-8b",
                  max_tokens=800, json_mode=True),
     ],
 
@@ -209,7 +209,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
              context_note="financial ESG correlation reasoning"),
         OR("deepseek/deepseek-r1:free",
            max_tokens=1500),
-        Cerebras("llama3.1-70b",
+        Cerebras("llama-3.3-70b",
                  max_tokens=1500, json_mode=True),
     ],
 
@@ -247,7 +247,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
         # Retrieves industry peer ESG scores.
         # Factual recall task. Cerebras 70B (stronger than Scout
         # for factual knowledge retrieval).
-        Cerebras("llama3.1-70b",
+        Cerebras("llama-3.3-70b",
                  max_tokens=1000, json_mode=True,
                  context_note="factual peer data recall"),
         Groq("llama-3.1-8b-instant",
@@ -259,7 +259,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
     "confidence_scoring": [
         # Arithmetic aggregation of confidence scores across agents.
         # Trivially simple — fastest model that returns valid JSON.
-        Cerebras("llama-4-scout",
+        Cerebras("llama3.1-8b",
                  max_tokens=300, json_mode=True,
                  context_note="pure arithmetic aggregation, simplest task"),
         Groq("llama-3.1-8b-instant",
@@ -290,7 +290,7 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
              context_note="readable explanation, good writing, called once"),
         OR("meta-llama/llama-4-maverick:free",
            max_tokens=600),
-        Cerebras("llama3.1-70b",
+        Cerebras("llama-3.3-70b",
                  max_tokens=600),
     ],
 
