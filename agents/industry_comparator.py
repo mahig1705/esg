@@ -66,7 +66,8 @@ DYNAMIC peer comparison - builds real database over time
 
 from typing import Dict, Any, List, Optional
 from utils.enterprise_data_sources import enterprise_fetcher
-from core.llm_client import llm_client
+from core.llm_call import call_llm
+import asyncio
 from core.evidence_cache import evidence_cache
 from core.safe_utils import normalize_industry_key, normalize_industry_label
 import json
@@ -195,7 +196,6 @@ class IndustryComparator:
     def __init__(self):
         self.name = "Peer Comparison & Industry Benchmark Specialist"
         self.fetcher = enterprise_fetcher
-        self.llm = llm_client
         initialize_peer_database()
         
         # Initialize ChromaDB client for peer history
@@ -742,10 +742,7 @@ Company: {company}
 Competitors:"""
         
         try:
-            response = self.llm.call_groq(
-                [{"role": "user", "content": prompt}],
-                use_fast=True
-            )
+            response = asyncio.run(call_llm("peer_comparison", prompt))
             
             if response:
                 # Parse response
@@ -849,11 +846,11 @@ Competitors:"""
     If not found, use "unknown" for strings or null for numbers.
     JSON:"""
 
-            response = self.llm.call_groq(
-                [{"role": "user", "content": prompt}],
-                use_fast=True
-            )
-            
+            try:
+                response = asyncio.run(call_llm("peer_comparison", prompt))
+            except Exception as e:
+                response = None
+                
             if response:
                 try:
                     # More robust JSON extraction

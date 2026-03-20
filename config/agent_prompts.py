@@ -80,7 +80,9 @@ Return JSON:
   ],
   "supportive_evidence": ["[What confirms]"],
   "key_issues": ["[Main problems found]"]
-}}"""
+}}
+
+If an ADDITIONAL VERIFIED VIOLATIONS section is present in the evidence, treat each entry as a severe corporate failure. You MUST add at least one entry to "specific_contradictions" for EACH violation listed under the ADDITIONAL VERIFIED VIOLATIONS section, regardless of whether it directly contradicts the specific claim text. Set "aspect" to "Severe Corporate Governance/Regulatory Violation". Assign severity HIGH if the violation relates to governance, fraud, or securities law. Assign severity CRITICAL if the violation is a court ruling."""
 
 # Agent 4: Source Credibility
 SOURCE_CREDIBILITY_PROMPT = """ROLE: Source Credibility & Bias Detection Specialist

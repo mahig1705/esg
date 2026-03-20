@@ -3,15 +3,16 @@ from typing import Dict, Any, List
 from textblob import TextBlob
 import re
 import logging
-from core.llm_client import llm_client
+from core.llm_call import call_llm
 from config.agent_prompts import SENTIMENT_ANALYSIS_PROMPT
+import asyncio
 
 logger = logging.getLogger(__name__)
 
 class SentimentAnalyzer:
     def __init__(self):
         self.name = "Sentiment & Linguistic Analysis Expert"
-        self.llm = llm_client
+        self.name = "Sentiment & Linguistic Analysis Expert"
         
         # Greenwashing buzzwords
         self.buzzwords = [
@@ -51,7 +52,16 @@ class SentimentAnalyzer:
         
         # Analyze evidence sentiment
         print("📊 Analyzing evidence sentiment...")
-        evidence_texts = [ev.get("relevant_text", "") for ev in evidence[:10]]
+        evidence_texts = [
+            (
+                ev.get("full_text")
+                or ev.get("relevant_text")
+                or ev.get("snippet")
+                or ev.get("title")
+                or ""
+            )
+            for ev in evidence[:10]
+        ]
         combined_evidence = " ".join(evidence_texts)
         evidence_analysis = self._analyze_text(combined_evidence, "evidence")
         
@@ -214,13 +224,8 @@ class SentimentAnalyzer:
         
         prompt = SENTIMENT_ANALYSIS_PROMPT.format(text=claim_text)
         
-        # Use fast Groq model
         try:
-            response = self.llm.call_groq(
-                [{"role": "user", "content": prompt}],
-                temperature=0.1,
-                use_fast=True
-            )
+            response = asyncio.run(call_llm("sentiment_analysis", prompt))
         except Exception as exc:
             logger.warning("Sentiment LLM call failed: %s", exc)
             return {
@@ -319,7 +324,13 @@ class SentimentAnalyzer:
     def _sentiment_source_breakdown(self, evidence: List[Dict[str, Any]]) -> Dict[str, int]:
         breakdown = {"positive": 0, "neutral": 0, "negative": 0}
         for ev in evidence:
-            text = (ev.get("relevant_text") or ev.get("snippet") or "").strip()
+            text = (
+                ev.get("full_text")
+                or ev.get("relevant_text")
+                or ev.get("snippet")
+                or ev.get("title")
+                or ""
+            ).strip()
             if not text:
                 continue
             polarity = TextBlob(text).sentiment.polarity

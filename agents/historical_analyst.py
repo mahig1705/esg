@@ -1,7 +1,6 @@
 import json
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
-from core.llm_client import llm_client
 from utils.enterprise_data_sources import enterprise_fetcher
 from config.agent_prompts import HISTORICAL_ANALYSIS_PROMPT
 from core.evidence_cache import evidence_cache
@@ -9,7 +8,6 @@ from core.evidence_cache import evidence_cache
 class HistoricalAnalyst:
     def __init__(self):
         self.name = "Historical ESG Pattern & Controversy Analyst"
-        self.llm = llm_client
         self.fetcher = enterprise_fetcher
     
     def analyze_company_history(self, company: str) -> Dict[str, Any]:
@@ -74,10 +72,34 @@ class HistoricalAnalyst:
         # Calculate reputation score
         reputation = self._calculate_reputation_score(violations, greenwashing, achievements, patterns)
         
+        def is_violation_relevant(violation: dict, company: str) -> bool:
+            company_lower = company.lower()
+            desc_lower    = violation.get("description", "").lower()
+            url_lower     = violation.get("url", "").lower()
+            
+            tokens = [t for t in company_lower.split() if len(t) >= 4]
+            primary_match = any(
+                token in desc_lower or token in url_lower
+                for token in tokens
+            )
+            if primary_match:
+                return True
+            
+            ticker = violation.get("ticker", "").lower()
+            if ticker and ticker in desc_lower:
+                return True
+            
+            return False
+
+        past_violations = [
+            v for v in violations
+            if is_violation_relevant(v, company)
+        ]
+        
         result = {
             "company": company,
             "analysis_date": datetime.now().isoformat(),
-            "past_violations": violations,
+            "past_violations": past_violations,
             "greenwashing_history": greenwashing,
             "positive_track_record": achievements,
             "temporal_patterns": patterns,

@@ -1,8 +1,9 @@
 import json
 import re
 from typing import Dict, Any, List, Optional
-from core.llm_client import llm_client
+from core.llm_call import call_llm
 from config.agent_prompts import CLAIM_EXTRACTION_PROMPT
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -175,7 +176,6 @@ claim_extraction_cache = ClaimExtractionCache()
 class ClaimExtractor:
     def __init__(self):
         self.name = "Claim Extraction Specialist"
-        self.llm = llm_client
     
     def extract_claims(self, company_name: str, content: str) -> Dict[str, Any]:
         """Extract structured ESG claims from content"""
@@ -186,9 +186,7 @@ class ClaimExtractor:
         print(f"Company: {company_name}")
         print(f"Content length: {len(content)} chars")
         
-        prompt = f"""{CLAIM_EXTRACTION_PROMPT}
-
-COMPANY: {company_name}
+        user_prompt = f"""COMPANY: {company_name}
 
 CONTENT TO ANALYZE:
 {content[:4000]}
@@ -197,13 +195,13 @@ Return ONLY valid JSON in the exact format specified. No markdown, no explanatio
 
         # Try with fallback - Gemini first, then Groq
         print("⏳ Calling LLM for claim extraction (with fallback)...")
-        response = self.llm.call_with_fallback(prompt, use_gemini_first=True)
-        
-        if not response:
-            print("❌ Failed to get response from both LLMs")
+        try:
+            response = asyncio.run(call_llm("claim_extractor", user_prompt, system=CLAIM_EXTRACTION_PROMPT))
+        except Exception as e:
+            print(f"❌ Failed to get response from LLM: {e}")
             return {
                 "company": company_name,
-                "error": "All LLMs failed",
+                "error": "LLM failed",
                 "claims": []
             }
         
@@ -756,9 +754,7 @@ Return ONLY valid JSON in the exact format specified. No markdown, no explanatio
         )
         
         # Build prompt for batch
-        prompt = f"""{CLAIM_EXTRACTION_PROMPT}
-
-COMPANY: {company_name}
+        user_prompt = f"""COMPANY: {company_name}
 YEAR: {year}
 SOURCE: ESG Report
 
@@ -771,7 +767,7 @@ Return ONLY valid JSON in the exact format specified. No markdown, no explanatio
 
         try:
             # Call LLM
-            response = self.llm.call_with_fallback(prompt, use_gemini_first=True)
+            response = asyncio.run(call_llm("claim_extraction", user_prompt, system=CLAIM_EXTRACTION_PROMPT))
 
             if not response:
                 print(f"         ❌ LLM call failed")

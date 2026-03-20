@@ -8,6 +8,7 @@ class Settings(BaseModel):
     # API Keys
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
     NEWSDATA_API_KEY: str = os.getenv("NEWSDATA_API_KEY", "")
     SEC_API_KEY: str = os.getenv("SEC_API_KEY", "")
@@ -17,6 +18,29 @@ class Settings(BaseModel):
     GROQ_FAST_MODEL: str = "llama-3.1-8b-instant"  # For very fast operations
     GEMINI_MODEL: str = "gemini-2.5-flash"
     GEMINI_PRO_MODEL: str = "gemini-2.5-pro"
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+    
+    # Task-Specific OpenRouter Model Mappings (ALL FREE TIER — zero credits needed)
+    OPENROUTER_MODELS: dict = {
+        "web_search_summarisation": "meta-llama/llama-3.3-70b-instruct:free",
+        "contradiction_detection": "nousresearch/hermes-3-llama-3.1-405b:free",
+        "sub_indicator_scoring": "mistralai/mistral-small-3.1-24b-instruct:free",
+        "contradiction_rewriting": "meta-llama/llama-3.3-70b-instruct:free",
+        "full_report_narrative": "nousresearch/hermes-3-llama-3.1-405b:free",
+        "carbon_data_parsing": "mistralai/mistral-small-3.1-24b-instruct:free",
+        "default": "meta-llama/llama-3.3-70b-instruct:free"
+    }
+    
+    # Fallback chains per task (all free tier)
+    OPENROUTER_FALLBACKS: dict = {
+        "web_search_summarisation": ["mistralai/mistral-small-3.1-24b-instruct:free", "meta-llama/llama-3.2-3b-instruct:free"],
+        "contradiction_detection": ["meta-llama/llama-3.3-70b-instruct:free", "mistralai/mistral-small-3.1-24b-instruct:free"],
+        "sub_indicator_scoring": ["meta-llama/llama-3.3-70b-instruct:free", "meta-llama/llama-3.2-3b-instruct:free"],
+        "contradiction_rewriting": ["mistralai/mistral-small-3.1-24b-instruct:free", "meta-llama/llama-3.2-3b-instruct:free"],
+        "full_report_narrative": ["meta-llama/llama-3.3-70b-instruct:free", "mistralai/mistral-small-3.1-24b-instruct:free"],
+        "carbon_data_parsing": ["meta-llama/llama-3.3-70b-instruct:free", "meta-llama/llama-3.2-3b-instruct:free"],
+        "default": ["mistralai/mistral-small-3.1-24b-instruct:free", "meta-llama/llama-3.2-3b-instruct:free"]
+    }
     
     # Chroma Configuration
     CHROMA_PERSIST_DIR: str = "./data/chroma_db"

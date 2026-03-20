@@ -3,8 +3,9 @@ import logging
 import re
 from typing import Dict, Any, List, Optional
 
-from core.llm_client import llm_client
+from core.llm_call import call_llm
 from config.agent_prompts import CONTRADICTION_ANALYSIS_PROMPT
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,6 @@ def clean_snippet_text(text: str) -> str:
 class ContradictionAnalyzer:
     def __init__(self):
         self.name = "Contradiction & Verification Analyst"
-        self.llm = llm_client
         try:
             total_cases = sum(len(v) for v in KNOWN_GREENWASHING_CASES.values())
             print(f"[ContradictionDB] Loaded {total_cases} known cases for {len(KNOWN_GREENWASHING_CASES)} companies")
@@ -137,7 +137,13 @@ class ContradictionAnalyzer:
     def _extract_contradictions_from_evidence(self, evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         contradictions = []
         for item in evidence or []:
-            description = item.get("snippet") or item.get("relevant_text") or item.get("title") or ""
+            description = (
+                item.get("full_text")
+                or item.get("relevant_text")
+                or item.get("snippet")
+                or item.get("title")
+                or ""
+            )
             if not description:
                 continue
             contradictions.append({
@@ -155,12 +161,37 @@ class ContradictionAnalyzer:
         self, claim: str, evidence: List[Dict[str, Any]], temperature: float = 0
     ) -> List[Dict[str, Any]]:
         evidence_summary = self._prepare_evidence_summary(evidence)
+        
+        temporal_violations = [
+            e for e in evidence
+            if e.get("origin") == "temporal_analysis"
+        ]
+        
+        if temporal_violations:
+            violations_text = "\n".join([
+                f"[{e.get('type','Violation')} - "
+                f"Year: {e.get('year','Unknown')} - "
+                f"Source: {e.get('source','')}]: {e.get('text','')}"
+                for e in temporal_violations
+            ])
+            evidence_summary = (
+                evidence_summary
+                + "\n\nADDITIONAL VERIFIED VIOLATIONS FROM REGULATORY DATABASES:\n"
+                + violations_text
+            )
+            
+        print("CONTRADICTION EVIDENCE SENT:", evidence_summary[:800])
+        
         prompt = CONTRADICTION_ANALYSIS_PROMPT.format(
             claim=claim,
             evidence=evidence_summary,
             claim_id="C1",
         )
-        response = self.llm.call_gemini(prompt, temperature=0, use_pro=True)
+        try:
+            response = asyncio.run(call_llm("contradiction_analysis", prompt))
+        except Exception as e:
+            logger.error(f"LLM call failed: {e}")
+            return []
         if not response:
             return []
 
@@ -175,7 +206,7 @@ class ContradictionAnalyzer:
             if not isinstance(c, dict):
                 continue
             severity = str(c.get("severity", "LOW")).upper()
-            description = clean_snippet_text(c.get("description") or c.get("contradiction_text") or "Potential contradiction")
+            description = clean_snippet_text(c.get("description") or c.get("contradiction_text") or c.get("aspect") or c.get("evidence_shows") or "Potential contradiction")
             source = c.get("source", "LLM evidence synthesis")
 
             if description in ("Potential contradiction", ""):
@@ -237,8 +268,15 @@ class ContradictionAnalyzer:
         for source_type, items in by_type.items():
             summary_parts.append(f"\n{source_type} Sources:")
             for ev in items[:5]:  # Top 5 per type
+                text = (
+                    ev.get("full_text")
+                    or ev.get("relevant_text")
+                    or ev.get("snippet")
+                    or ev.get("title")
+                    or ""
+                )
                 summary_parts.append(
-                    f"- {ev.get('source_name')}: {ev.get('relevant_text')[:200]}"
+                    f"- {ev.get('source_name')}: {text[:200]}"
                 )
         return "\n".join(summary_parts)
 

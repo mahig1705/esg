@@ -236,7 +236,7 @@ class ReportParserService:
         
         # Initialize LangChain text splitter
         try:
-            from langchain.text_splitter import RecursiveCharacterTextSplitter
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
             self.text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=self.CHUNK_SIZE,
                 chunk_overlap=self.CHUNK_OVERLAP,

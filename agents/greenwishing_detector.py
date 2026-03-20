@@ -14,8 +14,9 @@ Supports: SEBI BRSR, CSRD, SEC Climate Rules, UK FCA anti-greenwashing
 import json
 import re
 from typing import Dict, Any, List, Optional
+from core.llm_call import call_llm
+import asyncio
 from datetime import datetime
-from core.llm_client import llm_client
 from config.agent_prompts import GREENWISHING_DETECTION_PROMPT
 
 
@@ -27,7 +28,6 @@ class GreenwishingDetector:
     
     def __init__(self):
         self.name = "Greenwishing & Greenhushing Detection Specialist"
-        self.llm = llm_client
         
         # Greenwishing indicators
         self.greenwishing_indicators = {
@@ -178,7 +178,13 @@ class GreenwishingDetector:
         texts = []
         for ev in evidence[:15]:
             title = ev.get("title", "")
-            snippet = ev.get("snippet", ev.get("relevant_text", ""))
+            snippet = (
+                ev.get("full_text")
+                or ev.get("relevant_text")
+                or ev.get("snippet")
+                or ev.get("title")
+                or ""
+            )
             texts.append(f"{title}: {snippet}")
         return "\n\n".join(texts)[:10000]
 
@@ -633,10 +639,10 @@ EVIDENCE:
 
 Analyze for greenwishing, greenhushing, and selective disclosure. Return JSON."""
         
-        response = self.llm.call_with_fallback(prompt, use_gemini_first=True)
-        
-        if not response:
-            return {"analysis_performed": False, "error": "LLM call failed"}
+        try:
+            response = asyncio.run(call_llm("greenwishing_detection", prompt, system=GREENWISHING_DETECTION_PROMPT))
+        except Exception as e:
+            return {"analysis_performed": False, "error": f"LLM call failed: {e}"}
         
         try:
             cleaned = re.sub(r'```\s*json?\s*', '', response)

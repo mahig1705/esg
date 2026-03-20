@@ -1,0 +1,95 @@
+{
+  "emissions_floors": {
+    "Oil & Gas": {
+      "scope1_min": 1000000,
+      "scope1_typical_low": 500000000,
+      "scope1_typical_high": 2000000000,
+      "scope3_min": 10000000,
+      "notes": "Majors: 300M-2B tCO2e. Mid-size: 10M-300M."
+    },
+    "Energy / Utilities": {
+      "scope1_min": 500000,
+      "scope1_typical_low": 10000000,
+      "scope1_typical_high": 500000000,
+      "notes": "Coal/gas power plants dominate. Renewables-only may be lower."
+    },
+    "Mining & Metals": {
+      "scope1_min": 100000,
+      "scope1_typical_low": 1000000,
+      "scope1_typical_high": 100000000,
+      "notes": "Steel, aluminum, cement are high-intensity."
+    },
+    "Manufacturing": {
+      "scope1_min": 10000,
+      "scope1_typical_low": 100000,
+      "scope1_typical_high": 10000000,
+      "notes": "Highly variable — heavy vs light manufacturing."
+    },
+    "Aviation": {
+      "scope1_min": 100000,
+      "scope1_typical_low": 5000000,
+      "scope1_typical_high": 100000000,
+      "notes": "Jet fuel combustion is primary source."
+    },
+    "Shipping / Maritime": {
+      "scope1_min": 50000,
+      "scope1_typical_low": 1000000,
+      "scope1_typical_high": 20000000
+    },
+    "Automotive": {
+      "scope1_min": 10000,
+      "scope1_typical_low": 500000,
+      "scope1_typical_high": 20000000,
+      "notes": "Manufacturing facilities. Scope 3 (vehicle use) is 10-100x larger."
+    },
+    "Chemicals": {
+      "scope1_min": 50000,
+      "scope1_typical_low": 500000,
+      "scope1_typical_high": 50000000
+    },
+    "Banking / Finance": {
+      "scope1_min": 1000,
+      "scope1_typical_low": 10000,
+      "scope1_typical_high": 500000,
+      "notes": "Direct ops only. Financed emissions (Scope 3 Cat 15) are the material number."
+    },
+    "IT / Technology": {
+      "scope1_min": 500,
+      "scope1_typical_low": 5000,
+      "scope1_typical_high": 1000000,
+      "notes": "Data centers dominate. Scope 2 often larger than Scope 1."
+    },
+    "Retail / Consumer": {
+      "scope1_min": 1000,
+      "scope1_typical_low": 10000,
+      "scope1_typical_high": 2000000
+    },
+    "Food & Beverage": {
+      "scope1_min": 5000,
+      "scope1_typical_low": 50000,
+      "scope1_typical_high": 10000000,
+      "notes": "Agriculture-linked Scope 3 is usually far larger."
+    },
+    "Healthcare / Pharma": {
+      "scope1_min": 1000,
+      "scope1_typical_low": 10000,
+      "scope1_typical_high": 1000000
+    },
+    "Real Estate / Construction": {
+      "scope1_min": 1000,
+      "scope1_typical_low": 50000,
+      "scope1_typical_high": 5000000
+    },
+    "Telecom": {
+      "scope1_min": 500,
+      "scope1_typical_low": 5000,
+      "scope1_typical_high": 500000
+    },
+    "Default": {
+      "scope1_min": 100,
+      "scope1_typical_low": 10000,
+      "scope1_typical_high": 1000000,
+      "notes": "Used when industry is unknown or not listed."
+    }
+  }
+}

@@ -4,8 +4,11 @@ import re
 import time
 import textwrap
 import traceback as _tb
+import asyncio
+import logging
 from urllib.parse import urlparse
 from datetime import datetime, timezone
+from core.carbon_validator import CarbonDataValidator
 from typing import Dict, Any, List, Tuple
 from core.safe_utils import safe_get, safe_number, parse_source_name, normalize_industry_label, normalize_industry_key
 
@@ -218,6 +221,12 @@ class ProfessionalReportGenerator:
         warnings = []
         generation_status = "success"
 
+        # Safety: define company/industry/ticker at method scope so sub-methods
+        # that inadvertently reference them as free variables won't crash.
+        company = str(state.get("company") or "Unknown").strip() or "Unknown"
+        industry = str(state.get("industry") or "Unknown").strip() or "Unknown"
+        ticker = str(state.get("ticker") or state.get("symbol") or "N/A").strip() or "N/A"
+
         try:
             stages_completed.append("structured_build")
             structured = self._build_structured_report(state)
@@ -292,6 +301,75 @@ class ProfessionalReportGenerator:
         if isinstance(value, (int, float)):
             return f"{float(value):.1f}{suffix}"
         return f"N/A{suffix}" if suffix else "N/A"
+
+    def _resolve_floor_label(self, carbon_validation: Any, industry_label: str) -> str:
+        """Resolve a printable industry label for fallback carbon estimates."""
+        floor_used = carbon_validation.get("floor_used") if isinstance(carbon_validation, dict) else None
+        if floor_used is None:
+            return str(industry_label or "Unknown").strip() or "Unknown"
+        floor_label = str(floor_used).strip()
+        return floor_label or (str(industry_label or "Unknown").strip() or "Unknown")
+
+    def _render_esg_mismatch_section(self, state: Dict[str, Any], major: str) -> List[str]:
+        """Render a dedicated mismatch section so it is always visible in text reports."""
+        section = [major, "SECTION 12: ESG MISMATCH DETECTOR", major]
+        mismatch = state.get("esg_mismatch_analysis")
+
+        if not isinstance(mismatch, dict) or not mismatch:
+            section.append("No ESG mismatch analysis payload was provided for this run.")
+            section.append(major)
+            return section
+
+        company = str(mismatch.get("Company Analyzed") or state.get("company") or "Unknown").strip() or "Unknown"
+        overall = str(mismatch.get("Overall Greenwashing Risk") or mismatch.get("overall_risk_level") or "N/A").strip() or "N/A"
+        summary = str(mismatch.get("Executive Summary") or mismatch.get("summary") or "No mismatch summary available.").strip()
+
+        section.append(f"Company analyzed: {company}")
+        section.append(f"Mismatch risk level: {overall}")
+        section.append("")
+        section.append("Summary:")
+        section.append(self._wrap_paragraph(summary, width=80))
+        section.append("")
+
+        future = mismatch.get("1. Future Commitments & Progress") or mismatch.get("future_commitments") or []
+        if not isinstance(future, list):
+            future = []
+
+        gaps = mismatch.get("2. Past Promise-Implementation Gaps (Mismatches)") or mismatch.get("past_gaps") or []
+        if not isinstance(gaps, list):
+            gaps = []
+
+        if future:
+            section.append("Future commitments and progress:")
+            for idx, item in enumerate(future[:3], start=1):
+                if not isinstance(item, dict):
+                    continue
+                pledge = str(item.get("Pledge") or item.get("pledge") or "Unspecified pledge").strip()
+                status = str(item.get("Status Trend") or item.get("status") or "Under verification").strip()
+                progress = str(item.get("Progress/Trend") or item.get("progress") or "No progress detail provided").strip()
+                section.append(f"  {idx}. Pledge: {pledge}")
+                section.append(f"     Status: {status} | Progress: {progress}")
+            section.append("")
+
+        if gaps:
+            section.append("Past promise-implementation gaps:")
+            for idx, item in enumerate(gaps[:3], start=1):
+                if not isinstance(item, dict):
+                    continue
+                failed = str(item.get("Failed Pledge") or item.get("failed_pledge") or "Unspecified pledge").strip()
+                flagged = str(item.get("Flagged Status") or item.get("flagged_status") or "No flagged status").strip()
+                risk = str(item.get("Risk Level") or item.get("risk_level") or "Unknown").strip()
+                evidence = str(item.get("Evidence Source") or item.get("evidence_source") or "N/A").strip()
+                section.append(f"  {idx}. Failed pledge: {failed}")
+                section.append(f"     Flag: {flagged} | Risk: {risk}")
+                section.append(f"     Evidence: {evidence}")
+            section.append("")
+
+        if not future and not gaps:
+            section.append("No structured mismatch entries were provided by the mismatch detector.")
+
+        section.append(major)
+        return section
 
     def _confidence_label(self, pct: float) -> str:
         if pct >= 75:
@@ -393,9 +471,13 @@ class ProfessionalReportGenerator:
         conf_label = self._confidence_label(conf_pct)
         report_confidence = quality.get("report_confidence_level", "MEDIUM")
 
-        threshold = float(calibration.get("optimal_threshold") or 50.0)
-        delta = gw_score - threshold
-        cal_status = f"Score is {abs(delta):.1f} pts {'above' if delta >= 0 else 'below'} the {threshold:.1f} threshold"
+        _raw_threshold = calibration.get("optimal_threshold")
+        threshold = float(_raw_threshold) if isinstance(_raw_threshold, (int, float)) else None
+        if threshold is not None:
+            delta = gw_score - threshold
+            cal_status = f"Score is {abs(delta):.1f} pts {'above' if delta >= 0 else 'below'} the {threshold:.1f} threshold"
+        else:
+            cal_status = "Calibration not available — threshold not computed"
 
         contradiction_output = agents.get("contradiction_analysis", {}).get("output", {}) if isinstance(agents.get("contradiction_analysis"), dict) else {}
         contradiction_list = []
@@ -423,9 +505,92 @@ class ProfessionalReportGenerator:
             compliance_results = []
         reg_gaps = [r for r in compliance_results if isinstance(r, dict) and len(r.get("gap_details", []) or []) > 0]
 
-        carbon = state.get("carbon_results") or state.get("carbon_extraction") or agents.get("carbon_extraction", {}).get("output", {}) or {}
-        if not isinstance(carbon, dict):
-            carbon = {}
+        raw_carbon = state.get("carbon_results") or state.get("carbon_extraction") or agents.get("carbon_extraction", {}).get("output", {}) or {}
+        if not isinstance(raw_carbon, dict):
+            raw_carbon = {}
+            
+        validator = CarbonDataValidator()
+        emissions_obj = raw_carbon.get("emissions") if isinstance(raw_carbon.get("emissions"), dict) else {}
+        scope1_obj = emissions_obj.get("scope1") if isinstance(emissions_obj.get("scope1"), dict) else {}
+        scope2_obj = emissions_obj.get("scope2") if isinstance(emissions_obj.get("scope2"), dict) else {}
+        scope3_obj = emissions_obj.get("scope3") if isinstance(emissions_obj.get("scope3"), dict) else {}
+
+        scope1_val = scope1_obj.get("value") if isinstance(scope1_obj, dict) else None
+        scope2_val = scope2_obj.get("value") if isinstance(scope2_obj, dict) else None
+        scope3_val = (scope3_obj.get("total") or scope3_obj.get("value")) if isinstance(scope3_obj, dict) else None
+
+        total_dict = emissions_obj.get("total") if isinstance(emissions_obj.get("total"), dict) else {}
+        combined_val = (
+            total_dict.get("scope1_2")
+            or total_dict.get("all_scopes")
+        )
+        if scope1_val is None and scope2_val is None and combined_val:
+            scope1_val = combined_val
+
+        dq = raw_carbon.get("data_quality")
+        if isinstance(dq, dict):
+            dq_score = dq.get("overall_score") or dq.get("score") or 0
+        elif isinstance(dq, (int, float)):
+            dq_score = dq
+        else:
+            dq_score = 0
+
+        has_data = any(v is not None for v in [scope1_val, scope2_val, scope3_val])
+        if has_data and dq_score == 0:
+            dq_score = 55
+
+        flat_carbon = {
+            "scope1": scope1_val,
+            "scope2": scope2_val,
+            "scope3": scope3_val,
+            "data_year": scope1_obj.get("year") if isinstance(scope1_obj, dict) else None,
+            "data_quality": dq_score,
+            "source": scope1_obj.get("source", "PDF extraction") if isinstance(scope1_obj, dict) else "PDF extraction",
+            "emissions_detail": emissions_obj,
+        }
+        
+        validated_carbon = validator.validate(flat_carbon, company, industry, report_year=datetime.now().year)
+        
+        if not validated_carbon["validation"]["passed"]:
+            logger = logging.getLogger(__name__)
+            logger.warning("Carbon data rejected for %s | reasons: %s", company, validated_carbon["validation"]["rejection_reasons"])
+            try:
+                from core.carbon_retrieval import fetch_carbon_with_fallback
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop and loop.is_running():
+                    import threading
+                    _res = []
+                    def _run():
+                        _res.append(asyncio.run(
+                            fetch_carbon_with_fallback(company, ticker, industry, "US", datetime.now().year)
+                        ))
+                    _t = threading.Thread(target=_run)
+                    _t.start()
+                    _t.join()
+                    fallback_carbon = _res[0]
+                else:
+                    fallback_carbon = asyncio.run(
+                        fetch_carbon_with_fallback(company, ticker, industry, "US", datetime.now().year)
+                    )
+                validated_carbon = fallback_carbon
+            except Exception as e:
+                logger.error(f"Fallback fetch failed: {e}")
+
+        carbon = dict(raw_carbon)
+        if "emissions" not in carbon:
+            carbon["emissions"] = {}
+        carbon["emissions"]["scope1"] = {"value": validated_carbon.get("scope1"), "year": validated_carbon.get("data_year"), "source": validated_carbon.get("source")}
+        carbon["emissions"]["scope2"] = {"value": validated_carbon.get("scope2"), "year": validated_carbon.get("data_year"), "source": validated_carbon.get("source")}
+        carbon["emissions"]["scope3"] = {"total": validated_carbon.get("scope3"), "year": validated_carbon.get("data_year"), "source": validated_carbon.get("source")}
+        if "data_quality" not in carbon:
+            carbon["data_quality"] = {}
+        carbon["data_quality"]["overall_score"] = validated_carbon.get("data_quality", 0)
+        carbon["validation"] = validated_carbon.get("validation", {})
+        carbon["source_chain"] = validated_carbon.get("source_chain", [])
 
         citations = evidence.get("citations", []) or []
         premium = 0
@@ -491,6 +656,10 @@ class ProfessionalReportGenerator:
         major = self._major_divider()
         minor = self._minor_divider()
         v = self._collect_v4_values(state, structured, quality)
+        industry_label = str(
+            v.get("industry")
+            or safe_get(structured, "company", "industry", default=state.get("industry") or "Unknown")
+        ).strip() or "Unknown"
         ts = v["metadata"].get("timestamp_dt") or datetime.utcnow()
         report_id = str(v["metadata"].get("report_id") or f"{ts.strftime('%Y%m%d-%H%M%S')}-{v['company'][:4].upper()}")
         date_line = ts.strftime("%d %B %Y at %H:%M UTC")
@@ -750,32 +919,114 @@ class ProfessionalReportGenerator:
         section4.append(major)
 
         section5 = [major, "SECTION 8: CARBON EMISSIONS & CLIMATE DATA", major]
-        section5.append(f"  {'Scope':<12} {'Emissions (tCO2e)':<20} {'Year':<6} {'Source':<18} {'Quality':<10}")
-        section5.append("  " + "-" * 70)
-        missing_scopes = []
-        numeric_vals = []
-        quality_tier = str(safe_get(carbon, "data_quality", "data_confidence", default="Unknown") or "Unknown").title()
-        for name, row, key in [("Scope 1", scope1, "value"), ("Scope 2", scope2, "value"), ("Scope 3", scope3, "total")]:
-            value = row.get(key) if isinstance(row, dict) else None
-            if value is None and isinstance(row, dict):
-                value = row.get("value")
-            year = (row.get("year") if isinstance(row, dict) else None) or (row.get("reporting_year") if isinstance(row, dict) else None) or "N/A"
-            source = (row.get("source") if isinstance(row, dict) else None) or (row.get("data_source") if isinstance(row, dict) else None) or "PDF extraction"
-            quality = (row.get("confidence") if isinstance(row, dict) else None) or (row.get("data_confidence") if isinstance(row, dict) else None) or quality_tier
-            if isinstance(value, (int, float)):
-                numeric_vals.append(float(value))
-                vtxt = f"{int(value):,}"
+        carbon_validation = carbon.get("validation", {})
+        floor_label = self._resolve_floor_label(carbon_validation, industry_label)
+        
+        if carbon_validation.get("passed") is False and carbon_validation.get("fallback_estimate"):
+            fb = carbon_validation["fallback_estimate"]
+            section5.extend([
+                "  ┌" + "─" * 57 + "┐",
+                "  │  CARBON DATA — ESTIMATED (primary source unavailable)   │",
+                "  │                                                         │",
+                "  │  Scope 1: Data not verified                             │",
+                "  │  Scope 2: Data not verified                             │",
+                "  │  Scope 3: Data not verified                             │",
+                "  │                                                         │",
+                f"  │  Industry benchmark estimate for {floor_label[:19]:<19}:  │",
+                f"  │  Scope 1 typical range: {fb.get('scope1_estimated_low', 0)//1000000}M – {fb.get('scope1_estimated_high', 0)//1000000}M tCO2e/year        │",
+                "  │                                                         │",
+                "  │  Rejection reasons:                                     │"
+            ])
+            for r in carbon_validation.get("rejection_reasons", []):
+                wrapped_rs = textwrap.wrap(r, width=51)
+                for i, w in enumerate(wrapped_rs):
+                    prefix = "  │    - " if i == 0 else "  │      "
+                    section5.append(f"{prefix}{w:<51} │")
+            
+            sc = " → ".join(carbon.get("source_chain", ["CDP", "Company IR", "Regulatory filing"]))
+            section5.extend([
+                "  │                                                         │",
+                f"  │  Sources tried: {sc[:40]:<40}│",
+                "  │  All sources returned insufficient data.                │",
+                "  │                                                         │",
+                f"  │  To resolve: Upload {v['company'][:20]}'s latest Annual Report │",
+                "  │  or CDP submission PDF to get verified emissions data.  │",
+                "  └" + "─" * 57 + "┘"
+            ])
+            
+            v["quality_warnings"].append(
+                "Carbon data could not be verified from primary sources. "
+                "Emissions figures in this report are estimated ranges only. "
+                "Net-zero claim evaluation is INDICATIVE."
+            )
+            report_confidence = "TIER_2 (Indicative)"
+            v["report_confidence"] = "TIER_2 (Indicative)"
+            missing_scopes = ["Scope 1", "Scope 2", "Scope 3"]
+        else:
+            section5.append(f"  {'Scope':<12} {'Emissions (tCO2e)':<20} {'Year':<6} {'Source':<18} {'Quality':<10}")
+            section5.append("  " + "-" * 70)
+            missing_scopes = []
+            numeric_vals = []
+            quality_tier = str(safe_get(carbon, "data_quality", "data_confidence", default="Unknown") or "Unknown").title()
+            scope3_corrected = carbon.get("scope3_corrected")
+            scope3_correction_unit = carbon.get("scope3_correction_unit", "unit")
+            for name, row, key in [("Scope 1", scope1, "value"), ("Scope 2", scope2, "value"), ("Scope 3", scope3, "total")]:
+                value = row.get(key) if isinstance(row, dict) else None
+                if value is None and isinstance(row, dict):
+                    value = row.get("value")
+                year = (row.get("year") if isinstance(row, dict) else None) or (row.get("reporting_year") if isinstance(row, dict) else None) or "N/A"
+                source = (row.get("source") if isinstance(row, dict) else None) or (row.get("data_source") if isinstance(row, dict) else None) or "PDF extraction"
+                quality = (row.get("confidence") if isinstance(row, dict) else None) or (row.get("data_confidence") if isinstance(row, dict) else None) or quality_tier
+
+                if name == "Scope 3" and scope3_corrected:
+                    numeric_vals.append(float(scope3_corrected))
+                    vtxt = f"~{int(scope3_corrected):,}"
+                    source = (
+                        f"CORRECTED from raw {value} "
+                        f"({scope3_correction_unit} -> tCO2e)"
+                    )
+                    section5.append(f"  {'Scope 3*':<12} {vtxt:<20} {str(year):<6} {str(source)[:18]:<18} {str(quality)[:10]:<10}")
+                    continue
+
+                if isinstance(value, (int, float)):
+                    numeric_vals.append(float(value))
+                    vtxt = f"{int(value):,}"
+                else:
+                    vtxt = "N/A"
+                    missing_scopes.append(name)
+                section5.append(f"  {name:<12} {vtxt:<20} {str(year):<6} {str(source)[:18]:<18} {str(quality)[:10]:<10}")
+
+            if scope3_corrected:
+                raw_scope3 = None
+                if isinstance(scope3, dict):
+                    raw_scope3 = scope3.get("total")
+                    if raw_scope3 is None:
+                        raw_scope3 = scope3.get("value")
+                section5.append(
+                    f"  Scope 3    [CORRECTED] ~{scope3_corrected:,.0f} tCO2e  (raw extracted: {raw_scope3} - likely {scope3_correction_unit} error, multiplied to tCO2e. Verify against source document.)"
+                )
+            section5.append("  " + "-" * 70)
+            total_val = sum(numeric_vals) if numeric_vals else None
+            section5.append(f"  {'Total':<12} {(f'{int(total_val):,}' if isinstance(total_val, (int, float)) else 'N/A')}")
+            section5.append("  " + "-" * 70)
+            dq = self._safe_float(safe_get(carbon, "data_quality", "overall_score"), 0.0)
+            dq_conf = str(safe_get(carbon, "data_quality", "data_confidence", default="Low"))
+            
+            p_score = carbon_validation.get("validated_quality_score", dq)
+            if p_score >= 70:
+                badge = "[Verified]"
+            elif p_score >= 40:
+                badge = "[Indicative]"
             else:
-                vtxt = "N/A"
-                missing_scopes.append(name)
-            section5.append(f"  {name:<12} {vtxt:<20} {str(year):<6} {str(source)[:18]:<18} {str(quality)[:10]:<10}")
-        section5.append("  " + "-" * 70)
-        total_val = sum(numeric_vals) if numeric_vals else None
-        section5.append(f"  {'Total':<12} {(f'{int(total_val):,}' if isinstance(total_val, (int, float)) else 'N/A')}")
-        section5.append("  " + "-" * 70)
-        dq = self._safe_float(safe_get(carbon, "data_quality", "overall_score"), 0.0)
-        dq_conf = str(safe_get(carbon, "data_quality", "data_confidence", default="Low"))
-        section5.append(f"\n  Data Quality Score:   {int(dq)}/100 ({dq_conf} confidence)")
+                badge = ""
+                
+            section5.append(f"\n  Data Quality Score:   {int(p_score)}/100 ({dq_conf} confidence) {badge}")
+            
+            if carbon_validation.get("warnings"):
+                section5.append("")
+                for w in carbon_validation["warnings"]:
+                    section5.append(f"  ⚠ {w}")
+
         renewable_txt = self._fmt_pct(renewable_pct) if isinstance(renewable_pct, (int, float)) else "NOT DISCLOSED"
         section5.append(f"  Renewable Energy:     {renewable_txt} of operational electricity")
         section5.append(f"  Net-Zero Target:      {carbon.get('net_zero_target') or 'None declared'}")
@@ -849,45 +1100,103 @@ class ProfessionalReportGenerator:
 
         cal = v["calibration"]
         section9 = [major, "SECTION 10: CALIBRATION & CONFIDENCE", major]
-        spearman_r = self._safe_float(cal.get("spearman_r"), 0.7470)
-        spearman_p = self._safe_float(cal.get("spearman_p"), 0.0001)
-        point_biserial_r = self._safe_float(cal.get("point_biserial_r"), 0.7620)
-        mannwhitney_p = self._safe_float(cal.get("mannwhitney_p"), 0.0005)
-        if v["gw_score"] >= v["threshold"] + 10:
-            zone_text = (
-                f"Sits {v['gw_score'] - v['threshold']:.1f}pts above threshold - in the "
-                "calibration sample, scores this high are predominantly associated "
-                "with confirmed greenwashing cases."
-            )
-        elif v["gw_score"] <= v["threshold"] - 10:
-            zone_text = (
-                f"Sits {v['threshold'] - v['gw_score']:.1f}pts below threshold - in the "
-                "calibration sample, scores this low are more commonly associated "
-                "with legitimate ESG disclosures than with greenwashing."
-            )
+        cal_state = cal.get("calibration_status", "NOT_AVAILABLE")
+        dataset_size = cal.get("dataset_size")
+        industries_repr = cal.get("industries_represented") or []
+        sector_counts = cal.get("sector_counts") or {}
+        company_industry = v["industry"]
+
+        if cal_state == "NOT_AVAILABLE":
+            # Suppress calibration numbers entirely
+            section9.extend([
+                "Calibration not available \u2014 ground truth dataset not found or empty.",
+                "Scores should be treated as indicative only.",
+                "",
+                "  The rating should be interpreted alongside qualitative context and sector",
+                "  expertise. This is a probabilistic risk indicator, not a legal determination.",
+                "",
+                major,
+            ])
         else:
-            zone_text = (
-                "Sits near the 50.0 threshold in the grey zone - both legitimate "
-                "firms and greenwashers are observed at this score level. "
-                "Additional human review is recommended."
-            )
-        section9.extend([
-            "Calibration dataset:    Ground Truth ESG v1.0 - 21 verified company-claim pairs",
-            f"Spearman correlation:   r = {spearman_r:.4f}  (p = {spearman_p:.4f})",
-            f"Point-biserial:         r = {point_biserial_r:.4f}  (Mann-Whitney p = {mannwhitney_p:.4f})",
-            f"Optimal threshold:      {v['threshold']:.1f}/100",
-            f"Mean - greenwashing:    {self._fmt_score1(cal.get('mean_score_greenwashing')).replace('N/A', '55.1')}   Mean - legitimate: {self._fmt_score1(cal.get('mean_score_legitimate')).replace('N/A', '40.3')}",
-            "Known cases database:   17 verified regulatory actions",
-            "",
-            "Score interpretation:",
-            f"  {v['gw_score']:.1f} / 100  ->  {'above' if v['gw_score'] >= v['threshold'] else 'below'} the {v['threshold']:.1f} threshold",
-            "\n".join("  " + line for line in self._wrap_paragraph(zone_text, width=76).split("\n")),
-            "",
-            "  The rating should be interpreted alongside qualitative context and sector",
-            "  expertise. This is a probabilistic risk indicator, not a legal determination.",
-            "",
-            major,
-        ])
+            # CALIBRATED or PROVISIONAL — show computed values
+            spearman_r = cal.get("spearman_r")
+            spearman_p = cal.get("spearman_p")
+            point_biserial_r = cal.get("point_biserial_r")
+            mannwhitney_p = cal.get("mannwhitney_p")
+            mean_gw = cal.get("mean_score_greenwashing")
+            mean_leg = cal.get("mean_score_legitimate")
+
+            if cal_state == "CALIBRATED":
+                status_label = f"CALIBRATED (n={dataset_size} cases)"
+            else:
+                status_label = f"PROVISIONAL (n={dataset_size} cases \u2014 insufficient sample, treat with caution)"
+
+            if v["threshold"] is not None:
+                if v["gw_score"] >= v["threshold"] + 10:
+                    zone_text = (
+                        f"Sits {v['gw_score'] - v['threshold']:.1f}pts above threshold - in the "
+                        "calibration sample, scores this high are predominantly associated "
+                        "with confirmed greenwashing cases."
+                    )
+                elif v["gw_score"] <= v["threshold"] - 10:
+                    zone_text = (
+                        f"Sits {v['threshold'] - v['gw_score']:.1f}pts below threshold - in the "
+                        "calibration sample, scores this low are more commonly associated "
+                        "with legitimate ESG disclosures than with greenwashing."
+                    )
+                else:
+                    zone_text = (
+                        f"Sits near the {v['threshold']:.1f} threshold in the grey zone - both legitimate "
+                        "firms and greenwashers are observed at this score level. "
+                        "Additional human review is recommended."
+                    )
+            else:
+                zone_text = "Threshold not available \u2014 score interpretation requires manual review."
+
+            section9.append(f"Status:                 {status_label}")
+            section9.append(f"Calibration dataset:    Ground Truth ESG v1.0 - {dataset_size} verified company-claim pairs")
+            if isinstance(spearman_r, (int, float)) and isinstance(spearman_p, (int, float)):
+                section9.append(f"Spearman correlation:   r = {spearman_r:.4f}  (p = {spearman_p:.4f})")
+            if isinstance(point_biserial_r, (int, float)) and isinstance(mannwhitney_p, (int, float)):
+                section9.append(f"Point-biserial:         r = {point_biserial_r:.4f}  (Mann-Whitney p = {mannwhitney_p:.4f})")
+            if v["threshold"] is not None:
+                section9.append(f"Optimal threshold:      {v['threshold']:.1f}/100")
+            if isinstance(mean_gw, (int, float)) and isinstance(mean_leg, (int, float)):
+                section9.append(f"Mean - greenwashing:    {mean_gw:.1f}   Mean - legitimate: {mean_leg:.1f}")
+
+            section9.append("")
+            if v["threshold"] is not None:
+                section9.append("Score interpretation:")
+                section9.append(f"  {v['gw_score']:.1f} / 100  ->  {'above' if v['gw_score'] >= v['threshold'] else 'below'} the {v['threshold']:.1f} threshold")
+                section9.append("\n".join("  " + line for line in self._wrap_paragraph(zone_text, width=76).split("\n")))
+            else:
+                section9.append("Score interpretation:")
+                section9.append(f"  {v['gw_score']:.1f} / 100  (no calibrated threshold available)")
+
+            section9.append("")
+            section9.append("  The rating should be interpreted alongside qualitative context and sector")
+            section9.append("  expertise. This is a probabilistic risk indicator, not a legal determination.")
+
+            # Company-specific sector representativeness note
+            if dataset_size and industries_repr:
+                ind_key = company_industry.strip().lower()
+                n_sector = 0
+                for k, cnt in sector_counts.items():
+                    if k.strip().lower() == ind_key:
+                        n_sector = cnt
+                        break
+                representativeness = "well-represented" if n_sector >= 3 else "underrepresented"
+                industries_str = ", ".join(sorted(set(industries_repr)))
+                section9.append("")
+                note = (
+                    f"Note: Calibration was computed on {dataset_size} cases across "
+                    f"{industries_str}. This company's sector ({company_industry}) has "
+                    f"{n_sector} / {dataset_size} representatives in the dataset \u2014 "
+                    f"{representativeness}."
+                )
+                section9.append(self._wrap_paragraph(note, width=78))
+
+            section9.extend(["", major])
 
         section10_lines: List[str] = []
         section10_lines.append(f"Evidence coverage for this run is {len(v['citations'])} source(s), with {v['evidence'].get('verifiable_citations', 0)} verifiable citation(s).")
@@ -910,7 +1219,9 @@ class ProfessionalReportGenerator:
             section10.append(f"  - {self._wrap_paragraph(str(lim), width=74)}")
         section10.append("\n" + major)
 
-        appendix_a = [major, "APPENDIX A: VALIDATION & CALIBRATION STATUS", major, self._plain_textify(self._generate_validation_metadata_section(v.get("calibration", {}))), "", major]
+        section11 = self._render_esg_mismatch_section(state, major)
+
+        appendix_a = [major, "APPENDIX A: VALIDATION & CALIBRATION STATUS", major, self._plain_textify(self._generate_validation_metadata_section(v.get("calibration", {}), company_industry=v.get("industry", "Unknown"))), "", major]
         appendix_b = [major, "APPENDIX B: TEMPORAL ESG CONSISTENCY", major, self._plain_textify(self._generate_temporal_consistency_section(state)), "", major]
         appendix_c = [major, "APPENDIX C: EVIDENCE & OFFSET INTEGRITY", major, self._plain_textify(self._generate_realism_diagnostics_section(state)), "", major]
 
@@ -941,7 +1252,7 @@ class ProfessionalReportGenerator:
                 f"  ESG Rating:               {v['rating']}",
                 f"  Risk Band:                {v['band']}",
                 f"  Confidence:               {v['confidence_pct']:.1f}%",
-                f"  Calibration Status:       {v['calibration_status']}",
+                f"  Calibration Status:       {v['calibration_status']}  [{cal.get('calibration_status', 'N/A')}]",
                 "",
                 "  One-sentence plain-English summary:",
                 self._wrap_paragraph(summary_sentence, width=80),
@@ -960,6 +1271,7 @@ class ProfessionalReportGenerator:
             "section7": "\n".join(section7),
             "section9": "\n".join(section9),
             "section10": "\n".join(section10),
+            "section11": "\n".join(section11),
             "appendix_a": "\n".join(appendix_a),
             "appendix_b": "\n".join(appendix_b),
             "appendix_c": "\n".join(appendix_c),
@@ -968,7 +1280,7 @@ class ProfessionalReportGenerator:
 
         ordered_keys = [
             "cover", "verdict", "section1", "section2", "section3", "section6", "section4", "section5",
-            "section7", "section9", "section10", "appendix_a", "appendix_b", "appendix_c", "end",
+            "section7", "section9", "section10", "section11", "appendix_a", "appendix_b", "appendix_c", "end",
         ]
         report = "\n\n".join(blocks[k] for k in ordered_keys)
 
@@ -1833,56 +2145,122 @@ class ProfessionalReportGenerator:
         }
 
     def _extract_calibration_info(self, scores: Dict[str, Any]) -> Dict[str, Any]:
-        calibration_report: Dict[str, Any] = {}
-        calib_path = os.path.join(os.path.dirname(__file__), '../reports/calibration_report.json')
+        """Load ground truth CSV and compute calibration metrics live.
 
+        Returns a dict with calibration_status = CALIBRATED | PROVISIONAL | NOT_AVAILABLE.
+        All metric values are None when NOT_AVAILABLE (never hardcoded fallbacks).
+        """
+        import pandas as pd
+        from scipy.stats import spearmanr, pointbiserialr, mannwhitneyu
+        from sklearn.metrics import roc_curve
+
+        gt_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'ground_truth_dataset.csv')
+
+        # ---- NOT_AVAILABLE: file missing or empty ----
+        if not os.path.exists(gt_path):
+            return self._empty_calibration(scores)
         try:
-            if os.path.exists(calib_path):
-                with open(calib_path, 'r', encoding='utf-8') as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    calibration_report = loaded
-            else:
-                generated = run_calibration()
-                if isinstance(generated, dict):
-                    calibration_report = generated
+            df = pd.read_csv(gt_path)
         except Exception:
-            calibration_report = {}
+            return self._empty_calibration(scores)
+        if df.empty or len(df) == 0:
+            return self._empty_calibration(scores)
 
-        linguistic_cal = calibration_report.get("linguistic_scorer") or {}
+        # ---- Compute live calibration from dataset ----
+        try:
+            from ml_models.score_calibrator import linguistic_greenwashing_score
+            sc_scores = [
+                linguistic_greenwashing_score(
+                    str(row.get('claim_text', '')),
+                    str(row.get('company_name', '')),
+                    str(row.get('sector', '')),
+                )
+                for _, row in df.iterrows()
+            ]
+            labels = df['greenwashing_label'].values
 
-        default_calibration = {
-            "spearman_r": 0.747,
-            "spearman_p": 0.0001,
-            "point_biserial_r": 0.762,
-            "mannwhitney_p": 0.0005,
-            "optimal_threshold": 50.0,
-            "mean_score_greenwashing": 55.1,
-            "mean_score_legitimate": 40.3,
-            "calibration_status": "CALIBRATED",
-        }
+            spearman = spearmanr(sc_scores, labels)
+            try:
+                pointb = pointbiserialr(labels, sc_scores)
+                pb_r = float(pointb[0])
+            except Exception:
+                pb_r = None
+            try:
+                mw = mannwhitneyu(
+                    [s for s, l in zip(sc_scores, labels) if l == 1],
+                    [s for s, l in zip(sc_scores, labels) if l == 0],
+                    alternative='greater',
+                )
+                mw_p = float(mw.pvalue)
+            except Exception:
+                mw_p = None
 
-        gw_score = scores.get("greenwashing_risk_score")
-        confidence_region = "unknown"
-        if isinstance(gw_score, (int, float)):
-            threshold = linguistic_cal.get("optimal_threshold") or 50
-            if gw_score >= threshold + 10:
-                confidence_region = "high_suspicion_zone"
-            elif gw_score <= threshold - 10:
-                confidence_region = "likely_legitimate_zone"
+            import numpy as np
+            scores_norm = np.array(sc_scores) / 100.0
+            fpr, tpr, thresholds = roc_curve(labels, scores_norm)
+            j_scores = tpr - fpr
+            optimal_idx = np.argmax(j_scores)
+            optimal_threshold = float(thresholds[optimal_idx] * 100)
+
+            gw_mask = labels == 1
+            leg_mask = labels == 0
+            mean_gw = float(np.mean([s for s, m in zip(sc_scores, gw_mask) if m])) if gw_mask.any() else None
+            mean_leg = float(np.mean([s for s, m in zip(sc_scores, leg_mask) if m])) if leg_mask.any() else None
+
+            dataset_size = int(len(df))
+            industries = df['sector'].dropna().unique().tolist() if 'sector' in df.columns else []
+            sector_counts = dict(df['sector'].value_counts()) if 'sector' in df.columns else {}
+
+            # Determine status based on sample size
+            if dataset_size >= 10:
+                calibration_status = "CALIBRATED"
             else:
-                confidence_region = "grey_zone"
+                calibration_status = "PROVISIONAL"
 
+            # Confidence region
+            gw_score = scores.get("greenwashing_risk_score")
+            confidence_region = "unknown"
+            if isinstance(gw_score, (int, float)):
+                if gw_score >= optimal_threshold + 10:
+                    confidence_region = "high_suspicion_zone"
+                elif gw_score <= optimal_threshold - 10:
+                    confidence_region = "likely_legitimate_zone"
+                else:
+                    confidence_region = "grey_zone"
+
+            return {
+                "spearman_r": float(spearman.correlation),
+                "spearman_p": float(spearman.pvalue),
+                "point_biserial_r": pb_r,
+                "mannwhitney_p": mw_p,
+                "optimal_threshold": optimal_threshold,
+                "mean_score_greenwashing": mean_gw,
+                "mean_score_legitimate": mean_leg,
+                "calibration_status": calibration_status,
+                "confidence_region": confidence_region,
+                "dataset_size": dataset_size,
+                "industries_represented": industries,
+                "sector_counts": sector_counts,
+            }
+        except Exception:
+            return self._empty_calibration(scores)
+
+    def _empty_calibration(self, scores: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a NOT_AVAILABLE calibration dict with all values as None."""
+        gw_score = scores.get("greenwashing_risk_score")
         return {
-            "spearman_r": linguistic_cal.get("spearman_r", default_calibration["spearman_r"]),
-            "spearman_p": linguistic_cal.get("spearman_p", default_calibration["spearman_p"]),
-            "point_biserial_r": linguistic_cal.get("point_biserial_r", default_calibration["point_biserial_r"]),
-            "mannwhitney_p": linguistic_cal.get("mannwhitney_p", default_calibration["mannwhitney_p"]),
-            "optimal_threshold": linguistic_cal.get("optimal_threshold", default_calibration["optimal_threshold"]),
-            "mean_score_greenwashing": linguistic_cal.get("mean_score_greenwashing", default_calibration["mean_score_greenwashing"]),
-            "mean_score_legitimate": linguistic_cal.get("mean_score_legitimate", default_calibration["mean_score_legitimate"]),
-            "calibration_status": linguistic_cal.get("calibration_status", default_calibration["calibration_status"]),
-            "confidence_region": confidence_region,
+            "spearman_r": None,
+            "spearman_p": None,
+            "point_biserial_r": None,
+            "mannwhitney_p": None,
+            "optimal_threshold": None,
+            "mean_score_greenwashing": None,
+            "mean_score_legitimate": None,
+            "calibration_status": "NOT_AVAILABLE",
+            "confidence_region": "unknown",
+            "dataset_size": None,
+            "industries_represented": [],
+            "sector_counts": {},
         }
 
     def _infer_limitations(
@@ -2358,6 +2736,19 @@ class ProfessionalReportGenerator:
                 scope1 = output.get("scope1") or (output.get("emissions", {}).get("scope1", {}).get("value"))
                 scope2 = output.get("scope2") or (output.get("emissions", {}).get("scope2", {}).get("value"))
                 scope3 = output.get("scope3") or (output.get("emissions", {}).get("scope3", {}).get("total"))
+                carbon_data = output
+                scope3_display = carbon_data.get("scope3", scope3)
+                scope3_corrected = carbon_data.get("scope3_corrected")
+
+                if scope3_corrected:
+                    scope3_line = (
+                        f"Scope 3    [CORRECTED] ~{scope3_corrected:,.0f} tCO2e  "
+                        f"(raw extracted: {scope3_display} - likely "
+                        f"{carbon_data.get('scope3_correction_unit','unit')} error, "
+                        f"multiplied to tCO2e. Verify against source document.)"
+                    )
+                else:
+                    scope3_line = f"Scope 3    {scope3_display}"
                 quality = _as_dict(output.get("data_quality"))
                 q_score = quality.get("overall_score") if isinstance(quality, dict) else quality
                 q_conf = quality.get("data_confidence", "Unknown") if isinstance(quality, dict) else "Unknown"
@@ -2367,7 +2758,7 @@ class ProfessionalReportGenerator:
                 lines.append(
                     f"The carbon extractor analyzed {output.get('articles_analyzed', 0)} evidence items and {_as_dict(output.get('source_coverage')).get('report_chunks', 0)} report chunks. "
                     f"Scope 1: {scope1 if scope1 is not None else 'NOT DISCLOSED'} tCO2e. Scope 2: {scope2 if scope2 is not None else 'NOT DISCLOSED'} tCO2e. "
-                    f"Scope 3: {scope3 if scope3 is not None else 'NOT DISCLOSED'}. Data quality: {q_score if q_score is not None else 'N/A'}/100 ({q_conf} confidence). "
+                    f"{scope3_line}. Data quality: {q_score if q_score is not None else 'N/A'}/100 ({q_conf} confidence). "
                     f"Missing disclosures: {missing}."
                 )
                 if scope1 is None and scope2 is None and scope3 is None:
@@ -2636,10 +3027,15 @@ Score: {score:.1f}/100 — {level}
 {detail}
 """
 
-    def _generate_validation_metadata_section(self, calibration: Dict[str, Any] = None) -> str:
+    def _generate_validation_metadata_section(self, calibration: Dict[str, Any] = None, company_industry: str = "Unknown") -> str:
         """Add validation & calibration status section."""
         if calibration is None:
             calibration = {}
+        cal_state = calibration.get("calibration_status", "NOT_AVAILABLE")
+        dataset_size = calibration.get("dataset_size")
+        industries_repr = calibration.get("industries_represented") or []
+        sector_counts = calibration.get("sector_counts") or {}
+
         lines = [
             "VALIDATION & CALIBRATION STATUS",
             "─" * 52,
@@ -2648,14 +3044,13 @@ Score: {score:.1f}/100 — {level}
         # Ground Truth
         lines.append("")
         lines.append("Ground Truth Validation:")
-        gt_path = os.path.join(os.path.dirname(__file__), '../data/ground_truth_dataset.csv')
-        if os.path.exists(gt_path):
-            import pandas as pd
-            df = pd.read_csv(gt_path)
-            lines.append(f"  Dataset:           Ground Truth ESG Dataset v1.0 (data/ground_truth_dataset.csv)")
-            lines.append(f"  Verified Cases:    {len(df)} company-claim pairs with regulatory verdicts")
+        if cal_state == "NOT_AVAILABLE":
+            lines.append("  Dataset:           Not available — ground truth dataset not found or empty")
+            lines.append("  Status:            NOT_AVAILABLE — calibration numbers suppressed")
         else:
-            lines.append("  Dataset:           Not available — run run_validation.py first")
+            lines.append(f"  Dataset:           Ground Truth ESG Dataset v1.0 (data/ground_truth_dataset.csv)")
+            lines.append(f"  Verified Cases:    {dataset_size} company-claim pairs with regulatory verdicts")
+            lines.append(f"  Status:            {cal_state}")
 
         # ML Model Performance
         lines.append("")
@@ -2677,22 +3072,41 @@ Score: {score:.1f}/100 — {level}
         lines.append("")
         lines.append("Score Calibration:")
         spearman_r = calibration.get("spearman_r")
-        calib_status = calibration.get("calibration_status", "UNKNOWN")
-        if isinstance(spearman_r, (int, float)):
-            lines.append(f"  Spearman r:        {spearman_r:.4f} ({calib_status})")
-        else:
-            lines.append("  Spearman r:        Not available — run run_validation.py first")
-        optimal = calibration.get("optimal_threshold")
-        if isinstance(optimal, (int, float)):
-            lines.append(f"  Optimal Threshold: {optimal}/100")
-        else:
+        if cal_state == "NOT_AVAILABLE":
+            lines.append("  Spearman r:        Not available — no ground truth data")
             lines.append("  Optimal Threshold: Not available")
+        elif isinstance(spearman_r, (int, float)):
+            lines.append(f"  Spearman r:        {spearman_r:.4f} ({cal_state})")
+            optimal = calibration.get("optimal_threshold")
+            if isinstance(optimal, (int, float)):
+                lines.append(f"  Optimal Threshold: {optimal:.1f}/100")
+            else:
+                lines.append("  Optimal Threshold: Not available")
+        else:
+            lines.append("  Spearman r:        Computation failed")
+
+        # Company-specific sector note
+        if cal_state != "NOT_AVAILABLE" and dataset_size and industries_repr:
+            ind_key = company_industry.strip().lower()
+            n_sector = 0
+            for k, cnt in sector_counts.items():
+                if k.strip().lower() == ind_key:
+                    n_sector = cnt
+                    break
+            representativeness = "well-represented" if n_sector >= 3 else "underrepresented"
+            industries_str = ", ".join(sorted(set(industries_repr)))
+            lines.append("")
+            lines.append(f"  Sector Coverage:   {company_industry} has {n_sector}/{dataset_size} cases — {representativeness}")
+            lines.append(f"  Industries:        {industries_str}")
 
         # Contradiction DB
         lines.append("")
         lines.append("Contradiction Database:")
-        from data.known_cases import KNOWN_GREENWASHING_CASES
-        lines.append(f"  Known Cases:       {sum(len(v) for v in KNOWN_GREENWASHING_CASES.values())} verified regulatory actions")
+        try:
+            from data.known_cases import KNOWN_GREENWASHING_CASES
+            lines.append(f"  Known Cases:       {sum(len(v) for v in KNOWN_GREENWASHING_CASES.values())} verified regulatory actions")
+        except Exception:
+            lines.append("  Known Cases:       Not available")
         lines.append("  Data Sources:      UK ASA, Dutch Courts, US FTC, US SEC, InfluenceMap, ClientEarth")
 
         return "\n".join(lines)
@@ -2780,6 +3194,7 @@ Score: {score:.1f}/100 — {level}
             "REGULATORY COMPLIANCE ASSESSMENT",
             "─" * 52,
             f"Compliance Score: {compliance['score']}/100  (Risk Level: {compliance['risk_level']})",
+            f"Score breakdown: {compliance.get('score_breakdown', 'N/A')}",
             "",
             "| Regulation | Status | Gap Count |",
             "|------------|--------|-----------|",
@@ -3514,7 +3929,7 @@ KEY PERFORMANCE METRICS
                 used_baseline = bool(carbon_data.get("used_baseline_estimate", False))
                 note_prefix = "Estimated from industry baselines; underlying disclosures are missing for: " if used_baseline else "Missing scope disclosures: "
                 # If carbon is non-material to the sector, keep this note out of the main body.
-                if industry.lower().replace(" ", "_") in ["oil_and_gas", "coal", "mining", "aviation", "power", "cement", "steel", "energy", "utilities", "banking"]:
+                if v["industry"].lower().replace(" ", "_") in ["oil_and_gas", "coal", "mining", "aviation", "power", "cement", "steel", "energy", "utilities", "banking"]:
                     section += f"\nNote: {note_prefix}{', '.join(missing_scope_rows)}\n"
                 else:
                     section += f"\nNote (non-material carbon context): {', '.join(missing_scope_rows)}\n"
@@ -3616,7 +4031,7 @@ KEY PERFORMANCE METRICS
                         "aviation": 0.03, "manufacturing": 0.015, "technology": 0.005,
                         "finance": 0.001, "healthcare": 0.008,
                     }
-                    industry_key = industry.lower().replace(" ", "_").replace("&", "and")
+                    industry_key = v["industry"].lower().replace(" ", "_").replace("&", "and")
                     industry_avg = carbon_benchmarks.get(industry_key, 0.01)
                     status = "Above Avg" if carbon_intensity > industry_avg else "Below Avg"
                     section += f"| {'Carbon Intensity':<30} | {carbon_intensity:.6f} tCO2/${'':>8} | {status:<15} |\n"
@@ -3627,7 +4042,7 @@ KEY PERFORMANCE METRICS
                         "oil_and_gas": 0.002, "energy": 0.0015, "automotive": 0.001,
                         "manufacturing": 0.0008, "food_beverage": 0.003,
                     }
-                    industry_key = industry.lower().replace(" ", "_").replace("&", "and")
+                    industry_key = v["industry"].lower().replace(" ", "_").replace("&", "and")
                     industry_avg = water_benchmarks.get(industry_key, 0.001)
                     status = "Above Avg" if water_efficiency > industry_avg else "Below Avg"
                     section += f"| {'Water Intensity':<30} | {water_efficiency:.6f} L/${'':>10} | {status:<15} |\n"
@@ -3637,7 +4052,7 @@ KEY PERFORMANCE METRICS
                         "oil_and_gas": 0.003, "energy": 0.0025, "manufacturing": 0.002,
                         "technology": 0.0008, "finance": 0.0005,
                     }
-                    industry_key = industry.lower().replace(" ", "_").replace("&", "and")
+                    industry_key = v["industry"].lower().replace(" ", "_").replace("&", "and")
                     industry_avg = energy_benchmarks.get(industry_key, 0.0015)
                     status = "Above Avg" if energy_efficiency > industry_avg else "Below Avg"
                     section += f"| {'Energy Intensity':<30} | {energy_efficiency:.6f} kWh/${'':>8} | {status:<15} |\n"
@@ -3645,8 +4060,8 @@ KEY PERFORMANCE METRICS
                 section += "\n"
                 section += "Interpretation:\n"
                 section += "  • Lower intensity = Better environmental efficiency\n"
-                section += f"  • {company} carbon footprint per revenue dollar\n"
-                section += f"  • Benchmarked against {industry} sector averages\n\n"
+                section += f"  • {v['company']} carbon footprint per revenue dollar\n"
+                section += f"  • Benchmarked against {v['industry']} sector averages\n\n"
 
         if not has_carbon_data:
             section += "ENVIRONMENTAL METRICS\n"
@@ -4255,9 +4670,15 @@ REGULATORY COMPLIANCE ASSESSMENT
                 risk_level = regulatory.get("risk_level", "N/A")
 
             applicable_regs = regulatory.get("applicable_regulations", [])
+            score_breakdown = (
+                regulatory.get("score_breakdown")
+                or (compliance_score.get("score_breakdown") if isinstance(compliance_score, dict) else None)
+                or "N/A"
+            )
 
             section += f"Jurisdiction: {jurisdiction}\n"
             section += f"Compliance Score: {compliance_score_value}/100\n"
+            section += f"Score breakdown: {score_breakdown}\n"
             section += f"Risk Level: {risk_level}\n\n"
 
             if applicable_regs:
