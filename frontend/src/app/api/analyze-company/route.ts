@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import {
   classifyLogLevel,
   deriveResult,
+  ensureBackendEnvLoaded,
   getAnalysisScriptPath,
   getLatestStoredReport,
   getPythonExecutable,
@@ -22,10 +23,11 @@ function toSseChunk(event: StreamEvent): string {
 }
 
 export async function POST(req: Request) {
+  ensureBackendEnvLoaded();
   const { company_name, claim, industry } = await req.json();
 
   if (!company_name || !claim) {
-    return new Response(JSON.stringify({ error: "Company name and claim are required" }), {
+    return new Response(JSON.stringify({ status: "invalid_input", message: "Input required" }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
@@ -42,6 +44,19 @@ export async function POST(req: Request) {
       const scriptPath = getAnalysisScriptPath();
       const repoRoot = getRepoRoot();
       const analysisStartedAt = Date.now();
+
+      if (!process.env.CEREBRAS_API_KEY) {
+        pushEvent({
+          event: "status",
+          payload: {
+            state: "idle",
+            message: "Analysis is waiting for runtime credentials.",
+          },
+        });
+        pushEvent({ event: "end", payload: { ok: false } });
+        controller.close();
+        return;
+      }
 
       pushEvent({
         event: "status",
@@ -63,9 +78,50 @@ export async function POST(req: Request) {
         },
       );
 
-      let stderrText = "";
       let stdoutBuffer = "";
       let stderrBuffer = "";
+
+      const pushResultFromReport = (latestReport: Awaited<ReturnType<typeof getLatestStoredReport>>, status: "fallback" | "success") => {
+        if (!latestReport) {
+          return;
+        }
+
+        const derived = deriveResult(latestReport.reportMarkdown, latestReport.jsonReport);
+        const parsedMainReport = parseMainReport(latestReport.reportMarkdown);
+
+        pushEvent({
+          event: "result",
+          payload: {
+            status,
+            company_name,
+            claim,
+            industry: industry || "Auto-detected",
+            risk_level: derived.riskLevel,
+            confidence: derived.confidence,
+            summary: derived.summary,
+            report_markdown: latestReport.reportMarkdown,
+            report_file_name: latestReport.txtFileName,
+            report_created_at: latestReport.createdAt,
+            parsed_main_report: parsedMainReport,
+            json_report: latestReport.jsonReport,
+            json_file_name: latestReport.jsonFileName,
+          },
+        });
+      };
+
+      const pushFallbackResult = async (status: "fallback" | "success") => {
+        const latestReport = await getLatestStoredReport(company_name, analysisStartedAt - 5_000);
+        if (!latestReport) {
+          pushEvent({ event: "end", payload: { ok: false } });
+          controller.close();
+          return;
+        }
+
+        pushResultFromReport(latestReport, status);
+
+        pushEvent({ event: "end", payload: { ok: true } });
+        controller.close();
+      };
 
       const handleBuffer = (buffer: string, source: "stdout" | "stderr") => {
         const lines = buffer.split(/\r?\n/);
@@ -75,10 +131,6 @@ export async function POST(req: Request) {
           const trimmed = line.trim();
           if (!trimmed) {
             continue;
-          }
-
-          if (source === "stderr") {
-            stderrText += `${trimmed}\n`;
           }
 
           if (!isImportantLogLine(trimmed)) {
@@ -120,12 +172,13 @@ export async function POST(req: Request) {
         });
       }, 4500);
 
-      child.on("error", (error) => {
+      child.on("error", () => {
         clearInterval(heartbeat);
         pushEvent({
-          event: "error",
+          event: "status",
           payload: {
-            message: `Failed to start Python process: ${error.message}`,
+            state: "idle",
+            message: "Run did not start. No output was generated.",
           },
         });
         pushEvent({ event: "end", payload: { ok: false } });
@@ -137,28 +190,39 @@ export async function POST(req: Request) {
 
         if (exitCode !== 0) {
           pushEvent({
-            event: "error",
+            event: "status",
             payload: {
-              message: "Analysis failed. Check logs for details.",
+              state: "fallback",
+              message: "Primary pipeline did not complete.",
               exitCode,
-              details: stderrText.slice(-2000),
             },
           });
-          pushEvent({ event: "end", payload: { ok: false } });
-          controller.close();
+          await pushFallbackResult("fallback");
           return;
         }
 
         const latestReport = await getLatestStoredReport(company_name, analysisStartedAt - 60_000);
         if (!latestReport) {
-          pushEvent({
-            event: "error",
-            payload: {
-              message: "Analysis finished, but no report file was found in reports directory.",
-              diagnostics: {
-                repoRoot,
-                company_name,
+          const latestAvailable = await getLatestStoredReport(company_name);
+          if (latestAvailable) {
+            pushEvent({
+              event: "status",
+              payload: {
+                state: "fallback",
+                message: "No fresh report file was detected from this run; serving the latest available report.",
               },
+            });
+            pushResultFromReport(latestAvailable, "fallback");
+            pushEvent({ event: "end", payload: { ok: true } });
+            controller.close();
+            return;
+          }
+
+          pushEvent({
+            event: "status",
+            payload: {
+              state: "idle",
+              message: "No fresh report was produced for this run.",
             },
           });
           pushEvent({ event: "end", payload: { ok: false } });

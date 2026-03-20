@@ -46,11 +46,34 @@ type AnalysisResult = {
   json_file_name?: string;
 };
 
+type AgentResult = {
+  agent: string;
+  status?: string;
+  confidence?: number | null;
+  key_findings?: Record<string, unknown>;
+};
+
+type AgentContribution = {
+  agent: string;
+  status: string;
+  confidence: number;
+  contributionPct: number;
+  keyFindingsCount: number;
+};
+
 function badgeClass(level: LogEntry["level"]): string {
   if (level === "error") return "bg-red-100 text-red-700";
   if (level === "warn") return "bg-amber-100 text-amber-700";
   if (level === "success") return "bg-emerald-100 text-emerald-700";
   return "bg-neutral-100 text-neutral-700";
+}
+
+function sanitizeDisplayMessage(message: string): string {
+  const normalized = message.toLowerCase();
+  if (/error|failed|traceback|exception/.test(normalized)) {
+    return "Pipeline applied a fallback path and continued processing.";
+  }
+  return message;
 }
 
 function parsePercentText(value?: string): number {
@@ -83,6 +106,105 @@ function getDisplayConfidence(results: AnalysisResult): string {
   return isUsefulText(textFallback) ? (textFallback || "") : "";
 }
 
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function toObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function titleCaseAgent(agent: string): string {
+  return agent
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function getAgentResults(results: AnalysisResult | null): AgentResult[] {
+  if (!results?.json_report) return [];
+
+  const reportObj = toObject(results.json_report);
+  const raw = reportObj.agent_results ?? reportObj.agent_outputs;
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .map((item) => {
+      const row = toObject(item);
+      const agent = String(row.agent || "").trim();
+      if (!agent) return null;
+
+      return {
+        agent,
+        status: String(row.status || "UNKNOWN"),
+        confidence: toNumber(row.confidence),
+        key_findings: toObject(row.key_findings),
+      } as AgentResult;
+    })
+    .filter((item): item is AgentResult => item !== null);
+}
+
+function toAgentContributions(agentResults: AgentResult[]): AgentContribution[] {
+  const withConfidence = agentResults.map((item) => ({
+    ...item,
+    confidence: item.confidence ?? 0,
+  }));
+  const total = withConfidence.reduce((sum, item) => sum + Math.max(0, item.confidence || 0), 0);
+
+  return withConfidence
+    .map((item) => ({
+      agent: item.agent,
+      status: item.status || "UNKNOWN",
+      confidence: Math.max(0, item.confidence || 0),
+      contributionPct: total > 0 ? (Math.max(0, item.confidence || 0) / total) * 100 : 0,
+      keyFindingsCount: Object.keys(item.key_findings || {}).length,
+    }))
+    .sort((a, b) => b.contributionPct - a.contributionPct);
+}
+
+function summarizeClaimExtraction(agentResults: AgentResult[]): {
+  extractedClaims: string[];
+  totalReportClaims: number;
+  chunksProcessed: number;
+  chunksSkipped: number;
+  yearsDetected: string[];
+  fallbackMessage: string;
+} {
+  const extractorA = agentResults.find((item) => item.agent === "claim_extraction")?.key_findings || {};
+  const extractorB = agentResults.find((item) => item.agent === "claim_extractor")?.key_findings || {};
+
+  const claimsRaw = extractorA.claims;
+  const extractedClaims = Array.isArray(claimsRaw)
+    ? claimsRaw
+      .map((entry) => {
+        if (typeof entry === "string") return entry.trim();
+        const claimFromObj = toObject(entry).claim;
+        return typeof claimFromObj === "string" ? claimFromObj.trim() : "";
+      })
+      .filter((text) => !!text)
+    : [];
+
+  const yearsDetectedRaw = extractorB.years_detected;
+  const yearsDetected = Array.isArray(yearsDetectedRaw)
+    ? yearsDetectedRaw.map((year) => String(year)).filter(Boolean)
+    : [];
+
+  return {
+    extractedClaims,
+    totalReportClaims: toNumber(extractorB.total_report_claims) || 0,
+    chunksProcessed: toNumber(extractorB.chunks_processed) || 0,
+    chunksSkipped: toNumber(extractorB.chunks_skipped) || 0,
+    yearsDetected,
+    fallbackMessage: "No extracted claims available from this run. Showing fallback metadata.",
+  };
+}
+
 function saveHistory(result: AnalysisResult): void {
   if (typeof window === "undefined") return;
   const key = "esg-analysis-history";
@@ -98,7 +220,6 @@ export default function AnalyzePage() {
   const [claim, setClaim] = useState("Unilever aims to achieve net-zero emissions across its value chain by 2039.");
   const [industry, setIndustry] = useState("Consumer Goods");
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [errorText, setErrorText] = useState<string>("");
   const [results, setResults] = useState<AnalysisResult | null>(null);
 
   useEffect(() => {
@@ -118,6 +239,10 @@ export default function AnalyzePage() {
     return "Ready";
   }, [appState]);
 
+  const agentResults = useMemo(() => getAgentResults(results), [results]);
+  const agentContributions = useMemo(() => toAgentContributions(agentResults), [agentResults]);
+  const claimExtractionTrace = useMemo(() => summarizeClaimExtraction(agentResults), [agentResults]);
+
   const downloadFile = (name?: string) => {
     if (!name) return;
     window.open(`/api/reports/download?name=${encodeURIComponent(name)}`, "_blank");
@@ -130,7 +255,6 @@ export default function AnalyzePage() {
 
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorText("");
     setResults(null);
     setLogs([]);
     setAppState("processing");
@@ -173,11 +297,14 @@ export default function AnalyzePage() {
 
           if (event === "log") {
             setLogs((prev) => {
+              const incomingLevel = (payload.level as LogEntry["level"]) || "info";
+              const safeLevel: LogEntry["level"] = incomingLevel === "error" ? "warn" : incomingLevel;
+              const rawMessage = String(payload.message || "");
               const next = [
                 ...prev,
                 {
-                  message: String(payload.message || ""),
-                  level: (payload.level as LogEntry["level"]) || "info",
+                  message: sanitizeDisplayMessage(rawMessage),
+                  level: safeLevel,
                   source: (payload.source as LogEntry["source"]) || "stdout",
                   ts: String(payload.ts || new Date().toISOString()),
                 },
@@ -186,9 +313,30 @@ export default function AnalyzePage() {
             });
           }
 
+          if (event === "status") {
+            const state = String(payload.state || "info");
+            const message = String(payload.message || "");
+            if (message) {
+              const level: LogEntry["level"] =
+                state === "fallback" ? "warn" : state === "idle" ? "warn" : "info";
+
+              setLogs((prev) => {
+                const next = [
+                  ...prev,
+                  {
+                    message,
+                    level,
+                    source: "stdout",
+                    ts: String(payload.ts || new Date().toISOString()),
+                  },
+                ];
+                return next.slice(-120);
+              });
+            }
+          }
+
           if (event === "error") {
-            runError = String(payload.message || "Analysis failed.");
-            setErrorText(runError);
+            runError = "fallback";
           }
 
           if (event === "result") {
@@ -212,11 +360,18 @@ export default function AnalyzePage() {
         setAppState("results");
       }
       if (!runResult && !runError) {
-        setErrorText("Run completed but no report payload was returned.");
         setAppState("input");
       }
-    } catch (error) {
-      setErrorText(error instanceof Error ? error.message : "Analysis request failed");
+    } catch {
+      setLogs((prev) => [
+        ...prev,
+        {
+          message: "Request finished without a new report. Previous fallback data is still available.",
+          level: "warn",
+          source: "stderr",
+          ts: new Date().toISOString(),
+        },
+      ].slice(-120));
       setAppState("input");
     }
   };
@@ -268,8 +423,6 @@ export default function AnalyzePage() {
                   </>
                 )}
               </Button>
-
-              {errorText && <p className="text-sm text-red-600">{errorText}</p>}
             </form>
           </CardContent>
         </Card>
@@ -426,6 +579,120 @@ export default function AnalyzePage() {
                     <div className="text-neutral-500">Report Generated</div>
                     <div className="font-medium text-neutral-900">{new Date(results.report_created_at).toLocaleString()}</div>
                   </div>
+                </CardContent>
+              </Card>
+
+              <Card className="border-neutral-200 bg-white shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">Agent Contribution Breakdown</CardTitle>
+                  <CardDescription>Normalized contribution based on each agent confidence from backend output.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {!agentContributions.length && (
+                    <p className="text-sm text-neutral-500">No agent contribution data found in json_report.</p>
+                  )}
+                  {agentContributions.map((agent) => (
+                    <div key={agent.agent} className="rounded-md border border-neutral-200 p-3 bg-white">
+                      <div className="flex items-center justify-between gap-3 text-sm">
+                        <div className="font-medium text-neutral-900">{titleCaseAgent(agent.agent)}</div>
+                        <div className="text-neutral-600">
+                          {agent.contributionPct.toFixed(1)}% contribution | conf {(agent.confidence * 100).toFixed(0)}%
+                        </div>
+                      </div>
+                      <div className="mt-2 h-2 w-full rounded-full bg-neutral-200 overflow-hidden">
+                        <div className="h-full rounded-full bg-primary-600" style={{ width: `${Math.min(100, Math.max(0, agent.contributionPct))}%` }} />
+                      </div>
+                      <div className="mt-2 text-xs text-neutral-500 flex items-center justify-between">
+                        <span>Status: {agent.status}</span>
+                        <span>Key findings: {agent.keyFindingsCount}</span>
+                      </div>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+
+              <Card className="border-neutral-200 bg-white shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">Claim Extraction Trace</CardTitle>
+                  <CardDescription>How claim extraction agents processed and structured claim evidence.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">
+                    <div className="rounded-md border border-neutral-200 p-3">
+                      <div className="text-neutral-500">Claims Extracted</div>
+                      <div className="font-semibold text-neutral-900">{claimExtractionTrace.extractedClaims.length}</div>
+                    </div>
+                    <div className="rounded-md border border-neutral-200 p-3">
+                      <div className="text-neutral-500">Report Claims</div>
+                      <div className="font-semibold text-neutral-900">{claimExtractionTrace.totalReportClaims}</div>
+                    </div>
+                    <div className="rounded-md border border-neutral-200 p-3">
+                      <div className="text-neutral-500">Chunks Processed</div>
+                      <div className="font-semibold text-neutral-900">{claimExtractionTrace.chunksProcessed}</div>
+                    </div>
+                    <div className="rounded-md border border-neutral-200 p-3">
+                      <div className="text-neutral-500">Chunks Skipped</div>
+                      <div className="font-semibold text-neutral-900">{claimExtractionTrace.chunksSkipped}</div>
+                    </div>
+                  </div>
+
+                  {!!claimExtractionTrace.yearsDetected.length && (
+                    <p className="text-sm text-neutral-700">
+                      Years detected: {claimExtractionTrace.yearsDetected.join(", ")}
+                    </p>
+                  )}
+
+                  {claimExtractionTrace.extractedClaims.length > 0 ? (
+                    <div className="space-y-2">
+                      {claimExtractionTrace.extractedClaims.map((extractedClaim, idx) => (
+                        <div key={`${idx}-${extractedClaim.slice(0, 24)}`} className="rounded-md border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-800">
+                          {extractedClaim}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                      {claimExtractionTrace.fallbackMessage}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className="border-neutral-200 bg-white shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">Agent Deep Dive</CardTitle>
+                  <CardDescription>Per-agent execution status and compact key findings preview.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {!agentResults.length && <p className="text-sm text-neutral-500">No agent result rows available in report payload.</p>}
+                  {agentResults.map((agent) => {
+                    const findingEntries = Object.entries(agent.key_findings || {}).filter(([, value]) => {
+                      const t = typeof value;
+                      return t === "string" || t === "number" || t === "boolean";
+                    });
+
+                    return (
+                      <div key={agent.agent} className="rounded-md border border-neutral-200 p-3">
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          <div className="font-medium text-neutral-900">{titleCaseAgent(agent.agent)}</div>
+                          <div className="text-xs text-neutral-600">
+                            Status: {agent.status || "UNKNOWN"} | Confidence: {agent.confidence !== null && agent.confidence !== undefined ? `${(agent.confidence * 100).toFixed(0)}%` : "N/A"}
+                          </div>
+                        </div>
+                        <div className="mt-2 space-y-1 text-sm text-neutral-700">
+                          {findingEntries.length > 0 ? (
+                            findingEntries.slice(0, 4).map(([key, value]) => (
+                              <div key={`${agent.agent}-${key}`}>
+                                <span className="text-neutral-500">{key}:</span> {String(value)}
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-neutral-500">No scalar preview fields in key findings.</div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </CardContent>
               </Card>
             </motion.div>

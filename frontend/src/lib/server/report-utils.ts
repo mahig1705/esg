@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
+import dotenv from "dotenv";
 
 export type AnalysisRequest = {
     companyName: string;
@@ -48,9 +49,9 @@ export function getPythonExecutable(): string {
     const repoRoot = getRepoRoot();
 
     const candidates = [
-        process.env.VIRTUAL_ENV ? path.join(process.env.VIRTUAL_ENV, "Scripts", "python.exe") : "",
         path.join(repoRoot, "venv", "Scripts", "python.exe"),
         path.join(repoRoot, ".venv", "Scripts", "python.exe"),
+        process.env.VIRTUAL_ENV ? path.join(process.env.VIRTUAL_ENV, "Scripts", "python.exe") : "",
     ].filter(Boolean);
 
     for (const candidate of candidates) {
@@ -66,6 +67,29 @@ export function getAnalysisScriptPath(): string {
     return path.join(getRepoRoot(), "main_langgraph.py");
 }
 
+let envLoaded = false;
+
+export function ensureBackendEnvLoaded(): void {
+    if (envLoaded) {
+        return;
+    }
+
+    const repoRoot = getRepoRoot();
+    const envCandidates = [
+        path.join(repoRoot, ".env"),
+        path.join(repoRoot, "frontend", ".env"),
+        path.join(repoRoot, "frontend", ".env.local"),
+    ];
+
+    for (const candidate of envCandidates) {
+        if (fsSync.existsSync(candidate)) {
+            dotenv.config({ path: candidate, override: false });
+        }
+    }
+
+    envLoaded = true;
+}
+
 export function sanitizeCompanyForFileName(company: string): string {
     return company.trim().replace(/\s+/g, "_").replace(/[^a-zA-Z0-9_-]/g, "_");
 }
@@ -76,7 +100,11 @@ export function isImportantLogLine(line: string): boolean {
         return false;
     }
 
-    return /(ANALYZING|Running|COMPLETE|FAILED|ERROR|WARNING|Risk Level|Reports saved|EXECUTIVE SUMMARY|Agent|workflow|timed out|saved|\u26a0\ufe0f|\u274c|\u2705|\ud83d\udd0d|\ud83d\udcca|\ud83d\udcbe|\ud83d\ude80)/i.test(normalized);
+    if (/^traceback\s*\(/i.test(normalized) || /^file\s+".*",\s+line\s+\d+/i.test(normalized) || /from\s+agents\./i.test(normalized)) {
+        return false;
+    }
+
+    return /(ANALYZING|Running|COMPLETE|FAILED|ERROR|WARNING|Risk Level|Reports saved|EXECUTIVE SUMMARY|\bAgent\b|workflow|timed out|saved|\u26a0\ufe0f|\u274c|\u2705|\ud83d\udd0d|\ud83d\udcca|\ud83d\udcbe|\ud83d\ude80)/i.test(normalized);
 }
 
 export function classifyLogLevel(line: string): "info" | "warn" | "error" | "success" {
@@ -280,6 +308,10 @@ function parseInlineFields(line: string): Array<{ key: string; value: string }> 
     return fields;
 }
 
+function isSeparatorLine(line: string): boolean {
+    return line.replace(/[=\-─_\s]/g, "").length === 0;
+}
+
 export function parseMainReport(reportText: string): ParsedMainReport {
     const rawLines = reportText.split(/\r?\n/);
     const lines = rawLines.map((line) => line.trim());
@@ -332,7 +364,7 @@ export function parseMainReport(reportText: string): ParsedMainReport {
         const end = section2Start > section1Start ? section2Start : lines.length;
         for (let i = section1Start + 1; i < end; i += 1) {
             const line = lines[i];
-            if (!line || /^={5,}|^[-─]{5,}/.test(line)) {
+            if (!line || /^={5,}|^[-─]{5,}/.test(line) || isSeparatorLine(line)) {
                 continue;
             }
             narrative.push(line);
@@ -343,7 +375,8 @@ export function parseMainReport(reportText: string): ParsedMainReport {
                 line.length > 50 &&
                 !line.startsWith("Pipeline:") &&
                 !/agent/i.test(line) &&
-                !/^REPORT METADATA$/i.test(line)
+                !/^REPORT METADATA$/i.test(line) &&
+                !isSeparatorLine(line)
             ) {
                 narrative.push(line);
             }

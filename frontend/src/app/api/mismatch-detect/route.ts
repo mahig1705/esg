@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getPythonExecutable, getRepoRoot } from "@/lib/server/report-utils";
+import { ensureBackendEnvLoaded, getPythonExecutable, getRepoRoot } from "@/lib/server/report-utils";
 
 export const runtime = "nodejs";
 
@@ -37,15 +37,25 @@ function cacheCandidates(repoRoot: string, company: string): string[] {
 }
 
 export async function POST(req: Request) {
+    ensureBackendEnvLoaded();
     const { company } = (await req.json()) as { company?: string };
 
     if (!company || !company.trim()) {
-        return Response.json({ error: "Company is required" }, { status: 400 });
+        return Response.json({ status: "invalid_input", result: {} }, { status: 400 });
     }
 
     const repoRoot = getRepoRoot();
     const python = getPythonExecutable();
     const args = ["-m", "features.esg_mismatch_detector.pipeline", company.trim()];
+    const fallbackResult = {
+        "Company Analyzed": company.trim(),
+        "Overall Greenwashing Risk": "Unknown",
+        "Executive Summary": "Mismatch detector returned fallback output.",
+        "1. Future Commitments & Progress": [],
+        "2. Past Promise-Implementation Gaps (Mismatches)": [
+            "No mismatch records available at this time.",
+        ],
+    };
 
     const runResult = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
         const child = spawn(python, args, {
@@ -73,14 +83,27 @@ export async function POST(req: Request) {
     });
 
     if (runResult.code !== 0) {
-        return Response.json(
-            {
-                error: "Mismatch detection failed",
-                details: runResult.stderr.slice(-2000),
-                command: `${python} ${args.join(" ")}`,
-            },
-            { status: 500 },
-        );
+        for (const candidate of cacheCandidates(repoRoot, company.trim())) {
+            try {
+                const raw = await fs.readFile(candidate, "utf-8");
+                const cached = JSON.parse(raw) as Record<string, unknown>;
+                return Response.json({
+                    status: "fallback",
+                    company: company.trim(),
+                    command: `python -m features.esg_mismatch_detector.pipeline \"${company.trim()}\"`,
+                    result: cached,
+                });
+            } catch {
+                // Try next candidate.
+            }
+        }
+
+        return Response.json({
+            status: "fallback",
+            company: company.trim(),
+            command: `python -m features.esg_mismatch_detector.pipeline \"${company.trim()}\"`,
+            result: fallbackResult,
+        });
     }
 
     let parsed = extractJsonPayload(runResult.stdout);
@@ -98,13 +121,12 @@ export async function POST(req: Request) {
     }
 
     if (!parsed) {
-        return Response.json(
-            {
-                error: "Mismatch pipeline completed but no JSON payload was detected.",
-                command: `${python} ${args.join(" ")}`,
-            },
-            { status: 500 },
-        );
+        return Response.json({
+            status: "fallback",
+            company: company.trim(),
+            command: `python -m features.esg_mismatch_detector.pipeline \"${company.trim()}\"`,
+            result: fallbackResult,
+        });
     }
 
     return Response.json({

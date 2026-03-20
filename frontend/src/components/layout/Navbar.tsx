@@ -3,8 +3,8 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { motion } from "framer-motion";
-import { ShieldCheck, Menu, X } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { ShieldCheck, Menu, X, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export default function Navbar() {
@@ -22,92 +22,121 @@ export default function Navbar() {
 
   const navLinks = [
     { name: "Platform", href: "#platform" },
-    { name: "Technology", href: "#technology" },
-    { name: "Use Cases", href: "#use-cases" },
-    { name: "Documentation", href: "#docs" },
+    { name: "Architecture", href: "#technology" },
+    { name: "Pipeline", href: "#pipeline" }, // Updated to match your new section
+    { name: "Vision", href: "#mission" },
   ];
 
   return (
     <header
-      className={`fixed top-0 w-full z-50 transition-all duration-300 ${
-        scrolled ? "bg-white/80 backdrop-blur-md shadow-sm border-b border-neutral-200/50" : "bg-transparent"
+      className={`fixed top-0 w-full z-50 transition-all duration-500 ${
+        scrolled 
+          ? "bg-white/70 backdrop-blur-xl border-b border-slate-200/50 py-3" 
+          : "bg-transparent py-5"
       }`}
     >
       <div className="container mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-20">
-          <Link href="/" className="flex items-center gap-2 group">
-            <div className="w-10 h-10 bg-primary-700 rounded-lg flex items-center justify-center shadow-md transition-transform group-hover:scale-105">
-              <ShieldCheck className="w-6 h-6 text-white" />
+        <div className="flex items-center justify-between">
+          {/* Logo Group */}
+          <Link href="/" className="flex items-center gap-3 group">
+            <div className="relative">
+              <div className="w-11 h-11 bg-slate-950 rounded-xl flex items-center justify-center shadow-lg transition-all duration-300 group-hover:rotate-[10deg] group-hover:bg-emerald-600">
+                <ShieldCheck className="w-6 h-6 text-white" />
+              </div>
+              {/* Decorative pulse for a "live" feel */}
+              <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+              </span>
             </div>
-            <span className="font-heading font-semibold text-lg text-neutral-900 tracking-tight">
-              ESG Intelligence
-            </span>
+            <div className="flex flex-col">
+              <span className="font-bold text-xl text-slate-900 tracking-tighter leading-none">
+                ESG<span className="text-emerald-600">Intel</span>
+              </span>
+              <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400 leading-none mt-1">
+                Verified Reality
+              </span>
+            </div>
           </Link>
 
           {/* Desktop Nav */}
-          <nav className="hidden md:flex items-center gap-8">
+          <nav className="hidden md:flex items-center gap-10">
             {navLinks.map((link) => (
               <Link
                 key={link.name}
                 href={link.href}
-                className="text-sm font-medium text-neutral-600 hover:text-primary-700 transition-colors"
+                className="text-sm font-semibold text-slate-600 hover:text-emerald-600 transition-all duration-300 relative group"
               >
                 {link.name}
+                <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-emerald-500 transition-all duration-300 group-hover:w-full" />
               </Link>
             ))}
           </nav>
 
-          <div className="hidden md:flex items-center gap-4">
-            <Link href="/login">
-              <span className="text-sm font-medium text-neutral-700 hover:text-primary-700 transition-colors cursor-pointer">
-                Login
-              </span>
+          {/* Action Buttons */}
+          <div className="hidden md:flex items-center gap-6">
+            <Link href="/login" className="text-sm font-bold text-slate-700 hover:text-emerald-600 transition-colors">
+              Sign In
             </Link>
             <Link href="/signup">
-              <Button>Get Started</Button>
+              <Button className="bg-slate-900 hover:bg-emerald-600 text-white px-6 rounded-full font-bold shadow-md hover:shadow-emerald-200/50 transition-all active:scale-95">
+                Analyze Now
+              </Button>
             </Link>
           </div>
 
           {/* Mobile Menu Button */}
           <button
-            className="md:hidden p-2 text-neutral-600 hover:text-neutral-900"
+            className="md:hidden p-2 text-slate-600 hover:text-slate-950 transition-colors"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           >
-            {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+            {mobileMenuOpen ? <X className="w-7 h-7" /> : <Menu className="w-7 h-7" />}
           </button>
         </div>
       </div>
 
-      {/* Mobile Menu */}
-      {mobileMenuOpen && (
-        <motion.div
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          className="absolute top-20 left-0 w-full bg-white border-b border-neutral-200 shadow-lg md:hidden"
-        >
-          <div className="px-4 pt-2 pb-6 space-y-4">
-            {navLinks.map((link) => (
-              <Link
-                key={link.name}
-                href={link.href}
-                className="block px-3 py-2 text-base font-medium text-neutral-800 hover:bg-primary-50 hover:text-primary-700 rounded-md"
-                onClick={() => setMobileMenuOpen(false)}
-              >
-                {link.name}
-              </Link>
-            ))}
-            <div className="pt-4 flex flex-col gap-3 border-t border-neutral-100">
-              <Link href="/login" onClick={() => setMobileMenuOpen(false)}>
-                <Button variant="outline" className="w-full justify-center">Login</Button>
-              </Link>
-              <Link href="/signup" onClick={() => setMobileMenuOpen(false)}>
-                <Button className="w-full justify-center">Get Started</Button>
-              </Link>
+      {/* Mobile Menu Overlay */}
+      <AnimatePresence>
+        {mobileMenuOpen && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="absolute top-full left-0 w-full bg-white border-b border-slate-200 shadow-2xl md:hidden overflow-hidden"
+          >
+            <div className="px-6 pt-4 pb-10 space-y-4">
+              {navLinks.map((link, idx) => (
+                <motion.div
+                  key={link.name}
+                  initial={{ x: -20, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  transition={{ delay: idx * 0.1 }}
+                >
+                  <Link
+                    href={link.href}
+                    className="block py-3 text-lg font-bold text-slate-800 border-b border-slate-50 hover:text-emerald-600"
+                    onClick={() => setMobileMenuOpen(false)}
+                  >
+                    {link.name}
+                  </Link>
+                </motion.div>
+              ))}
+              <div className="pt-6 flex flex-col gap-4">
+                <Link href="/login" onClick={() => setMobileMenuOpen(false)}>
+                  <Button variant="outline" className="w-full h-12 border-slate-200 text-slate-900 font-bold">
+                    Sign In
+                  </Button>
+                </Link>
+                <Link href="/signup" onClick={() => setMobileMenuOpen(false)}>
+                  <Button className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold">
+                    Get Started <ArrowRight className="ml-2 w-4 h-4" />
+                  </Button>
+                </Link>
+              </div>
             </div>
-          </div>
-        </motion.div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </header>
   );
 }
