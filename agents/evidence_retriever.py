@@ -5,6 +5,8 @@ With intelligent relevance filtering to prevent cross-contamination
 
 import requests
 import re
+import os
+import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from urllib.parse import urlparse
@@ -78,6 +80,7 @@ class EvidenceRetriever:
         self.enterprise_fetcher = enterprise_fetcher
         from utils.free_data_sources import free_data_aggregator
         self.data_aggregator = free_data_aggregator
+        self.sg_adequacy_config = self._load_social_governance_adequacy_config()
         
         # Try importing financial analyst
         try:
@@ -105,6 +108,153 @@ class EvidenceRetriever:
         except ImportError:
             self.indian_financial_available = False
             print("⚠️ IndianFinancialData not available")
+
+    def _load_social_governance_adequacy_config(self) -> Dict[str, Any]:
+        """Load adequacy thresholds for Social/Governance scoring from config."""
+        defaults = {
+            "enabled": True,
+            "min_items_per_pillar": 4,
+            "min_distinct_sources_per_pillar": 3,
+            "min_distinct_apis_per_pillar": 2,
+            "min_high_trust_items_per_pillar": 2,
+            "high_trust_source_types": [
+                "Government/Regulatory",
+                "Government/International Data",
+                "Legal/Court Documents",
+                "Compliance/Sanctions Database",
+                "UK/EU Regulatory",
+                "NGO",
+                "Climate NGO",
+                "Supply Chain Database",
+                "Tier-1 Financial Media",
+            ],
+        }
+
+        cfg_path = "config/data_sources.json"
+        try:
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                loaded = payload.get("social_governance_adequacy", {})
+                if isinstance(loaded, dict):
+                    defaults.update(loaded)
+        except Exception as exc:
+            print(f"⚠️ Failed loading social/governance adequacy config: {exc}")
+
+        return defaults
+
+    @staticmethod
+    def _normalize_signal_text(ev: Dict[str, Any]) -> str:
+        return " ".join([
+            str(ev.get("relevant_text", "") or ""),
+            str(ev.get("snippet", "") or ""),
+            str(ev.get("title", "") or ""),
+        ]).lower()
+
+    def _evaluate_social_governance_adequacy(self, evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = self.sg_adequacy_config if isinstance(self.sg_adequacy_config, dict) else {}
+        if not cfg.get("enabled", True):
+            return {
+                "enabled": False,
+                "overall_ready": True,
+                "social": {"is_adequate": True},
+                "governance": {"is_adequate": True},
+                "warnings": [],
+            }
+
+        min_items = int(cfg.get("min_items_per_pillar", 4) or 4)
+        min_sources = int(cfg.get("min_distinct_sources_per_pillar", 3) or 3)
+        min_apis = int(cfg.get("min_distinct_apis_per_pillar", 2) or 2)
+        min_high_trust = int(cfg.get("min_high_trust_items_per_pillar", 2) or 2)
+        high_trust_types = set(cfg.get("high_trust_source_types", []))
+
+        social_keywords = [
+            "labor", "labour", "worker", "workplace", "safety", "injury", "fatality",
+            "human rights", "union", "diversity", "dei", "discrimination", "harassment",
+            "supply chain", "community",
+        ]
+        governance_keywords = [
+            "board", "independence", "audit", "ethics", "compliance", "corruption",
+            "bribery", "fraud", "restatement", "whistleblower", "transparency",
+            "sanction", "enforcement", "governance", "executive pay",
+        ]
+
+        social_evidence: List[Dict[str, Any]] = []
+        governance_evidence: List[Dict[str, Any]] = []
+
+        for ev in evidence:
+            if not isinstance(ev, dict):
+                continue
+            text = self._normalize_signal_text(ev)
+            source_type = str(ev.get("source_type", "") or "")
+
+            if any(k in text for k in social_keywords) or source_type in {"NGO", "Climate NGO", "Supply Chain Database"}:
+                social_evidence.append(ev)
+
+            if any(k in text for k in governance_keywords) or source_type in {
+                "Government/Regulatory",
+                "Legal/Court Documents",
+                "Compliance/Sanctions Database",
+                "UK/EU Regulatory",
+            }:
+                governance_evidence.append(ev)
+
+        def summarize(items: List[Dict[str, Any]], pillar_name: str) -> Dict[str, Any]:
+            distinct_sources = {
+                str(item.get("source_name") or item.get("source") or "Unknown").strip().lower()
+                for item in items
+                if isinstance(item, dict)
+            }
+            distinct_apis = {
+                str(item.get("data_source_api") or "Unknown").strip().lower()
+                for item in items
+                if isinstance(item, dict)
+            }
+            high_trust_count = sum(
+                1
+                for item in items
+                if str(item.get("source_type", "") or "") in high_trust_types
+            )
+
+            is_adequate = (
+                len(items) >= min_items
+                and len([s for s in distinct_sources if s]) >= min_sources
+                and len([a for a in distinct_apis if a]) >= min_apis
+                and high_trust_count >= min_high_trust
+            )
+
+            warning = None
+            if not is_adequate:
+                warning = (
+                    f"{pillar_name} evidence insufficient: items={len(items)} (min {min_items}), "
+                    f"sources={len(distinct_sources)} (min {min_sources}), "
+                    f"apis={len(distinct_apis)} (min {min_apis}), "
+                    f"high_trust={high_trust_count} (min {min_high_trust})."
+                )
+
+            return {
+                "is_adequate": is_adequate,
+                "items": len(items),
+                "distinct_sources": len(distinct_sources),
+                "distinct_apis": len(distinct_apis),
+                "high_trust_items": high_trust_count,
+                "warning": warning,
+            }
+
+        social_summary = summarize(social_evidence, "Social")
+        governance_summary = summarize(governance_evidence, "Governance")
+        warnings = [
+            msg for msg in [social_summary.get("warning"), governance_summary.get("warning")]
+            if msg
+        ]
+
+        return {
+            "enabled": True,
+            "overall_ready": bool(social_summary["is_adequate"] and governance_summary["is_adequate"]),
+            "social": social_summary,
+            "governance": governance_summary,
+            "warnings": warnings,
+        }
     
     def retrieve_evidence(self, claim: Dict[str, Any], company: str) -> Dict[str, Any]:
         """
@@ -562,6 +712,7 @@ class EvidenceRetriever:
         """
         
         if not evidence:
+            sg_adequacy = self._evaluate_social_governance_adequacy([])
             return {
                 "evidence_gap": True,
                 "independent_sources": 0,
@@ -570,7 +721,8 @@ class EvidenceRetriever:
                 "source_diversity": 0,
                 "total_sources": 0,
                 "source_type_breakdown": {},
-                "api_source_breakdown": {}
+                "api_source_breakdown": {},
+                "social_governance_adequacy": sg_adequacy,
             }
         
         # Count independent sources
@@ -610,6 +762,7 @@ class EvidenceRetriever:
         # Coverage score
         total_api_sources = len([k for k in source_dict.keys() if source_dict[k]])
         coverage_score = (total_api_sources / 6) * 100  # 6 main source types
+        sg_adequacy = self._evaluate_social_governance_adequacy(evidence)
         
         return {
             "evidence_gap": evidence_gap,
@@ -621,5 +774,6 @@ class EvidenceRetriever:
             "coverage_score": round(coverage_score, 1),
             "total_sources": len(evidence),
             "source_type_breakdown": type_breakdown,
-            "api_source_breakdown": api_breakdown
+            "api_source_breakdown": api_breakdown,
+            "social_governance_adequacy": sg_adequacy,
         }

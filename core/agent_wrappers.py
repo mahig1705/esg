@@ -1271,6 +1271,7 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
     analyses = {
         "contradiction_analysis": [],
         "evidence": list(state.get("evidence", [])),
+        "evidence_quality_metrics": {},
         "credibility_analysis": {},
         "sentiment_analysis": [],
         "historical_analysis": {},
@@ -1301,6 +1302,8 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
                 nested_evidence = agent_result.get("evidence", [])
                 if isinstance(nested_evidence, list) and nested_evidence:
                     analyses["evidence"].extend([e for e in nested_evidence if isinstance(e, dict)])
+                if isinstance(agent_result.get("quality_metrics"), dict):
+                    analyses["evidence_quality_metrics"] = agent_result.get("quality_metrics", {})
                 # Extract financial context
                 if "financial_context" in output:
                     analyses["financial_context"] = output["financial_context"]

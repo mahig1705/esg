@@ -1,293 +1,358 @@
-# ESG Greenwashing Detection System
+# ESG Greenwashing Detection Platform
 
-**Enterprise-grade AI-powered greenwashing detection** with 14 specialized agents, 15 data sources, and ML-enhanced risk scoring.
+This repository contains an enterprise-grade ESG intelligence platform for detecting greenwashing and ESG claim mismatch risk using multi-agent AI, machine learning, regulatory mapping, and explainability.
 
-## 🚀 Quick Start
+This README is the single consolidated project document and merges the important content that was previously split across multiple files.
 
-### **1. Install Dependencies**
-```21
-6pip install -r requirements.txt
-`5``
+## 1. What the Platform Does
 
-### **2. Set API Keys** (Optional - works with free sources)
-Create `.env` file:
-```env
-# Premium (Optional)
-NEWS_API_KEY=your_newsapi_key
-NEWSDATA_API_KEY=your_newsdata_key
+Given a company and a sustainability claim, the system:
 
-# LLMs (Choose one)
-GROQ_API_KEY=your_groq_key
-GOOGLE_API_KEY=your_gemini_key
-```
+1. Collects evidence from news, regulatory, financial, and report sources.
+2. Runs specialized analysis agents (contradiction, temporal consistency, carbon extraction, deception patterns, regulatory checks, etc.).
+3. Produces calibrated greenwashing risk outputs (score, band, confidence, rationale).
+4. Generates executive text and JSON reports.
+5. Supports both CLI and a Next.js dashboard workflow.
 
-### **3. Run Analysis**
-```bash
-python main_langgraph.py
-```
+Primary backend entry point:
+- main_langgraph.py
 
-## 📊 What's Integrated
+## 2. Current Feature Coverage (As of March 2026)
 
-### ✅ **14 AI Agents**
-1. Claim Extractor
-2. **Evidence Retriever** (includes Financial Analyst #14)
-3. Contradiction Analyzer
-4. Historical/Temporal Analyst
-5. Industry/Peer Comparator
-6. Credibility Analyst
-7. **Risk Scorer** (ML + Formula hybrid)
-8. Sentiment Analyzer
-9. Realtime Monitor
-10. Confidence Scorer
-11. Conflict Resolver
-12. Supervisor
-13. Report Generator
-14. **Financial Analyst** (NEW - yfinance integration)
+### 2.1 Core Multi-Agent Backend
 
-### ✅ **15 Free Data Sources**
-- **4 Premium News APIs**: NewsAPI, NewsData, TheNewsAPI, Mediastack
-- **4 Free News APIs**: Google News, BBC RSS, DuckDuckGo, GDELT
-- **2 Legal APIs**: FTC Enforcement, UK CMA
-- **1 Compliance**: OpenSanctions
-- **1 Environmental**: World Bank
-- **1 Research**: Semantic Scholar
-- **1 Historical**: Wayback Machine
-- **1 Financial**: Yahoo Finance (yfinance)
+Implemented agent modules in agents/:
 
-### ✅ **ML-Enhanced Risk Scoring**
-- **XGBoost Classifier**: 3-class (HIGH/MODERATE/LOW) risk prediction
-- **Hybrid Approach**: 
-  - High confidence (≥80%): Pure ML
-  - Medium (60-79%): 70% ML + 30% Formula
-  - Low (<60%): Pure Formula
-- **10 Features**: ESG score, revenue, profit margin, carbon intensity, water/energy efficiency, industry, peer comparison, disclosure count
+1. claim_extractor.py
+2. evidence_retriever.py
+3. contradiction_analyzer.py
+4. historical_analyst.py
+5. temporal_consistency_agent.py
+6. industry_comparator.py
+7. credibility_analyst.py
+8. risk_scorer.py
+9. sentiment_analyzer.py
+10. realtime_monitor.py
+11. confidence_scorer.py
+12. conflict_resolver.py
+13. financial_analyst.py
+14. carbon_extractor.py
+15. greenwishing_detector.py
+16. regulatory_scanner.py
 
-### ✅ **Financial Analysis Integration**
-- **Real-time Financial Data**: Revenue, profit margin, debt-to-equity, beta
-- **ESG-Financial Metrics**: Carbon intensity, water efficiency, energy efficiency
-- **7 Greenwashing Patterns**:
-  1. Fossil fuel revenue growth with green claims
-  2. High carbon intensity (>1.0)
-  3. High profit + low ESG
-  4. High debt + aggressive green claims
-  5. Revenue decline + ESG claims increase
-  6. Industry leader claiming transformation
-  7. Acquisition of green companies during controversy
+What these agents cover end-to-end:
+- Claim extraction and structuring.
+- Multi-source evidence retrieval and filtering.
+- Contradiction and timeline drift detection.
+- Peer and industry benchmarking.
+- Source credibility weighting.
+- Greenwashing, greenwishing, and greenhushing pattern detection.
+- Scope 1/2/3 carbon data extraction with India-aware support.
+- Regulatory mapping across India, EU, US, UK, and global frameworks.
+- Final confidence and risk synthesis.
 
-## 🎯 Usage Examples
+### 2.2 Workflow and Orchestration
 
-### **Basic Analysis**
-```python
-from main_langgraph import ESGGreenwashingDetectorLangGraph
+Implemented in core/:
+- workflow_phase2.py: LangGraph workflow builder.
+- supervisor_agent.py: complexity analysis and route selection.
+- debate_orchestrator.py: conflict resolution for agent disagreement.
+- agent_wrappers.py: node-level orchestration and diagnostics.
+- state_schema.py: shared state structure.
+- professional_report_generator.py: executive report generation.
+- confidence_monitor.py, evidence_cache.py, vector_store.py, llm_client.py.
 
-detector = ESGGreenwashingDetectorLangGraph()
-result = detector.analyze_company(
-    company_name="Tesla",
-    claim="We are carbon neutral and have achieved net-zero emissions",
-    industry="automotive"
-)
+Routing modes:
+- Fast track for simpler claims.
+- Standard track for moderate complexity.
+- Deep analysis with debate for high complexity or conflicting signals.
 
-print(f"Risk Level: {result['risk_level']}")
-print(f"ESG Score: {result['esg_score']}")
-print(f"Confidence: {result['confidence']}")
-```
+### 2.3 ML and Explainability
 
-### **With ML Model**
-1. Train model in Google Colab:
-   - Open `notebooks/train_xgboost_risk.ipynb`
-   - Upload `data/company_esg_financial_dataset.csv` (11K rows)
-   - Run all cells (~5-7 minutes)
-   - Download `xgboost_risk_model.pkl`
+Implemented in ml_models/:
+- xgboost_risk_model.py
+- lightgbm_esg_predictor.py
+- lstm_trend_predictor.py
+- anomaly_detector.py
+- sentiment_esg_predictor.py
+- climatebert_analyzer.py
+- explainability_engine.py
 
-2. Place model:
-   ```
-   ml_models/trained/xgboost_risk_model.pkl
-   ```
+ML/XAI capabilities:
+- Hybrid risk scoring (ML + rules/formula behavior).
+- Climate language intelligence via ClimateBERT.
+- SHAP/LIME explanation generation for report-ready reasoning.
+- Trend and anomaly signals for additional risk context.
 
-3. Run analysis (automatically uses ML):
-   ```bash
-   python main_langgraph.py
-   ```
+### 2.4 Carbon, Regulatory, and India-Focused Intelligence
 
-## 📁 Project Structure
+Implemented capabilities include:
+- Scope 1/2/3 extraction and consistency checks.
+- BRSR-oriented disclosure checks.
+- India grid factor handling and Indian number notation support in extraction flows.
+- Regulatory scanners for:
+  - India: SEBI, MCA, CPCB, RBI/BEE-related contexts.
+  - EU: CSRD, EU Taxonomy, SFDR.
+  - US: SEC climate guidance, FTC green claims context.
+  - UK: FCA anti-greenwashing context.
+  - Global: GHG Protocol, SBTi, GRI, CDP.
 
-```
-ESG/
-├── agents/                    # 14 specialized AI agents
-│   ├── financial_analyst.py    # NEW: Agent #14 (yfinance)
-│   ├── evidence_retriever.py   # Calls financial_analyst
-│   ├── risk_scorer.py          # ML + Formula hybrid
-│   └── [11 other agents]
-├── core/                      # LangGraph orchestration
-│   ├── workflow_phase2.py      # Main workflow
-│   ├── agent_wrappers.py       # Node wrappers
-│   └── state_schema.py         # State management
-├── ml_models/                 # XGBoost model
-│   ├── xgboost_risk_model.py   # Model wrapper
-│   └── trained/                # Trained models
-├── utils/                     # Data sources
-│   ├── enterprise_data_sources.py
-│   ├── free_data_sources.py    # 15 APIs
-│   └── web_search.py
-├── data/                      # Datasets
-│   └── company_esg_financial_dataset.csv  # 11K rows
-├── notebooks/                 # Training
-│   └── train_xgboost_risk.ipynb  # Colab notebook
-└── main_langgraph.py          # Entry point
-```
+### 2.5 Data Source Layer and Retrieval
 
-## 🧪 Testing
+Implemented source and retrieval utilities in utils/ include:
+- free_data_sources.py
+- enterprise_data_sources.py
+- indian_data_sources.py
+- indian_financial_data.py
+- report_discovery.py
+- report_downloader.py
+- report_parser.py
+- company_report_fetcher.py
+- web_search.py
+- source_tracker.py
 
-```bash
-# Full integration test
-python test_full_integration.py
+Evidence domains covered:
+- News and media feeds.
+- Regulatory/legal signals.
+- Academic/research references.
+- Financial APIs and market context.
+- Sustainability report ingestion (PDF and HTML fallback paths).
 
-# Financial analyst test
-python test_financial_analyst.py
+### 2.6 ESG Mismatch Detector (Dedicated Pipeline)
 
-# End-to-end workflow
-python test_e2e.py
-```
+Location: features/esg_mismatch_detector/
 
-## 📊 Output Format
+This pipeline independently detects mismatch between corporate ESG promises and externally verified evidence.
 
-```json
-{
-  "risk_level": "HIGH",
-  "greenwashing_risk_score": 78.5,
-  "esg_score": 21.5,
-  "risk_source": "ML-Enhanced (70% XGBoost + 30% Formula)",
-  "confidence": 0.85,
-  
-  "ml_prediction": {
-    "prediction": "HIGH",
-    "confidence": 0.92,
-    "probabilities": {
-      "HIGH": 0.92,
-      "MODERATE": 0.06,
-      "LOW": 0.02
-    }
-  },
-  
-  "financial_analysis": {
-    "revenue_usd": 94800000000,
-    "profit_margin_pct": 4.5,
-    "carbon_intensity": 0.42,
-    "greenwashing_flags": ["..."]
-  },
-  
-  "evidence_count": 47,
-  "report": "reports/Tesla_20260205_180430.pdf"
-}
-```
+Main modules:
+- company_resolver.py
+- report_collector.py
+- promise_extractor.py
+- evidence_collector.py
+- comparison_engine.py
+- pipeline.py
 
-## 📚 Documentation
+Highlights:
+- Deterministic promise-vs-performance gap engine.
+- Qualitative violation detection (not only numeric mismatch).
+- Action-verb filtering to reduce vague implementation claims.
+- 24-hour cache for repeat runs.
 
-- **[FULL_INTEGRATION_GUIDE.md](FULL_INTEGRATION_GUIDE.md)** - Complete integration details
-- **[FINANCIAL_ANALYST_INTEGRATION.md](FINANCIAL_ANALYST_INTEGRATION.md)** - Financial analyst docs
-- **`notebooks/train_xgboost_risk.ipynb`** - ML model training
+### 2.7 Frontend Dashboard (Next.js)
 
-## 🔧 Key Features
+Location: frontend/
 
-### **Dynamic Workflow Routing**
-- **Fast Track** (3 agents): Simple claims, low complexity
-- **Standard Track** (11 agents): Normal analysis
-- **Deep Analysis** (11 agents + Debate): High complexity, controversial claims
+Implemented UI routes include:
+- Public landing, login, signup.
+- Dashboard overview and settings.
+- Analyze page with live streamed backend logs.
+- Mismatch analysis page.
+- Report history and report download experiences.
 
-### **Hybrid ML Scoring**
-- **Confidence-based ensemble**: Combines ML and formula strengths
-- **Graceful degradation**: Works without trained model
-- **Feature extraction**: Automatic from agent outputs
+Implemented API routes include:
+- api/analyze-company: starts backend analysis and streams status/log/result events.
+- api/mismatch-detect: runs mismatch pipeline.
+- api/reports: report listing.
+- api/reports/download: secure report download.
+- api/reports/pdf: PDF rendering from report artifacts.
+- api/auth/login and api/auth/signup endpoints.
 
-### **Financial Integration**
-- **Automatic**: Called during evidence retrieval
-- **Real-time**: Yahoo Finance API
-- **Comprehensive**: 7 greenwashing pattern detectors
+### 2.8 Performance and Reliability Enhancements (Integrated)
 
-## 🆘 Troubleshooting
+Integrated improvements documented in project reports include:
+- ESG section detection before heavy claim extraction.
+- Keyword-based chunk filtering to avoid irrelevant LLM calls.
+- Batch chunk processing.
+- Claim extraction caching and rate limiting.
+- Better diagnostics and integration verification helpers.
+- HTML parsing fallback and parsing stability fixes.
 
-**"XGBoost model not found"**
-- ✅ Normal - system uses formula-based scoring
-- ⚠️ To enable ML: Train model in Colab (see above)
+Impact reported in implementation docs:
+- Significant API-call and cost reduction in claim extraction workflows.
+- Faster repeated analyses due to cache reuse.
 
-**"yfinance not installed"**
-```bash
-pip install yfinance>=0.2.40
-```
+## 3. Repository Structure
 
-**Test all integrations:**
-```bash
-python test_full_integration.py
-```
+Top-level folders:
+- agents/: specialized analysis agents.
+- core/: orchestration, workflow state, report generation.
+- utils/: source adapters, report ingestion, retrieval utilities.
+- ml_models/: model wrappers and explainability logic.
+- features/esg_mismatch_detector/: mismatch pipeline.
+- frontend/: Next.js application.
+- data/: datasets and metadata.
+- tests/: integration and quality tests.
+- scripts/: maintenance and model compatibility helpers.
+- cache/: runtime caches.
+- chroma_db/: vector persistence.
+- reports/: generated outputs.
 
-## 📝 Requirements
+Key root files:
+- main_langgraph.py
+- run_validation.py
+- requirements.txt
+- pytest.ini
 
-**Minimum:**
-- Python 3.10+
-- 4GB RAM
-- Internet connection
+## 4. Setup
 
-**Recommended:**
-- Python 3.10+
-- 8GB RAM
-- GPU (for faster ML training in Colab)
+### 4.1 Backend Prerequisites
 
-## 🎓 System Architecture
+- Python 3.11+ recommended.
+- pip and virtual environment tool.
+- Internet access for live source retrieval.
 
-```
-User Input
-    ↓
-[Supervisor] → Assess Complexity → Route
-    ↓
-[Evidence Retriever] → 15 APIs + Financial Analyst
-    ↓
-[Agents] → Contradiction, Temporal, Peer, Credibility, Sentiment
-    ↓
-[Risk Scorer] → XGBoost ML + Formula + Financial Penalties
-    ↓
-[Report] → Professional PDF
-```
-
-## 🌟 What Makes This Special
-
-1. **Fully Integrated**: All 14 agents, 15 data sources, ML model work seamlessly
-2. **Production Ready**: Error handling, fallbacks, graceful degradation
-3. **Free to Use**: Works without any paid APIs
-4. **ML-Enhanced**: Optional XGBoost model for better accuracy
-5. **Financial Analysis**: Unique yfinance integration for ESG-financial correlation
-6. **Comprehensive**: Multi-source evidence, peer comparison, historical analysis
-7. **Transparent**: Explainable scoring, detailed reports
-
-## 📜 Status
-
-**✅ FULLY INTEGRATED**
-- All agents connected
-- Financial analyst operational
-- ML model wrapper ready
-- State management enhanced
-- LangGraph workflow optimized
-- Testing suite complete
-
-**Ready for production use!**
-
-## 🚀 Get Started
+### 4.2 Install Python Dependencies
 
 ```bash
-# 1. Clone/download project
-# 2. Install dependencies
 pip install -r requirements.txt
-
-# 3. Run first analysis
-python main_langgraph.py
-
-# 4. (Optional) Train ML model
-# Open notebooks/train_xgboost_risk.ipynb in Colab
 ```
 
----
+### 4.3 Environment Variables
 
-**Built with**: LangGraph, XGBoost, yfinance, Groq, Gemini
-**Version**: 3.0 (Fully Integrated)
-**Updated**: February 2026
+1. Copy .env.example to .env.
+2. Provide at least one LLM key.
 
-For detailed integration documentation, see **[FULL_INTEGRATION_GUIDE.md](FULL_INTEGRATION_GUIDE.md)**
+Minimum recommended variables:
+
+```env
+GROQ_API_KEY=your_key
+GEMINI_API_KEY=your_key
+USE_LANGGRAPH=true
+DEFAULT_JURISDICTION=India
+CLIMATEBERT_ENABLED=true
+SHAP_ENABLED=true
+```
+
+Optional but useful:
+- NEWSAPI_KEY
+- NEWSDATA_KEY
+- THENEWSAPI_KEY
+- MEDIASTACK_KEY
+- SEC_API_KEY
+
+## 5. Running the Platform
+
+### 5.1 Main ESG Analysis (CLI)
+
+Interactive mode:
+
+```bash
+python main_langgraph.py
+```
+
+Direct mode:
+
+```bash
+python main_langgraph.py --company "Unilever" --claim "Unilever aims to achieve net-zero emissions across its value chain by 2039." --industry "Consumer Goods"
+```
+
+Output files are saved to reports/ as text and JSON.
+
+### 5.2 ESG Mismatch Pipeline
+
+```bash
+python -m features.esg_mismatch_detector.pipeline "Microsoft"
+```
+
+Example cache-bypass pattern (PowerShell/Linux equivalent cleanup command may vary):
+
+```bash
+python -m features.esg_mismatch_detector.pipeline "Volkswagen"
+```
+
+### 5.3 Validation and Tests
+
+Run project validation workflow:
+
+```bash
+python run_validation.py
+```
+
+Run pytest suite:
+
+```bash
+pytest -v
+```
+
+## 6. Frontend App
+
+### 6.1 Install and Start
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open:
+- http://localhost:3000
+
+### 6.2 Frontend Runtime Behavior
+
+- Analyze UI streams backend logs and status from api/analyze-company.
+- Generated report files can be listed, downloaded, and rendered to PDF via report endpoints.
+- Mismatch detector UI invokes backend mismatch pipeline endpoint.
+
+## 7. Reports and Outputs
+
+Generated artifacts are stored in reports/:
+- ESG_Report_<Company>_<timestamp>.txt
+- ESG_Report_<Company>_<timestamp>.json
+- Optional full debug JSON (environment-flag controlled in backend).
+
+Typical report content includes:
+- Claim summary and context.
+- Risk score/band and confidence.
+- Contradiction and evidence highlights.
+- Carbon and regulatory findings when available.
+- Executive narrative for analyst use.
+
+## 8. Datasets
+
+Active datasets in data/ include:
+- company_esg_financial_dataset.csv
+- sp500_esg_data.csv
+- data.csv
+
+Additional reference/metadata datasets are also present for future expansion and baselining.
+
+## 9. Known Technical Debt
+
+Current tracked item:
+- Pydantic v2 config migration in config/settings.py:
+  - Replace deprecated class-based Config usage with model_config = ConfigDict(...).
+
+## 10. ML Compatibility Utilities
+
+Scripts under scripts/ address model compatibility after dependency upgrades:
+- test_lstm_loading.py
+- regenerate_lstm_model.py
+- regenerate_scalers.py
+
+Use these when TensorFlow/Keras or scikit-learn upgrades break serialized model/scaler loading.
+
+## 11. Consolidated Documentation Note
+
+This README consolidates and supersedes the operational content previously spread across:
+- PROJECT.README.md
+- PROJECT_FLOW_AND_ML_MODELS.md
+- NEW_FEATURES_2026.md
+- IMPLEMENTATION_SUMMARY.txt
+- pipeline.md
+- DEMO_SCRIPT_SHELL_MICROSOFT.md
+- TECH_DEBT.md
+- features/esg_mismatch_detector/README.md
+- data/README.md
+- scripts/README_ML_FIXES.md
+- frontend/README.md
+
+## 12. Current Project Status
+
+The repository now includes:
+- A production-oriented multi-agent ESG analysis backend.
+- A dedicated mismatch detection pipeline.
+- ML and explainability integration.
+- Frontend dashboard and API bridge to backend Python pipelines.
+- Caching, optimization, and stabilization improvements.
+
+In practical terms, this is beyond MVP stage and functions as a full-stack ESG intelligence platform with research and enterprise-oriented capabilities.

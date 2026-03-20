@@ -295,6 +295,41 @@
     "ilo": false,
     "open_apparel": false
   },
+  "social_governance_adequacy": {
+    "enabled": true,
+    "min_items_per_pillar": 4,
+    "min_distinct_sources_per_pillar": 3,
+    "min_distinct_apis_per_pillar": 2,
+    "min_high_trust_items_per_pillar": 2,
+    "high_trust_source_types": [
+      "Government/Regulatory",
+      "Government/International Data",
+      "Legal/Court Documents",
+      "Compliance/Sanctions Database",
+      "UK/EU Regulatory",
+      "NGO",
+      "Climate NGO",
+      "Supply Chain Database",
+      "Tier-1 Financial Media"
+    ],
+    "social_priority_free_apis": [
+      "ILO",
+      "Open Apparel Registry",
+      "HRW",
+      "OECD Cases",
+      "CourtListener",
+      "UK CMA"
+    ],
+    "governance_priority_free_apis": [
+      "SEC EDGAR",
+      "OpenSanctions",
+      "CourtListener",
+      "FTC Enforcement",
+      "UK CMA",
+      "EU Enforcement"
+    ],
+    "notes": "Social/Governance pillar decisions should be confidence-limited when these thresholds are not met."
+  },
   "version": "3.0.0",
   "total_sources": 40,
   "last_updated": "2026-02-03"

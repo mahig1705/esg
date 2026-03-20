@@ -115,7 +115,7 @@ class FreeDataAggregator:
             'supply_chain': []
         }
         
-        print(f"\n🌐 Fetching from 14 WORKING sources for: {company}")
+        print(f"\n🌐 Fetching from expanded free-source set for: {company}")
         
         # ========================================
         # PREMIUM NEWS APIs (with API keys) - 4 sources
@@ -143,11 +143,20 @@ class FreeDataAggregator:
         # ========================================
         results['legal'].extend(self._fetch_ftc_enforcement(company, max_per_source))
         results['legal'].extend(self._fetch_uk_cma(company, max_per_source))
+        results['legal'].extend(self._fetch_courtlistener(company, max_per_source))
+        results['regulatory'].extend(self._fetch_sec_full(company, max_per_source))
         
         # ========================================
         # COMPLIANCE APIs - 1 source
         # ========================================
         results['compliance'].extend(self._fetch_opensanctions(company, max_per_source))
+
+        # ========================================
+        # SOCIAL / SUPPLY-CHAIN APIs - free signals
+        # ========================================
+        results['labor'].extend(self._fetch_ilo(company, max_per_source))
+        results['labor'].extend(self._fetch_hrw(company, max_per_source))
+        results['supply_chain'].extend(self._fetch_open_apparel(company, max_per_source))
         
         # ========================================
         # ENVIRONMENTAL APIs - 1 source

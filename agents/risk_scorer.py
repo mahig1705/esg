@@ -216,8 +216,66 @@ class RiskScorer:
             else:
                 factor["points_contributed"] = 0.0
         return round(total, 1)
+
+    @staticmethod
+    def _resolve_sg_adequacy(all_analyses: Dict[str, Any]) -> Dict[str, Any]:
+        """Read social/governance adequacy diagnostics emitted by evidence retrieval."""
+        evidence = all_analyses.get("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+
+        high_trust_types = {
+            "Government/Regulatory",
+            "Government/International Data",
+            "Legal/Court Documents",
+            "Compliance/Sanctions Database",
+            "UK/EU Regulatory",
+            "NGO",
+            "Climate NGO",
+            "Supply Chain Database",
+            "Tier-1 Financial Media",
+        }
+        fallback_distinct_sources = {
+            str(ev.get("source_name") or ev.get("source") or "").strip().lower()
+            for ev in evidence
+            if isinstance(ev, dict)
+        }
+        fallback_high_trust = sum(
+            1
+            for ev in evidence
+            if isinstance(ev, dict) and str(ev.get("source_type", "") or "") in high_trust_types
+        )
+        fallback_ready = len(evidence) >= 8 and len([s for s in fallback_distinct_sources if s]) >= 3 and fallback_high_trust >= 2
+
+        defaults = {
+            "overall_ready": fallback_ready,
+            "social": {"is_adequate": fallback_ready},
+            "governance": {"is_adequate": fallback_ready},
+            "warnings": [
+                "Social/Governance adequacy metrics unavailable; using fallback heuristic."
+            ],
+        }
+
+        quality_metrics = all_analyses.get("evidence_quality_metrics", {})
+        if not isinstance(quality_metrics, dict):
+            return defaults
+
+        adequacy = quality_metrics.get("social_governance_adequacy", {})
+        if not isinstance(adequacy, dict):
+            return defaults
+
+        social_block = adequacy.get("social", {}) if isinstance(adequacy.get("social"), dict) else {}
+        governance_block = adequacy.get("governance", {}) if isinstance(adequacy.get("governance"), dict) else {}
+        warnings = adequacy.get("warnings", []) if isinstance(adequacy.get("warnings"), list) else []
+
+        return {
+            "overall_ready": bool(adequacy.get("overall_ready", False)),
+            "social": {"is_adequate": bool(social_block.get("is_adequate", False)), **social_block},
+            "governance": {"is_adequate": bool(governance_block.get("is_adequate", False)), **governance_block},
+            "warnings": warnings,
+        }
     
-    def calculate_pillar_scores(self, all_analyses: Dict[str, Any]) -> Dict[str, float]:
+    def calculate_pillar_scores(self, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
         """
         Calculate Environmental, Social, and Governance pillar scores (0-100)
         
@@ -232,6 +290,7 @@ class RiskScorer:
         
         # Get evidence and contradictions
         evidence = all_analyses.get('evidence', [])
+        sg_adequacy = self._resolve_sg_adequacy(all_analyses)
         contradiction_payload = all_analyses.get('contradiction_analysis', [])
         contradictions = []
         if isinstance(contradiction_payload, dict):
@@ -296,6 +355,11 @@ class RiskScorer:
         soc_penalty = min(soc_negative * 15, 60)
         social_score = 50 + (soc_positive * 10) - soc_penalty
         social_score = max(0, min(100, social_score))
+
+        if not sg_adequacy.get("social", {}).get("is_adequate", False):
+            # Pull social score toward neutral when evidence is not decision-grade.
+            social_score = round((social_score * 0.40) + (50.0 * 0.60), 1)
+            print("   ⚠️ Social pillar confidence-limited due to insufficient free-source evidence")
         
         print(f"   Social: {social_score:.1f}/100 (positive: {soc_positive}, contradictions: {soc_negative})")
         
@@ -309,6 +373,11 @@ class RiskScorer:
         gov_penalty = min(gov_negative * 15, 60)
         governance_score = 50 + (gov_positive * 10) - gov_penalty
         governance_score = max(0, min(100, governance_score))
+
+        if not sg_adequacy.get("governance", {}).get("is_adequate", False):
+            # Pull governance score toward neutral when evidence is not decision-grade.
+            governance_score = round((governance_score * 0.40) + (50.0 * 0.60), 1)
+            print("   ⚠️ Governance pillar confidence-limited due to insufficient free-source evidence")
 
         # Cross-pillar contradiction and regulatory gap penalties.
         high_severity_count = sum(
@@ -375,7 +444,8 @@ class RiskScorer:
             "governance_score": round(governance_score, 1),
             "overall_esg_score": round(overall_esg, 1),
             "industry_adjustment": round(industry_penalty, 1),
-            "pillar_weighting": {"E": w_e, "S": w_s, "G": w_g}
+            "pillar_weighting": {"E": w_e, "S": w_s, "G": w_g},
+            "data_adequacy": sg_adequacy,
         }
     
     def calculate_final_score(self, company: str, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
@@ -445,6 +515,7 @@ class RiskScorer:
         
         # Confidence-aware calibration for missing/estimated carbon and sparse evidence
         confidence_penalties = []
+        sg_adequacy = pillar_scores.get("data_adequacy", {}) if isinstance(pillar_scores, dict) else {}
         carbon = all_analyses.get("carbon_extraction") or all_analyses.get("carbon_results") or {}
         if isinstance(carbon, dict):
             dq = carbon.get("data_quality", {}) if isinstance(carbon.get("data_quality", {}), dict) else {}
@@ -464,6 +535,10 @@ class RiskScorer:
         temporal = all_analyses.get("temporal_consistency") or {}
         if isinstance(temporal, dict) and str(temporal.get("status", "")).lower() in {"insufficient_data", "insufficient_history"}:
             confidence_penalties.append(0.05)
+
+        if not bool(sg_adequacy.get("overall_ready", False)):
+            confidence_penalties.append(0.12)
+            print("   ⚠️ S/G decision confidence reduced (insufficient social/governance evidence coverage)")
         
         confidence_penalty_total = min(0.25, sum(confidence_penalties))
         confidence = max(0.55, confidence - confidence_penalty_total)
@@ -872,6 +947,7 @@ class RiskScorer:
             "confidence_level": round(confidence * 100, 1),
             "positive_esg_boost": round(positive_boost, 1),
             "confidence_penalty_applied": round(confidence_penalty_total * 100, 1),
+            "social_governance_decision_ready": bool(sg_adequacy.get("overall_ready", False)),
             "high_carbon_greenwashing_flag": high_carbon_greenwashing_flag,
             "esg_override_active": override_ml
         }
