@@ -22,6 +22,67 @@ from core.vector_store import vector_store
 from config.agent_prompts import REGULATORY_COMPLIANCE_PROMPT
 
 
+EU_COUNTRIES = {"DE", "FR", "NL", "DK", "SE", "IT", "ES", "PL", "BE", "AT", "CH"}
+UK_COUNTRIES = {"GB", "UK"}
+US_COUNTRIES = {"US", "USA"}
+
+
+def get_applicable_frameworks(company: str, industry: str, country: str) -> list[str]:
+    """Return framework display names based on company, industry, and country."""
+    company_upper = (company or "").upper()
+    country_code = (country or "").upper()
+
+    frameworks = []
+
+    is_indian = country_code in ("IN", "INDIA") or any(ex in company_upper for ex in ("NSE", "BSE"))
+    if is_indian:
+        frameworks.extend(
+            [
+                "SEBI BRSR (Business Responsibility and Sustainability Report)",
+                "MCA Companies Act (CSR Rules)",
+                "CPCB Environmental Compliance",
+                "RBI Green Finance Framework",
+                "India PAT Scheme (Perform, Achieve and Trade)",
+            ]
+        )
+
+    if country_code in EU_COUNTRIES:
+        frameworks.extend(
+            [
+                "EU Corporate Sustainability Reporting Directive",
+                "EU Taxonomy Regulation",
+                "EU Sustainable Finance Disclosure Regulation",
+            ]
+        )
+
+    if country_code in UK_COUNTRIES or "LONDON" in company_upper:
+        frameworks.extend(
+            [
+                "FCA Anti-Greenwashing Rule",
+                "UK TCFD-Aligned Disclosure Requirements",
+            ]
+        )
+
+    if country_code in US_COUNTRIES:
+        frameworks.extend(
+            [
+                "SEC Climate Disclosure Rule",
+                "FTC Green Guides",
+            ]
+        )
+
+    frameworks.extend(
+        [
+            "GHG Protocol Corporate Standard",
+            "GRI Sustainability Reporting Standards",
+            "CDP (Carbon Disclosure Project)",
+            "Science Based Targets initiative",
+        ]
+    )
+
+    return list(dict.fromkeys(frameworks))
+
+
 def calculate_compliance_score(compliance_results: list[dict]) -> dict:
     """
     Proportional compliance score with materiality-weighted gap penalties.
@@ -452,7 +513,9 @@ class RegulatoryHorizonScanner:
     
     def scan_regulatory_compliance(self, company: str, claim: Dict[str, Any],
                                    evidence: List[Dict[str, Any]],
-                                   jurisdiction: str = "India") -> Dict[str, Any]:
+                                   jurisdiction: str = "India",
+                                   country: Optional[str] = None,
+                                   industry: str = "") -> Dict[str, Any]:
         """
         Scan claim against applicable regulations
         
@@ -478,7 +541,13 @@ class RegulatoryHorizonScanner:
         
         # 1. Identify applicable regulations
         print("🔍 Identifying applicable regulations...")
-        applicable_regs = self._identify_applicable_regulations(claim_text, jurisdiction)
+        applicable_regs = self._identify_applicable_regulations(
+            claim_text,
+            jurisdiction,
+            company,
+            industry,
+            country,
+        )
         
         # 2. Check compliance for each regulation
         print(f"⚖️ Checking compliance against {len(applicable_regs)} regulations...")
@@ -533,31 +602,53 @@ class RegulatoryHorizonScanner:
             texts.append(f"{title}: {snippet}")
         return "\n\n".join(texts)[:8000]
     
-    def _identify_applicable_regulations(self, claim_text: str, 
-                                        jurisdiction: str) -> List[str]:
+    def _identify_applicable_regulations(self, claim_text: str,
+                                        jurisdiction: str,
+                                        company: str,
+                                        industry: str,
+                                        country: Optional[str] = None) -> List[str]:
         """Identify regulations applicable to the claim"""
         
         applicable = []
-        
-        # Add jurisdiction-specific regulations
-        jurisdiction_map = {
-            "India": ["SEBI_BRSR", "MCA_COMPANIES_ACT", "CPCB_EPA", "RBI_GREEN_FINANCE", "INDIA_BEE_PAT"],
-            "EU": ["EU_CSRD", "EU_TAXONOMY", "EU_SFDR"],
-            "US": ["SEC_CLIMATE", "FTC_GREEN_GUIDES"],
-            "UK": ["UK_FCA_ANTIGREENWASHING", "UK_TCFD"],
-            "Global": ["GHG_PROTOCOL", "SBTI", "GRI_STANDARDS", "CDP"]
+
+        country_code = (country or "").upper()
+        company_upper = (company or "").upper()
+        if not country_code:
+            if jurisdiction == "India":
+                country_code = "IN"
+            elif jurisdiction == "EU":
+                country_code = "DE"
+            elif jurisdiction == "UK":
+                country_code = "UK"
+            elif jurisdiction == "US":
+                country_code = "US"
+
+        framework_names = get_applicable_frameworks(company, industry, country_code)
+        reg_ids_by_name = {
+            reg.get("name"): reg_id
+            for reg_id, reg in self.regulations.items()
         }
-        
-        # Add primary jurisdiction regulations
-        if jurisdiction in jurisdiction_map:
-            applicable.extend(jurisdiction_map[jurisdiction])
-        
-        # Always check global frameworks
-        applicable.extend(jurisdiction_map["Global"])
+
+        for framework_name in framework_names:
+            reg_id = reg_ids_by_name.get(framework_name)
+            if reg_id:
+                applicable.append(reg_id)
+
+        allowed_jurisdictions = {"Global"}
+        if country_code in ("IN", "INDIA") or any(ex in company_upper for ex in ("NSE", "BSE")):
+            allowed_jurisdictions.add("India")
+        if country_code in EU_COUNTRIES:
+            allowed_jurisdictions.add("European Union")
+        if country_code in UK_COUNTRIES or "LONDON" in company_upper:
+            allowed_jurisdictions.add("United Kingdom")
+        if country_code in US_COUNTRIES:
+            allowed_jurisdictions.add("United States")
         
         # Check claim content for additional applicable regulations
         for reg_id, reg_data in self.regulations.items():
             if reg_id in applicable:
+                continue
+            if reg_data.get("jurisdiction") not in allowed_jurisdictions:
                 continue
                 
             for rule in reg_data.get("claim_validation_rules", []):

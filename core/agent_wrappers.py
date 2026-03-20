@@ -664,17 +664,41 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
             "claim_text": claim_text,
             "category": "sustainability"
         }
-        
-        # Determine jurisdiction based on company (Indian companies get India focus)
+
+        # Determine jurisdiction based on company name heuristics.
         indian_companies = ["reliance", "tata", "infosys", "hdfc", "icici", "wipro", "bharti", 
                           "bajaj", "mahindra", "adani", "larsen", "maruti", "asian paints"]
-        jurisdiction = "India" if any(c in company.lower() for c in indian_companies) else "Global"
+        company_lower = company.lower()
+
+        if any(c in company_lower for c in indian_companies):
+            country = "IN"
+        elif any(c in company_lower for c in ["volkswagen", "vw", "bmw", "mercedes", "daimler", "siemens", "basf", "sap"]):
+            country = "DE"
+        elif any(c in company_lower for c in ["bp", "shell", "hsbc", "unilever", "barclays", "london"]):
+            country = "UK"
+        elif any(c in company_lower for c in ["tesla", "exxon", "chevron", "walmart", "microsoft", "apple", "amazon", "google"]):
+            country = "US"
+        else:
+            country = ""
+
+        if country == "IN":
+            jurisdiction = "India"
+        elif country in {"DE", "FR", "NL", "DK", "SE", "IT", "ES", "PL", "BE", "AT", "CH"}:
+            jurisdiction = "EU"
+        elif country in {"UK", "GB"}:
+            jurisdiction = "UK"
+        elif country in {"US", "USA"}:
+            jurisdiction = "US"
+        else:
+            jurisdiction = "Global"
         
         result = scanner.scan_regulatory_compliance(
             company=company,
             claim=claim_dict,
             evidence=evidence,
-            jurisdiction=jurisdiction
+            jurisdiction=jurisdiction,
+            country=country,
+            industry=industry,
         )
         
         if isinstance(result, dict):
