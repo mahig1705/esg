@@ -12,11 +12,15 @@ from config.agent_prompts import RISK_SCORING_PROMPT
 from core.pillar_factors_builder import build_pillar_factors
 import json
 import os
+import logging
 import numpy as np
 from ml_models.xgboost_risk_model import XGBoostRiskModel
 from ml_models.lightgbm_esg_predictor import LightGBMESGPredictor
 from ml_models.lstm_trend_predictor import get_lstm_predictor
 from ml_models.anomaly_detector import get_anomaly_detector
+
+
+logger = logging.getLogger(__name__)
 
 
 class RiskScorer:
@@ -650,8 +654,10 @@ class RiskScorer:
         peer_modifier = self._calculate_peer_modifier(all_analyses, industry)
         debate_penalty = 10.0 if all_analyses.get("debate_activated") else 0.0
         
-        final_risk = adjusted_risk + peer_modifier + debate_penalty
-        greenwashing_risk_formula = max(0, min(100, final_risk))
+        # Canonical component score (before override/non-override arbitration).
+        base_risk_score = max(0, min(100, round(base_risk, 1)))
+        final_score = max(0, min(100, round(base_risk_score + industry_adjustment + peer_modifier + debate_penalty, 1)))
+        greenwashing_risk_formula = final_score
         
         print(f"   Formula Risk: {greenwashing_risk_formula:.1f}/100 (for component analysis)")
         print(f"   Industry: {industry.replace('_', ' ').title()}")
@@ -910,6 +916,42 @@ class RiskScorer:
                     print(f"   Adjusted score: 70/100 (HIGH threshold)")
                     greenwashing_risk = 70
         
+        # Step 8.5: Final greenwashing score arbitration
+        # Override path blends pillar and component signals so one source cannot fully wash out the other.
+        pillar_greenwashing = round(100 - esg_score, 1)
+
+        if override_ml:
+            component_greenwashing = base_risk_score
+            blended_score = (
+                (pillar_greenwashing * 0.60) +
+                (component_greenwashing * 0.40)
+            )
+
+            final_score = blended_score + industry_adjustment + debate_penalty
+            final_score = round(min(100, max(0, final_score)), 1)
+
+            logger.info(
+                "ESG override active for %s: "
+                "pillar=%.1f component=%.1f blend=%.1f "
+                "industry_adj=%.1f debate_penalty=%.1f final=%.1f",
+                company,
+                pillar_greenwashing,
+                component_greenwashing,
+                blended_score,
+                industry_adjustment,
+                debate_penalty,
+                final_score
+            )
+        else:
+            final_score = max(pillar_greenwashing, base_risk_score)
+            final_score = round(
+                min(100, max(0, final_score + industry_adjustment + debate_penalty)), 1
+            )
+
+        # Keep risk-level mapping aligned with final score regardless of earlier branch decisions.
+        greenwashing_risk = final_score
+        risk_level = self._risk_level_from_greenwashing_score(final_score)
+
         # Step 9: Generate insights
         top_reasons = self._generate_top_reasons(
             components, 
@@ -927,6 +969,43 @@ class RiskScorer:
             company
         )
         
+        evidence_count = len(evidence_list) if isinstance(evidence_list, list) else 0
+        credibility_metrics = (
+            all_analyses.get("credibility_analysis", {}).get("aggregate_metrics", {})
+            if isinstance(all_analyses.get("credibility_analysis"), dict)
+            else {}
+        )
+        source_quality = float(credibility_metrics.get("average_credibility", 0.7) or 0.7) * 100
+        pillar_coverage = sum(
+            1
+            for p_key in ["environmental_score", "social_score", "governance_score"]
+            if pillar_scores.get(p_key) is not None
+        )
+        confidence_penalty = self._calculate_confidence_penalty(
+            evidence_count=evidence_count,
+            source_quality=source_quality,
+            pillar_coverage=pillar_coverage,
+        )
+
+        if confidence_penalty >= 15:
+            report_tier = "TIER_3"
+            tier_label = "Preliminary Scan"
+        elif confidence_penalty >= 8:
+            report_tier = "TIER_2"
+            tier_label = "Indicative Report"
+        else:
+            report_tier = "TIER_1"
+            tier_label = "Enterprise Grade"
+
+        score_disclaimer = (
+            f"Score based on {evidence_count} sources. "
+            f"Evidence coverage is {'low' if confidence_penalty >= 8 else 'adequate'}. "
+            f"Uncertainty range: ±{round(confidence_penalty)}pts. "
+            f"Treat as {tier_label}."
+        ) if confidence_penalty >= 8 else ""
+
+        final_risk_level = self._risk_level_from_greenwashing_score(final_score)
+
         result = {
             "company": company,
             "analysis_timestamp": datetime.now().isoformat(),
@@ -937,9 +1016,10 @@ class RiskScorer:
             "base_risk_score": round(base_risk, 1),
             "industry_adjustment": round(industry_adjustment, 1),
             "peer_adjustment": round(peer_modifier, 1),
-            "greenwashing_risk_score": round(greenwashing_risk, 1),
+            "greenwashing_score": final_score,
+            "greenwashing_risk_score": final_score,
             "esg_score": round(esg_score, 1),
-            "risk_level": risk_level,
+            "risk_level": final_risk_level,
             "rating_grade": rating_grade,
             "component_scores": components,
             "pillar_scores": pillar_scores,
@@ -947,11 +1027,16 @@ class RiskScorer:
             "actionable_insights": insights,
             "confidence_level": round(confidence * 100, 1),
             "positive_esg_boost": round(positive_boost, 1),
+            "confidence_penalty": round(confidence_penalty, 1),
             "confidence_penalty_applied": round(confidence_penalty_total * 100, 1),
             "social_governance_decision_ready": bool(sg_adequacy.get("overall_ready", False)),
+            "report_tier": report_tier,
+            "score_disclaimer": score_disclaimer,
             "high_carbon_greenwashing_flag": high_carbon_greenwashing_flag,
             "esg_override_active": override_ml
         }
+        if score_disclaimer:
+            result.setdefault("quality_warnings", []).append(score_disclaimer)
         
         # Build structured pillar_factors with full sub-indicator breakdown
         try:
@@ -1000,8 +1085,29 @@ class RiskScorer:
             overall_esg = round(max(0.0, min(100.0, e * 0.35 + s * 0.30 + g * 0.35)), 1)
             result["pillar_scores"]["overall_esg_score"] = overall_esg
             result["esg_score"] = overall_esg
-            result["greenwashing_risk_score"] = round(100.0 - overall_esg, 1)
-            result["rating_grade"], result["risk_level"] = self.esg_score_to_rating(overall_esg)
+
+            # Keep final score synchronized to the final pillar-derived ESG score.
+            pillar_greenwashing_synced = round(100 - overall_esg, 1)
+            if override_ml:
+                blended_score_synced = (
+                    (pillar_greenwashing_synced * 0.60) +
+                    (base_risk_score * 0.40)
+                )
+                final_score = round(
+                    min(100, max(0, blended_score_synced + industry_adjustment + debate_penalty)), 1
+                )
+            else:
+                final_score = round(
+                    min(100, max(0, max(pillar_greenwashing_synced, base_risk_score) + industry_adjustment + debate_penalty)), 1
+                )
+
+            greenwashing_risk = final_score
+            risk_level = self._risk_level_from_greenwashing_score(final_score)
+
+            result["greenwashing_score"] = final_score
+            result["greenwashing_risk_score"] = final_score
+            result["rating_grade"], _ = self.esg_score_to_rating(overall_esg)
+            result["risk_level"] = self._risk_level_from_greenwashing_score(final_score)
             print(f"   ✅ Pillar factors populated with sub-indicator breakdown")
         except Exception as pf_err:
             print(f"   ⚠️ Pillar factors build failed: {pf_err}")
@@ -1116,6 +1222,35 @@ class RiskScorer:
             print(f"   Confidence: {anomaly_result['confidence']:.1f}%")
         
         return result
+
+    def _calculate_confidence_penalty(self, evidence_count: int, source_quality: float, pillar_coverage: int) -> float:
+        """Estimate uncertainty penalty points for report tiering only."""
+        penalty = 0.0
+
+        if evidence_count < 5:
+            penalty += 15.0
+        elif evidence_count < 10:
+            penalty += 12.0
+        elif evidence_count < 15:
+            penalty += 8.0
+
+        if source_quality < 55:
+            penalty += 3.0
+        elif source_quality < 70:
+            penalty += 1.5
+
+        if pillar_coverage < 3:
+            penalty += 2.0
+
+        return round(min(25.0, penalty), 1)
+
+    def _risk_level_from_greenwashing_score(self, score: float) -> str:
+        """Map greenwashing score bands to LOW/MODERATE/HIGH."""
+        if score < 40:
+            return "LOW"
+        if score < 65:
+            return "MODERATE"
+        return "HIGH"
     
     def _identify_industry(self, company: str, analyses: Dict) -> str:
         """
@@ -1189,14 +1324,28 @@ Industry:"""
         
         components = {}
         
+        # Normalize contradiction payloads from different agent output formats.
+        contradiction_findings = analyses.get("contradiction_analysis", {})
+        contradictions = analyses.get("contradictions", []) or []
+        if isinstance(contradiction_findings, dict):
+            contradictions = (
+                contradictions
+                or contradiction_findings.get("contradiction_list")
+                or contradiction_findings.get("contradictions")
+                or contradiction_findings.get("specific_contradictions")
+                or []
+            )
+        elif isinstance(contradiction_findings, list) and not contradictions:
+            contradictions = contradiction_findings
+
         # 1. Claim Verification (CRITICAL - FIXED scoring)
-        contradictions = analyses.get('contradiction_analysis', [])
-        if contradictions:
-            contradicted = sum(1 for c in contradictions if c.get('overall_verdict') == 'Contradicted')
-            unverifiable = sum(1 for c in contradictions if c.get('overall_verdict') == 'Unverifiable')
-            partial = sum(1 for c in contradictions if c.get('overall_verdict') == 'Partially True')
-            verified = sum(1 for c in contradictions if c.get('overall_verdict') == 'Verified')
-            total = len(contradictions)
+        verification_rows = [c for c in contradictions if isinstance(c, dict) and c.get("overall_verdict")]
+        if verification_rows:
+            contradicted = sum(1 for c in verification_rows if c.get('overall_verdict') == 'Contradicted')
+            unverifiable = sum(1 for c in verification_rows if c.get('overall_verdict') == 'Unverifiable')
+            partial = sum(1 for c in verification_rows if c.get('overall_verdict') == 'Partially True')
+            verified = sum(1 for c in verification_rows if c.get('overall_verdict') == 'Verified')
+            total = len(verification_rows)
             
             # FIXED: Increased penalty for unverifiable claims
             # Contradicted = 100 risk
@@ -1261,15 +1410,25 @@ Industry:"""
             components['historical_pattern'] = 50
         
         # 6. Contradiction Severity
-        if contradictions:
-            major_count = sum(
-                1 for c in contradictions 
-                for cont in c.get('specific_contradictions', []) 
-                if cont.get('severity') == 'Major'
-            )
-            components['contradiction_severity'] = min(100, major_count * 30)
-        else:
-            components['contradiction_severity'] = 0
+        severity_score = 0
+        contradiction_rows = [c for c in contradictions if isinstance(c, dict)]
+        for c in contradiction_rows:
+            items = c.get("specific_contradictions") if isinstance(c.get("specific_contradictions"), list) else [c]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                severity = str(item.get("severity", "")).upper()
+                if severity == "CRITICAL":
+                    severity_score += 35
+                elif severity in ("HIGH", "MAJOR"):
+                    severity_score += 25
+                elif severity == "MEDIUM":
+                    severity_score += 12
+                elif severity == "LOW":
+                    severity_score += 5
+
+        # Cap at 50 so contradictions materially impact risk without fully dominating.
+        components['contradiction_severity'] = min(50, severity_score)
         
         # At the end of calculate_components method (before return components, around line 440):
 

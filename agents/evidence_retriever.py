@@ -81,6 +81,7 @@ ESG_KEYWORDS = [
     "court", "ruling", "regulation", "compliance", "disclosure",
     "bribery", "corruption", "governance", "board", "sec filing",
     "annual report", "brsr", "tcfd", "gri", "cdp", "sbti",
+    "volkswagen", "dieselgate", "emissions scandal",
 ]
 
 
@@ -118,7 +119,12 @@ def should_fetch_full_text(source: dict) -> bool:
 
 async def fetch_newsapi(query: str, cap: int = NEWSAPI_FETCH_CAP) -> list[dict]:
     """Fetches broad ESG results from NewsAPI."""
-    api_key = os.getenv("NEWSAPI_KEY") or os.getenv("NEWS_API_KEY")
+    api_key = (
+        os.getenv("NEWS_API_KEY")
+        or os.getenv("NEWS_API_KEY_2")
+        or os.getenv("NEWSAPI_KEY")
+        or os.getenv("NEWSAPI_ORG_KEY")
+    )
     if not api_key:
         return []
 
@@ -161,7 +167,11 @@ async def fetch_newsapi(query: str, cap: int = NEWSAPI_FETCH_CAP) -> list[dict]:
 
 async def fetch_newsdata(query: str, cap: int = NEWSDATA_FETCH_CAP) -> list[dict]:
     """Fetches broad ESG results from NewsData.io."""
-    api_key = os.getenv("NEWSDATA_KEY") or os.getenv("NEWSDATA_API_KEY")
+    api_key = (
+        os.getenv("NEWSDATA_API_KEY")
+        or os.getenv("NEWSDATA_KEY")
+        or os.getenv("NEWS_DATA_KEY_2")
+    )
     if not api_key:
         return []
 
@@ -261,6 +271,39 @@ def fetch_reuters_rss(company: str, cap: int = REUTERS_RSS_FETCH_CAP) -> list[di
         return results
     except Exception as exc:
         logger.warning("Reuters RSS fetch failed: %s", exc)
+        return []
+
+
+def fetch_google_news_rss(company: str, cap: int = 10) -> list[dict]:
+    """No-key fallback source when paid/free APIs are rate-limited or unavailable."""
+    google_news_url = (
+        "https://news.google.com/rss/search"
+        f"?q={quote(company)}+ESG+sustainability+carbon"
+        "&hl=en-US&gl=US&ceid=US:en"
+    )
+    try:
+        import feedparser
+
+        feed = feedparser.parse(google_news_url)
+        results = []
+        for entry in feed.entries[:cap]:
+            source_obj = entry.get("source", {}) or {}
+            source_name = source_obj.get("title", "Google News") if isinstance(source_obj, dict) else "Google News"
+            results.append({
+                "source_name": source_name,
+                "source": source_name,
+                "url": entry.get("link", ""),
+                "title": entry.get("title", ""),
+                "snippet": (entry.get("summary", "") or "")[:300],
+                "date": entry.get("published", ""),
+                "data_source_api": "Google News RSS Fallback",
+                "reliability_tier": "General Web / Other",
+                "stance": "Neutral",
+            })
+        logger.info("Google News RSS fallback added %d sources", len(results))
+        return results
+    except Exception as exc:
+        logger.warning("Google News RSS fallback failed: %s", exc)
         return []
 
 
@@ -877,10 +920,33 @@ class EvidenceRetriever:
                 raw += await fetch_cdp_evidence(company, session)
                 raw += await fetch_company_ir(company, ticker, country, session)
 
+            # Ensure minimum evidence coverage even when news APIs or Reuters feeds fail.
+            if len(raw) < 10:
+                raw += fetch_google_news_rss(company, cap=10)
+
             if any(w in claim_text.lower() for w in ["research", "study", "report", "data"]):
                 raw += fetch_google_scholar(query, cap=SCHOLAR_FETCH_CAP)
 
             logger.info("Stage 1 complete: %d raw results fetched", len(raw))
+
+            dropped = [r for r in raw if is_blocked(r.get("url", ""))]
+            non_esg = [
+                r for r in raw
+                if not is_blocked(r.get("url", ""))
+                and not is_esg_relevant(r.get("snippet", ""))
+                and not is_priority(r.get("url", ""))
+            ]
+            logger.info(
+                "FILTER DEBUG: dropped_blocked=%d dropped_non_esg=%d",
+                len(dropped),
+                len(non_esg),
+            )
+            for r in non_esg[:5]:
+                logger.info(
+                    "  Non-ESG dropped: %s | snippet: %s",
+                    r.get("url", "")[:60],
+                    r.get("snippet", "")[:80],
+                )
 
             # Explicit blocklist pass (point A is also inside each source fetcher)
             filtered = [r for r in raw if not is_blocked(r.get("url", ""))]

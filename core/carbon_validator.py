@@ -9,6 +9,38 @@ class CarbonDataValidator:
 
     MAX_ACCEPTABLE_DATA_AGE_YEARS = 3  # reject data older than this
 
+    def _resolve_floor_key(self, industry: str, floors: dict) -> str:
+        """Resolve the best floor key for an industry with safe matching."""
+        industry = str(industry or "").strip()
+        if not industry:
+            return "Default"
+
+        # Exact match first
+        if industry in floors:
+            return industry
+
+        industry_lower = industry.lower()
+
+        # Case-insensitive exact
+        for key in floors:
+            if key.lower() == industry_lower:
+                return key
+
+        # Normalize separators for loose matching
+        normalized = industry_lower.replace("_", " ").replace("&", "and")
+        for key in floors:
+            key_norm = key.lower().replace("_", " ").replace("&", "and")
+            if normalized == key_norm:
+                return key
+
+        # Partial match (Technology -> IT / Technology)
+        for key in floors:
+            key_norm = key.lower()
+            if industry_lower in key_norm or key_norm in industry_lower:
+                return key
+
+        return "Default"
+
     def validate(self, carbon_data: dict, company: str, 
                  industry: str, report_year: int) -> dict:
         """
@@ -41,6 +73,9 @@ class CarbonDataValidator:
             "validated_quality_score": 0
         }
 
+        # Debug trace for pipeline validation handoff.
+        print(f"[DEBUG] validate called: company={company} industry={industry}")
+
         scope1 = carbon_data.get("scope1")
         scope2 = carbon_data.get("scope2")
         scope3 = carbon_data.get("scope3")
@@ -67,16 +102,70 @@ class CarbonDataValidator:
             )
             result["validation"]["fallback_triggered"] = True
             floors = self._get_floors(industry)
-            result["validation"]["floor_used"] = industry if industry in self._load_all_floors() else "Default"
+            floor_key = self._resolve_floor_key(industry, self._load_all_floors())
+            result["validation"]["floor_used"] = floor_key
             result["validation"]["fallback_estimate"] = self._build_fallback(
                 company, industry, floors
             )
             return result
         
         floors = self._get_floors(industry)
-        result["validation"]["floor_used"] = industry if industry in self._load_all_floors() else "Default"
+        floor_key = self._resolve_floor_key(industry, self._load_all_floors())
+        result["validation"]["floor_used"] = floor_key
+
+        # STEP 1: Unit detection and auto-correction (before floor checks)
+        def detect_and_correct_units(value, label):
+            """Detects ktCO2e/MtCO2e values and returns corrected tCO2e."""
+            if value is None:
+                return value, None
+            try:
+                value_num = float(value)
+            except (TypeError, ValueError):
+                return value, None
+            if value_num <= 0:
+                return value_num, None
+
+            floor_min = float(floors.get("scope1_min", 100))
+
+            # ktCO2e -> tCO2e
+            if value_num < floor_min and value_num * 1_000 >= floor_min * 0.1:
+                corrected = value_num * 1_000
+                note = (
+                    f"{label} auto-corrected: {value_num} appears to be in "
+                    f"ktCO2e. Corrected to {corrected:,.0f} tCO2e."
+                )
+                result["validation"]["warnings"].append(note)
+                return corrected, note
+
+            # MtCO2e -> tCO2e
+            if value_num < floor_min and value_num * 1_000_000 >= floor_min * 0.1:
+                corrected = value_num * 1_000_000
+                note = (
+                    f"{label} auto-corrected: {value_num} appears to be in "
+                    f"MtCO2e. Corrected to {corrected:,.0f} tCO2e."
+                )
+                result["validation"]["warnings"].append(note)
+                return corrected, note
+
+            return value_num, None
+
+        scope1, scope1_note = detect_and_correct_units(scope1, "Scope 1")
+        scope2, scope2_note = detect_and_correct_units(scope2, "Scope 2")
+        scope3, scope3_note = detect_and_correct_units(scope3, "Scope 3")
+
+        if scope1_note:
+            result["scope1_corrected"] = scope1
+        if scope2_note:
+            result["scope2_corrected"] = scope2
+        if scope3_note:
+            result["scope3_corrected"] = scope3
+
+        # Keep corrected values in result for downstream consumers.
+        result["scope1"] = scope1
+        result["scope2"] = scope2
+        result["scope3"] = scope3
         
-        # CHECK 1: Data age
+        # STEP 2: Data age check
         if carbon_data.get("data_year"):
             age = report_year - carbon_data["data_year"]
             result["validation"]["data_age_years"] = age
@@ -90,7 +179,7 @@ class CarbonDataValidator:
                 "No data_year provided — cannot assess data age."
             )
 
-        # CHECK 2: Scope 1 floor check (most critical)
+        # STEP 3: Scope 1 floor check (uses corrected values)
         if scope1 is None or scope1 == 0:
             result["validation"]["rejection_reasons"].append(
                 f"Scope 1 is missing or zero. Cannot evaluate net-zero claim "
@@ -104,24 +193,7 @@ class CarbonDataValidator:
                 f"is in MtCO2e instead of tCO2e)."
             )
 
-        # CHECK 3: Unit mismatch detection
-        # Common error: value is in MtCO2e but stored as tCO2e (off by 1M)
-        # OR value is in ktCO2e (off by 1000)
-        if scope1 and scope1 < floors["scope1_min"]:
-            if scope1 * 1_000_000 >= floors["scope1_min"]:
-                result["validation"]["warnings"].append(
-                    f"POSSIBLE UNIT ERROR: {scope1} looks like it may be in "
-                    f"MtCO2e. Multiply by 1,000,000 to get tCO2e. "
-                    f"Corrected value would be {scope1 * 1_000_000:,.0f} tCO2e."
-                )
-            elif scope1 * 1_000 >= floors["scope1_min"]:
-                result["validation"]["warnings"].append(
-                    f"POSSIBLE UNIT ERROR: {scope1} looks like it may be in "
-                    f"ktCO2e. Multiply by 1,000 to get tCO2e. "
-                    f"Corrected value would be {scope1 * 1_000:,.0f} tCO2e."
-                )
-
-        # CHECK 4: Scope 3 completeness (for net-zero claims)
+        # STEP 4: Scope 3 completeness (for net-zero claims)
         if scope1 and scope3 is not None and scope3 > 0:
             ratio = scope3 / scope1
             is_finance = industry in ("Banking / Finance", "Insurance")
@@ -165,7 +237,7 @@ class CarbonDataValidator:
                     f"Possible incomplete calculation (check category coverage)."
                 )
 
-        # CHECK 5: Data quality score threshold
+        # STEP 5: Data quality score threshold
         if carbon_data.get("data_quality", 0) < 40:
             result["validation"]["rejection_reasons"].append(
                 f"Data quality score is {carbon_data.get('data_quality', 0)}/100, "
@@ -198,7 +270,19 @@ class CarbonDataValidator:
 
     def _get_floors(self, industry: str) -> dict:
         floors = self._load_all_floors()
-        return floors.get(industry, floors["Default"])
+        floor_key = self._resolve_floor_key(industry, floors)
+        return floors.get(
+            floor_key,
+            floors.get(
+                "Default",
+                {
+                    "scope1_min": 100,
+                    "scope1_typical_low": 10000,
+                    "scope1_typical_high": 1000000,
+                    "notes": "Default floors - industry not found",
+                },
+            ),
+        )
 
     def _build_fallback(self, company: str, industry: str, floors: dict) -> dict:
         """

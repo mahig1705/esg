@@ -4200,6 +4200,14 @@ KEY PERFORMANCE METRICS
                 }
             )
 
+        risk_scoring_output = (
+            agents_struct.get("risk_scoring", {}).get("output", {})
+            if isinstance(agents_struct.get("risk_scoring", {}), dict)
+            else {}
+        )
+        if not isinstance(risk_scoring_output, dict):
+            risk_scoring_output = {}
+
         export = {
             "report_id": report_metadata.get("report_id"),
             "analysis_date": report_metadata.get("analysis_date"),
@@ -4214,6 +4222,10 @@ KEY PERFORMANCE METRICS
                 "social": pillar_scores.get("social_score"),
                 "governance": pillar_scores.get("governance_score"),
                 "confidence": scores.get("confidence", analysis_state.get("confidence")),
+                "confidence_penalty": risk_scoring_output.get("confidence_penalty"),
+                "confidence_penalty_applied": risk_scoring_output.get("confidence_penalty_applied", 0),
+                "report_tier": risk_scoring_output.get("report_tier"),
+                "score_disclaimer": risk_scoring_output.get("score_disclaimer", ""),
                 "compliance": regulatory.get("compliance_score"),
             },
             "pillar_factors": raw_scores.get("pillar_factors") or {},

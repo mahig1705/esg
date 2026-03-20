@@ -475,7 +475,7 @@ class CarbonExtractor:
             report_claims_by_year=report_claims_by_year or {}
         )
 
-        industry_hint = self._estimate_industry_for_baseline(company, extraction_text)
+        industry_hint = self._derive_industry_hint(company, extraction_text, claim)
         chunk_texts = []
         for chunk in report_chunks or []:
             if isinstance(chunk, dict) and chunk.get("text"):
@@ -581,7 +581,7 @@ class CarbonExtractor:
         used_baseline_estimate = False
         baseline_industry = "unknown"
         if not llm_has_data:
-            baseline_industry = self._estimate_industry_for_baseline(company, extraction_text)
+            baseline_industry = self._derive_industry_hint(company, extraction_text, claim)
             baseline = self.industry_emissions_baselines.get(baseline_industry, self.industry_emissions_baselines["unknown"])
             extracted_data = {
                 "scope1": {"value": baseline["scope1"], "unit": "tCO2e", "year": None, "source": f"Industry baseline estimate ({baseline_industry})"},
@@ -947,7 +947,19 @@ class CarbonExtractor:
         Kept intentionally simple and deterministic (no external calls).
         """
         hay = f"{company} {text}".lower()
-        if any(k in hay for k in ["oil", "gas", "petroleum", "refinery", "upstream", "downstream", "lng"]):
+        # Avoid false positives from generic "greenhouse gas" language.
+        oil_gas_markers = [
+            "oil and gas",
+            "oil & gas",
+            "petroleum",
+            "refinery",
+            "upstream oil",
+            "downstream oil",
+            "lng",
+            "exploration and production",
+            "hydrocarbon",
+        ]
+        if any(k in hay for k in oil_gas_markers):
             return "oil_and_gas"
         if any(k in hay for k in ["coal", "thermal power", "mining coal"]):
             return "coal"
@@ -968,6 +980,37 @@ class CarbonExtractor:
         if any(k in hay for k in ["software", "cloud", "data center", "datacenter", "saas"]):
             return "technology"
         return "unknown"
+
+    def _derive_industry_hint(self, company: str, text: str, claim: Dict[str, Any] = None) -> str:
+        """Prefer workflow-provided industry over heuristic baseline inference."""
+        if isinstance(claim, dict):
+            explicit = (
+                claim.get("industry")
+                or claim.get("sector")
+                or (claim.get("metadata") or {}).get("industry")
+            )
+            if isinstance(explicit, str) and explicit.strip():
+                normalized = explicit.strip().lower().replace("/", " ").replace("-", " ")
+                if "tech" in normalized or "it" in normalized:
+                    return "technology"
+                if "oil" in normalized or "gas" in normalized or "energy" in normalized:
+                    return "oil_and_gas"
+                return self._normalize_industry_for_threshold(normalized)
+
+        company_lower = str(company or "").lower()
+        company_to_industry = {
+            "microsoft": "technology",
+            "apple": "technology",
+            "google": "technology",
+            "alphabet": "technology",
+            "amazon": "technology",
+            "meta": "technology",
+        }
+        for key, industry in company_to_industry.items():
+            if key in company_lower:
+                return industry
+
+        return self._estimate_industry_for_baseline(company, text)
 
     def _fetch_cdp_carbon_data(self, company_name: str) -> Dict[str, Any]:
         """Best-effort CDP public web fallback for scope values."""
