@@ -9,7 +9,7 @@ import logging
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 from core.carbon_validator import CarbonDataValidator
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Set
 from core.safe_utils import safe_get, safe_number, parse_source_name, normalize_industry_label, normalize_industry_key
 
 TICKER_SYMBOL_MAP = {
@@ -230,7 +230,13 @@ class ProfessionalReportGenerator:
         try:
             stages_completed.append("structured_build")
             structured = self._build_structured_report(state)
-            calibration = self._extract_calibration_info(structured.get("scores", {}) if isinstance(structured, dict) else {})
+            _scores = structured.get("scores", {}) if isinstance(structured, dict) else {}
+            _company_block = structured.get("company", {}) if isinstance(structured, dict) else {}
+            calibration = self._extract_calibration_info(
+                _scores,
+                company_industry=_company_block.get("industry", state.get("industry", "Unknown")),
+                claim_text=_company_block.get("claim", state.get("claim", "")),
+            )
             if isinstance(structured, dict):
                 structured["calibration"] = calibration
             quality = ReportQualityChecker().evaluate(state, structured)
@@ -468,6 +474,9 @@ class ProfessionalReportGenerator:
         conf_pct = float(conf_raw * 100) if isinstance(conf_raw, (int, float)) and conf_raw <= 1 else self._safe_float(conf_raw, 0.0)
         if conf_pct <= 0:
             conf_pct = 70.0 if quality.get("report_confidence_level") == "HIGH" else 60.0 if quality.get("report_confidence_level") == "MEDIUM" else 45.0
+        conf_ceiling = calibration.get("confidence_ceiling_pct")
+        if isinstance(conf_ceiling, (int, float)):
+            conf_pct = min(conf_pct, float(conf_ceiling))
         conf_label = self._confidence_label(conf_pct)
         report_confidence = quality.get("report_confidence_level", "MEDIUM")
 
@@ -1102,8 +1111,6 @@ class ProfessionalReportGenerator:
         section9 = [major, "SECTION 10: CALIBRATION & CONFIDENCE", major]
         cal_state = cal.get("calibration_status", "NOT_AVAILABLE")
         dataset_size = cal.get("dataset_size")
-        industries_repr = cal.get("industries_represented") or []
-        sector_counts = cal.get("sector_counts") or {}
         company_industry = v["industry"]
 
         if cal_state == "NOT_AVAILABLE":
@@ -1118,18 +1125,19 @@ class ProfessionalReportGenerator:
                 major,
             ])
         else:
-            # CALIBRATED or PROVISIONAL — show computed values
             spearman_r = cal.get("spearman_r")
-            spearman_p = cal.get("spearman_p")
-            point_biserial_r = cal.get("point_biserial_r")
-            mannwhitney_p = cal.get("mannwhitney_p")
+            spearman_p_reported = cal.get("p_value_reported")
             mean_gw = cal.get("mean_score_greenwashing")
             mean_leg = cal.get("mean_score_legitimate")
-
-            if cal_state == "CALIBRATED":
-                status_label = f"CALIBRATED (n={dataset_size} cases)"
-            else:
-                status_label = f"PROVISIONAL (n={dataset_size} cases \u2014 insufficient sample, treat with caution)"
+            subset_industry = cal.get("subset_industry") or company_industry
+            subset_claim_type = cal.get("subset_claim_type") or "emissions"
+            adjacent_used = bool(cal.get("adjacent_expansion_used"))
+            adjacent_industries = cal.get("adjacent_industries") or []
+            no_industry_match = bool(cal.get("no_industry_match"))
+            fallback_used = bool(cal.get("fallback_used"))
+            fallback_reason = cal.get("fallback_reason")
+            low_sample = bool(cal.get("low_sample"))
+            confidence_ceiling = cal.get("confidence_ceiling_pct")
 
             if v["threshold"] is not None:
                 if v["gw_score"] >= v["threshold"] + 10:
@@ -1153,16 +1161,36 @@ class ProfessionalReportGenerator:
             else:
                 zone_text = "Threshold not available \u2014 score interpretation requires manual review."
 
+            status_label = f"{cal_state} (n={dataset_size} cases)"
             section9.append(f"Status:                 {status_label}")
-            section9.append(f"Calibration dataset:    Ground Truth ESG v1.0 - {dataset_size} verified company-claim pairs")
-            if isinstance(spearman_r, (int, float)) and isinstance(spearman_p, (int, float)):
-                section9.append(f"Spearman correlation:   r = {spearman_r:.4f}  (p = {spearman_p:.4f})")
-            if isinstance(point_biserial_r, (int, float)) and isinstance(mannwhitney_p, (int, float)):
-                section9.append(f"Point-biserial:         r = {point_biserial_r:.4f}  (Mann-Whitney p = {mannwhitney_p:.4f})")
+            section9.append(f"Calibration subset:     {dataset_size} cases (industry: {subset_industry}, claim type: {subset_claim_type})")
+            if isinstance(spearman_r, (int, float)):
+                section9.append(f"Spearman r:             {spearman_r:.4f}")
+            else:
+                section9.append("Spearman r:             unavailable")
+            if isinstance(spearman_p_reported, (int, float)):
+                section9.append(f"p-value:                {spearman_p_reported:.4f}")
+            else:
+                section9.append(f"p-value:                {spearman_p_reported}")
             if v["threshold"] is not None:
-                section9.append(f"Optimal threshold:      {v['threshold']:.1f}/100")
+                section9.append(f"Optimal threshold:      {v['threshold']:.2f}")
+            else:
+                section9.append("Optimal threshold:      unavailable")
             if isinstance(mean_gw, (int, float)) and isinstance(mean_leg, (int, float)):
-                section9.append(f"Mean - greenwashing:    {mean_gw:.1f}   Mean - legitimate: {mean_leg:.1f}")
+                section9.append(f"Mean greenwashing:      {mean_gw:.2f}")
+                section9.append(f"Mean legitimate:        {mean_leg:.2f}")
+
+            if adjacent_used:
+                if adjacent_industries:
+                    section9.append(f"Note:                   Expanded to adjacent industries: {', '.join(adjacent_industries)}")
+                else:
+                    section9.append("Note:                   Expanded to adjacent industries")
+            if low_sample:
+                section9.append("WARNING:                LOW SAMPLE — treat with caution")
+            if no_industry_match and fallback_used and fallback_reason == "NO_PEER_CASES":
+                section9.append("WARNING:                NO PEER CASES — system-level stats used as fallback")
+            if isinstance(confidence_ceiling, (int, float)):
+                section9.append(f"Confidence ceiling:     {confidence_ceiling:.0f}%")
 
             section9.append("")
             if v["threshold"] is not None:
@@ -1176,25 +1204,6 @@ class ProfessionalReportGenerator:
             section9.append("")
             section9.append("  The rating should be interpreted alongside qualitative context and sector")
             section9.append("  expertise. This is a probabilistic risk indicator, not a legal determination.")
-
-            # Company-specific sector representativeness note
-            if dataset_size and industries_repr:
-                ind_key = company_industry.strip().lower()
-                n_sector = 0
-                for k, cnt in sector_counts.items():
-                    if k.strip().lower() == ind_key:
-                        n_sector = cnt
-                        break
-                representativeness = "well-represented" if n_sector >= 3 else "underrepresented"
-                industries_str = ", ".join(sorted(set(industries_repr)))
-                section9.append("")
-                note = (
-                    f"Note: Calibration was computed on {dataset_size} cases across "
-                    f"{industries_str}. This company's sector ({company_industry}) has "
-                    f"{n_sector} / {dataset_size} representatives in the dataset \u2014 "
-                    f"{representativeness}."
-                )
-                section9.append(self._wrap_paragraph(note, width=78))
 
             section9.extend(["", major])
 
@@ -1316,7 +1325,11 @@ class ProfessionalReportGenerator:
         pillars = self._build_pillar_factor_breakdown(scores, evidence_struct, state)
         agents = self._extract_agent_findings(state)
         peers = self._extract_peer_context(state)
-        calibration = self._extract_calibration_info(scores)
+        calibration = self._extract_calibration_info(
+            scores,
+            company_industry=industry,
+            claim_text=claim,
+        )
         limitations = self._infer_limitations(state, evidence_struct, peers, calibration, agents)
 
         report_id = f"{analysis_timestamp.strftime('%Y%m%d-%H%M%S')}-{company.upper()[:4]}"
@@ -2144,15 +2157,58 @@ class ProfessionalReportGenerator:
             "used_synthetic_peers": used_synthetic,
         }
 
-    def _extract_calibration_info(self, scores: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_sector_value(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    @staticmethod
+    def _infer_claim_type(claim_text: str) -> str:
+        text = str(claim_text or "").lower()
+        if any(k in text for k in ["net zero", "net-zero", "carbon neutral", "carbon negative", "climate neutral"]):
+            return "net-zero"
+        if any(k in text for k in ["packaging", "plastic", "recycl", "biodegrad", "compostable", "single-use"]):
+            return "packaging"
+        if any(k in text for k in ["water", "water positive", "water neutral", "watershed", "freshwater"]):
+            return "water"
+        if any(k in text for k in ["board", "governance", "ethics", "compliance", "audit committee", "anti-corruption"]):
+            return "governance"
+        if any(k in text for k in ["labor", "human rights", "diversity", "inclusion", "community", "worker", "social"]):
+            return "social"
+        if any(k in text for k in ["emission", "scope 1", "scope 2", "scope 3", "co2", "ghg", "decarbon", "renewable"]):
+            return "emissions"
+        return "emissions"
+
+    @staticmethod
+    def _adjacent_industries(industry: str) -> Set[str]:
+        # Lightweight adjacency graph for ESG comparability across closely related sectors.
+        graph = {
+            "energy": {"utilities", "manufacturing", "aviation", "automotive"},
+            "technology": {"retail", "finance", "manufacturing"},
+            "finance": {"technology", "retail"},
+            "aviation": {"energy", "automotive", "manufacturing"},
+            "automotive": {"manufacturing", "aviation", "energy"},
+            "retail/fashion": {"retail", "consumer goods", "food & beverage"},
+            "retail": {"retail/fashion", "consumer goods", "food & beverage", "technology"},
+            "consumer goods": {"retail", "retail/fashion", "food & beverage", "manufacturing"},
+            "food & beverage": {"consumer goods", "retail", "manufacturing"},
+            "manufacturing": {"automotive", "energy", "consumer goods", "technology", "aviation"},
+        }
+        key = str(industry or "").strip().lower()
+        return graph.get(key, set())
+
+    def _extract_calibration_info(
+        self,
+        scores: Dict[str, Any],
+        company_industry: str = "Unknown",
+        claim_text: str = "",
+    ) -> Dict[str, Any]:
         """Load ground truth CSV and compute calibration metrics live.
 
-        Returns a dict with calibration_status = CALIBRATED | PROVISIONAL | NOT_AVAILABLE.
-        All metric values are None when NOT_AVAILABLE (never hardcoded fallbacks).
+        Returns claim-specific calibration stats by filtering to same-industry +
+        same-claim-type peers first, then expanding to adjacent industries.
         """
         import pandas as pd
-        from scipy.stats import spearmanr, pointbiserialr, mannwhitneyu
-        from sklearn.metrics import roc_curve
+        from scipy.stats import spearmanr
 
         gt_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'ground_truth_dataset.csv')
 
@@ -2166,10 +2222,17 @@ class ProfessionalReportGenerator:
         if df.empty or len(df) == 0:
             return self._empty_calibration(scores)
 
-        # ---- Compute live calibration from dataset ----
+        # ---- Compute claim-specific calibration from filtered subset ----
         try:
             from ml_models.score_calibrator import linguistic_greenwashing_score
-            sc_scores = [
+
+            df = df.copy()
+            if 'claim_text' not in df.columns or 'greenwashing_label' not in df.columns:
+                return self._empty_calibration(scores)
+
+            df['sector_norm'] = df.get('sector', pd.Series([""] * len(df))).apply(self._normalize_sector_value)
+            df['claim_type'] = df['claim_text'].apply(self._infer_claim_type)
+            df['predicted_score'] = [
                 linguistic_greenwashing_score(
                     str(row.get('claim_text', '')),
                     str(row.get('company_name', '')),
@@ -2177,50 +2240,104 @@ class ProfessionalReportGenerator:
                 )
                 for _, row in df.iterrows()
             ]
-            labels = df['greenwashing_label'].values
 
-            spearman = spearmanr(sc_scores, labels)
+            target_industry = self._normalize_sector_value(company_industry)
+            target_claim_type = self._infer_claim_type(claim_text)
+
+            # Exact subset first (same industry + claim type).
+            exact_subset = df[
+                (df['sector_norm'] == target_industry) &
+                (df['claim_type'] == target_claim_type)
+            ]
+            no_industry_match = len(exact_subset) == 0
+
+            subset = exact_subset
+            adjacent_used = False
+            adjacent_list: List[str] = []
+
+            # Expand to adjacent industries when fewer than 3 exact peers.
+            if len(subset) < 3:
+                adjacent_set = self._adjacent_industries(target_industry)
+                adjacent_list = sorted(adjacent_set)
+                if adjacent_set:
+                    subset = df[
+                        (df['claim_type'] == target_claim_type) &
+                        (df['sector_norm'].isin({target_industry, *adjacent_set}))
+                    ]
+                    adjacent_used = True
+
+            fallback_used = False
+            fallback_reason = None
+            if len(subset) == 0:
+                # Zero matching cases: system-level fallback (computed, never hardcoded).
+                subset = df
+                fallback_used = True
+                fallback_reason = "NO_PEER_CASES"
+
+            labels = subset['greenwashing_label'].astype(float).values
+            sc_scores = subset['predicted_score'].astype(float).values
+
+            spearman_r = None
+            spearman_p = None
             try:
-                pointb = pointbiserialr(labels, sc_scores)
-                pb_r = float(pointb[0])
+                sp = spearmanr(sc_scores, labels)
+                if sp is not None:
+                    if sp.correlation == sp.correlation:
+                        spearman_r = float(sp.correlation)
+                    if sp.pvalue == sp.pvalue:
+                        spearman_p = float(sp.pvalue)
             except Exception:
-                pb_r = None
-            try:
-                mw = mannwhitneyu(
-                    [s for s, l in zip(sc_scores, labels) if l == 1],
-                    [s for s, l in zip(sc_scores, labels) if l == 0],
-                    alternative='greater',
-                )
-                mw_p = float(mw.pvalue)
-            except Exception:
-                mw_p = None
+                pass
 
-            import numpy as np
-            scores_norm = np.array(sc_scores) / 100.0
-            fpr, tpr, thresholds = roc_curve(labels, scores_norm)
-            j_scores = tpr - fpr
-            optimal_idx = np.argmax(j_scores)
-            optimal_threshold = float(thresholds[optimal_idx] * 100)
+            gw_scores = subset.loc[subset['greenwashing_label'] == 1, 'predicted_score'].astype(float)
+            legit_scores = subset.loc[subset['greenwashing_label'] == 0, 'predicted_score'].astype(float)
 
-            gw_mask = labels == 1
-            leg_mask = labels == 0
-            mean_gw = float(np.mean([s for s, m in zip(sc_scores, gw_mask) if m])) if gw_mask.any() else None
-            mean_leg = float(np.mean([s for s, m in zip(sc_scores, leg_mask) if m])) if leg_mask.any() else None
+            mean_gw = float(gw_scores.mean()) if len(gw_scores) > 0 else None
+            mean_leg = float(legit_scores.mean()) if len(legit_scores) > 0 else None
 
-            dataset_size = int(len(df))
-            industries = df['sector'].dropna().unique().tolist() if 'sector' in df.columns else []
-            sector_counts = dict(df['sector'].value_counts()) if 'sector' in df.columns else {}
-
-            # Determine status based on sample size
-            if dataset_size >= 10:
-                calibration_status = "CALIBRATED"
+            if isinstance(mean_gw, float) and isinstance(mean_leg, float):
+                optimal_threshold = float((mean_gw + mean_leg) / 2.0)
             else:
+                # Class-imbalanced subset fallback to system-level class means.
+                all_gw = df.loc[df['greenwashing_label'] == 1, 'predicted_score'].astype(float)
+                all_leg = df.loc[df['greenwashing_label'] == 0, 'predicted_score'].astype(float)
+                if len(all_gw) > 0 and len(all_leg) > 0:
+                    optimal_threshold = float((float(all_gw.mean()) + float(all_leg.mean())) / 2.0)
+                    if mean_gw is None:
+                        mean_gw = float(all_gw.mean())
+                    if mean_leg is None:
+                        mean_leg = float(all_leg.mean())
+                    fallback_used = True
+                    if not fallback_reason:
+                        fallback_reason = "CLASS_IMBALANCE"
+                else:
+                    optimal_threshold = None
+
+            subset_n = int(len(subset))
+            sector_counts = dict(subset['sector'].value_counts()) if 'sector' in subset.columns else {}
+            industries = subset['sector'].dropna().unique().tolist() if 'sector' in subset.columns else []
+
+            if subset_n >= 10:
+                calibration_status = "CALIBRATED"
+                confidence_ceiling = 85.0
+            elif subset_n >= 5:
                 calibration_status = "PROVISIONAL"
+                confidence_ceiling = 75.0
+            elif subset_n >= 3:
+                calibration_status = "PROVISIONAL"
+                confidence_ceiling = 65.0
+            else:
+                calibration_status = "LOW"
+                confidence_ceiling = 55.0
+
+            p_value_report: Any = "insufficient for significance"
+            if subset_n >= 5 and isinstance(spearman_p, float):
+                p_value_report = spearman_p
 
             # Confidence region
             gw_score = scores.get("greenwashing_risk_score")
             confidence_region = "unknown"
-            if isinstance(gw_score, (int, float)):
+            if isinstance(gw_score, (int, float)) and isinstance(optimal_threshold, (int, float)):
                 if gw_score >= optimal_threshold + 10:
                     confidence_region = "high_suspicion_zone"
                 elif gw_score <= optimal_threshold - 10:
@@ -2229,18 +2346,29 @@ class ProfessionalReportGenerator:
                     confidence_region = "grey_zone"
 
             return {
-                "spearman_r": float(spearman.correlation),
-                "spearman_p": float(spearman.pvalue),
-                "point_biserial_r": pb_r,
-                "mannwhitney_p": mw_p,
+                "spearman_r": spearman_r,
+                "spearman_p": spearman_p,
+                "p_value_reported": p_value_report,
+                "point_biserial_r": None,
+                "mannwhitney_p": None,
                 "optimal_threshold": optimal_threshold,
                 "mean_score_greenwashing": mean_gw,
                 "mean_score_legitimate": mean_leg,
                 "calibration_status": calibration_status,
                 "confidence_region": confidence_region,
-                "dataset_size": dataset_size,
+                "dataset_size": subset_n,
                 "industries_represented": industries,
                 "sector_counts": sector_counts,
+                "subset_industry": company_industry,
+                "subset_claim_type": target_claim_type,
+                "adjacent_expansion_used": adjacent_used,
+                "adjacent_industries": adjacent_list,
+                "no_industry_match": no_industry_match,
+                "fallback_used": fallback_used,
+                "fallback_reason": fallback_reason,
+                "confidence_ceiling_pct": confidence_ceiling,
+                "low_sample": subset_n < 5,
+                "low_confidence_flag": subset_n < 3,
             }
         except Exception:
             return self._empty_calibration(scores)
@@ -2251,6 +2379,7 @@ class ProfessionalReportGenerator:
         return {
             "spearman_r": None,
             "spearman_p": None,
+            "p_value_reported": "insufficient for significance",
             "point_biserial_r": None,
             "mannwhitney_p": None,
             "optimal_threshold": None,
@@ -2261,6 +2390,16 @@ class ProfessionalReportGenerator:
             "dataset_size": None,
             "industries_represented": [],
             "sector_counts": {},
+            "subset_industry": None,
+            "subset_claim_type": None,
+            "adjacent_expansion_used": False,
+            "adjacent_industries": [],
+            "no_industry_match": False,
+            "fallback_used": False,
+            "fallback_reason": None,
+            "confidence_ceiling_pct": None,
+            "low_sample": True,
+            "low_confidence_flag": True,
         }
 
     def _infer_limitations(
