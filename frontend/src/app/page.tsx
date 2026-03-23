@@ -2,18 +2,12 @@
 
 import React from "react";
 import { motion } from "framer-motion";
-import Link from "next/link";
 import { 
   ArrowRight, 
   BrainCircuit, 
-  Leaf, 
-  ShieldAlert, 
   Activity, 
   Database, 
-  FileSearch,
-  CheckCircle2,
   Globe,
-  Layers,
   Terminal,
   Zap,
   LineChart,
@@ -42,6 +36,79 @@ const staggerContainer = {
   initial: {},
   whileInView: { transition: { staggerChildren: 0.1 } }
 };
+
+const agentSummaryItems = [
+  {
+    name: "Claim Extractor",
+    purpose: "Extracts concrete ESG claims from long-form disclosures and report chunks.",
+    icon: FileText,
+    accent: "from-emerald-500 to-teal-500",
+    lane: "left",
+  },
+  {
+    name: "Evidence Retriever",
+    purpose: "Pulls supporting or contradictory external evidence from trusted sources.",
+    icon: Search,
+    accent: "from-blue-500 to-cyan-500",
+    lane: "right",
+  },
+  {
+    name: "Credibility Analyst",
+    purpose: "Checks source reliability and scores credibility before downstream reasoning.",
+    icon: ShieldCheck,
+    accent: "from-emerald-500 to-lime-500",
+    lane: "left",
+  },
+  {
+    name: "Contradiction Analyzer",
+    purpose: "Detects mismatches between company statements and observed outcomes.",
+    icon: Activity,
+    accent: "from-orange-500 to-amber-500",
+    lane: "right",
+  },
+  {
+    name: "Temporal Consistency",
+    purpose: "Tracks whether promises stay consistent across years and reporting cycles.",
+    icon: Workflow,
+    accent: "from-indigo-500 to-blue-500",
+    lane: "left",
+  },
+  {
+    name: "Greenwishing Detector",
+    purpose: "Flags aspirational language that lacks measurable execution signals.",
+    icon: BrainCircuit,
+    accent: "from-rose-500 to-orange-500",
+    lane: "right",
+  },
+  {
+    name: "Financial Analyst",
+    purpose: "Connects ESG claims with financial indicators and capital allocation behavior.",
+    icon: LineChart,
+    accent: "from-violet-500 to-fuchsia-500",
+    lane: "left",
+  },
+  {
+    name: "Regulatory Scanner",
+    purpose: "Maps claims against policy frameworks and compliance red flags.",
+    icon: Lock,
+    accent: "from-sky-500 to-indigo-500",
+    lane: "right",
+  },
+  {
+    name: "Risk Scorer",
+    purpose: "Combines multi-agent findings into a calibrated risk intensity estimate.",
+    icon: BarChart3,
+    accent: "from-red-500 to-orange-500",
+    lane: "left",
+  },
+  {
+    name: "Confidence Scorer",
+    purpose: "Provides confidence weighting so each verdict remains explainable.",
+    icon: Database,
+    accent: "from-cyan-500 to-blue-500",
+    lane: "right",
+  },
+];
 
 export default function LandingPage() {
   return (
@@ -110,7 +177,7 @@ export default function LandingPage() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {[
-                  { title: "Verification", desc: "We cross-check disclosures against 1M+ external news & regulatory data points." },
+                  { title: "Verification", desc: "We cross-check disclosures against 15+ external news & regulatory data points." },
                   { title: "Risk Mitigation", desc: "We flag greenwashing and contradictory patterns using advanced LLM reasoning." }
                 ].map((item, i) => (
                   <div key={i} className="p-5 bg-white rounded-xl border border-slate-200 shadow-sm">
@@ -199,6 +266,82 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* --- AGENT SUMMARY SECTION --- */}
+      <section className="py-24 bg-slate-950 text-white border-y border-slate-800 overflow-hidden relative">
+        <div className="absolute inset-0 pointer-events-none">
+          <div className="absolute -top-16 left-1/2 -translate-x-1/2 w-[70%] h-56 rounded-full bg-emerald-500/10 blur-3xl" />
+          <div className="absolute bottom-0 right-[-10%] w-[40%] h-64 rounded-full bg-cyan-500/10 blur-3xl" />
+        </div>
+
+        <div className="container mx-auto px-4 relative z-10">
+          <motion.div {...fadeInUp} className="text-center max-w-3xl mx-auto mb-14">
+            <h2 className="text-4xl font-bold mb-4 tracking-tight text-white">Agent Summary</h2>
+            <p className="text-slate-300 text-lg">
+              Each specialist agent contributes one focused responsibility to the full ESG verification workflow.
+            </p>
+          </motion.div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr] gap-6 lg:gap-10 items-start max-w-6xl mx-auto">
+            <motion.div variants={staggerContainer} initial="initial" whileInView="whileInView" viewport={{ once: true }} className="space-y-4">
+              {agentSummaryItems.filter((agent) => agent.lane === "left").map((agent) => {
+                const Icon = agent.icon;
+                return (
+                <motion.div
+                  key={agent.name}
+                  variants={fadeInUp}
+                  whileHover={{ y: -6, scale: 1.01 }}
+                  className="rounded-3xl border border-slate-700 bg-slate-900/70 p-5 shadow-[0_20px_40px_rgba(2,6,23,0.45)] backdrop-blur"
+                >
+                  <div className="flex items-start gap-4">
+                    <div className={`w-11 h-11 rounded-2xl bg-gradient-to-br ${agent.accent} flex items-center justify-center shadow-lg`}>
+                      <Icon size={20} className="text-white" />
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-mono tracking-[0.2em] text-emerald-300 uppercase">Agent Node</div>
+                      <h3 className="mt-1 text-lg font-bold text-white">{agent.name}</h3>
+                    </div>
+                  </div>
+                  <p className="mt-3 text-sm text-slate-300 leading-relaxed">{agent.purpose}</p>
+                </motion.div>
+                );
+              })}
+            </motion.div>
+
+            <div className="hidden lg:flex h-full items-stretch justify-center px-2">
+              <div className="relative w-px bg-slate-700 min-h-[640px]">
+                <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_16px_rgba(16,185,129,0.8)]" />
+                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_16px_rgba(6,182,212,0.8)]" />
+              </div>
+            </div>
+
+            <motion.div variants={staggerContainer} initial="initial" whileInView="whileInView" viewport={{ once: true }} className="space-y-4">
+              {agentSummaryItems.filter((agent) => agent.lane === "right").map((agent) => {
+                const Icon = agent.icon;
+                return (
+                <motion.div
+                  key={agent.name}
+                  variants={fadeInUp}
+                  whileHover={{ y: -6, scale: 1.01 }}
+                  className="rounded-3xl border border-slate-700 bg-slate-900/70 p-5 shadow-[0_20px_40px_rgba(2,6,23,0.45)] backdrop-blur"
+                >
+                  <div className="flex items-start gap-4">
+                    <div className={`w-11 h-11 rounded-2xl bg-gradient-to-br ${agent.accent} flex items-center justify-center shadow-lg`}>
+                      <Icon size={20} className="text-white" />
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-mono tracking-[0.2em] text-cyan-300 uppercase">Agent Node</div>
+                      <h3 className="mt-1 text-lg font-bold text-white">{agent.name}</h3>
+                    </div>
+                  </div>
+                  <p className="mt-3 text-sm text-slate-300 leading-relaxed">{agent.purpose}</p>
+                </motion.div>
+                );
+              })}
+            </motion.div>
+          </div>
+        </div>
+      </section>
+
       {/* --- HOW IT WORKS SECTION --- */}
       <section className="py-24 bg-slate-900 text-white relative overflow-hidden">
         <div className="absolute top-0 right-0 w-1/2 h-full bg-emerald-500/5 blur-[120px] pointer-events-none" />
@@ -263,7 +406,7 @@ export default function LandingPage() {
                   <div className="mt-4 h-2 w-full bg-red-200 rounded-full overflow-hidden">
                     <div className="h-full bg-red-600 w-[89%]" />
                   </div>
-                  <p className="mt-4 text-xs text-red-800 font-medium leading-relaxed italic">"Detection of misleading narrative regarding Scope 3 carbon neutrality targets."</p>
+                  <p className="mt-4 text-xs text-red-800 font-medium leading-relaxed italic">&ldquo;Detection of misleading narrative regarding Scope 3 carbon neutrality targets.&rdquo;</p>
                 </div>
               </div>
 
@@ -315,6 +458,8 @@ export default function LandingPage() {
 // --- SUB-COMPONENTS ---
 
 function TechCard({ icon, title, items }: { icon: React.ReactNode, title: string, items: string[] }) {
+  const iconElement = icon as React.ReactElement<{ size?: number }>;
+
   return (
     <motion.div 
       variants={fadeInUp}
@@ -322,7 +467,7 @@ function TechCard({ icon, title, items }: { icon: React.ReactNode, title: string
       className="p-8 rounded-[2rem] border border-slate-200 bg-white transition-all group"
     >
       <div className="w-12 h-12 rounded-2xl bg-slate-50 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform shadow-inner">
-        {React.cloneElement(icon as React.ReactElement, { size: 24 } as any)}
+        {React.cloneElement(iconElement, { size: 24 })}
       </div>
       <h3 className="text-xl font-bold text-slate-900 mb-4 tracking-tight">{title}</h3>
       <ul className="space-y-3">

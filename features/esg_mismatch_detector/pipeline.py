@@ -9,7 +9,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 
 from features.esg_mismatch_detector.company_resolver import resolve_company
 from features.esg_mismatch_detector.report_collector import fetch_latest_esg_report
-from features.esg_mismatch_detector.promise_extractor import extract_promises
+from features.esg_mismatch_detector.promise_extractor import (
+    extract_promises,
+    extract_promises_from_external_sources,
+)
 from features.esg_mismatch_detector.evidence_collector import collect_external_evidence
 from features.esg_mismatch_detector.comparison_engine import compare_promises_vs_actual
 
@@ -22,6 +25,8 @@ CACHE_DIR = os.path.abspath(
 )
 
 CACHE_TTL = 24 * 60 * 60  # 24 hours
+CACHE_SCHEMA_VERSION = "esg_mismatch_v2"
+MIN_EVIDENCE_SOURCES = 15
 
 # Ensure cache directory exists
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -47,8 +52,12 @@ def load_cached_result(company_name: str) -> Dict | None:
             return None
 
         with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+            if cached.get("_cache_schema_version") != CACHE_SCHEMA_VERSION:
+                print("🔄 Cache schema changed. Regenerating analysis...")
+                return None
             print("⚡ Using cached ESG analysis result.")
-            return json.load(f)
+            return cached
 
     except Exception as e:
         print(f"⚠️ Cache read error: {e}")
@@ -59,6 +68,7 @@ def save_cached_result(company_name: str, result: Dict):
     cache_path = _get_cache_path(company_name)
 
     try:
+        result["_cache_schema_version"] = CACHE_SCHEMA_VERSION
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
 
@@ -92,28 +102,26 @@ def analyze_company_esg(company_name: str) -> Dict:
     # Resolve Company
     # ------------------------------
     company = resolve_company(company_name)
+    company_industry = str(company.get("industry", "general")).lower()
+    high_signal_company = bool(company.get("high_signal_company", False))
+    evidence_threshold = 8 if high_signal_company else MIN_EVIDENCE_SOURCES
 
     # ------------------------------
     # Fetch ESG Report
     # ------------------------------
     print("📥 Fetching ESG report...")
     report_text = fetch_latest_esg_report(company)
-
-    if not report_text:
-        result = {
-            "company": company["company"],
-            "status": "report unavailable",
-            "reason": "Could not retrieve ESG report"
-        }
-
-        save_cached_result(cache_key, result)
-        return result
+    report_unavailable = not bool(report_text)
 
     # ------------------------------
     # Extract ESG Promises
     # ------------------------------
     print("🤖 Extracting promises...")
-    promises = extract_promises(report_text, company_name)
+    promises = extract_promises(report_text, company_name) if report_text else []
+
+    if not promises:
+        print("🔁 No commitments extracted from report text. Running targeted commitments retrieval...")
+        promises = extract_promises_from_external_sources(company["company"])
 
     print(f"✅ Found {len(promises)} promises.")
 
@@ -121,7 +129,13 @@ def analyze_company_esg(company_name: str) -> Dict:
     # Collect Evidence
     # ------------------------------
     print("🌍 Collecting evidence...")
-    actual_data = collect_external_evidence(company["company"])
+    actual_data = collect_external_evidence(
+        company["company"],
+        aliases=company.get("aliases", []),
+        industry=company_industry,
+        min_sources=evidence_threshold,
+        target_retrieval=25,
+    )
 
     print(f"✅ Found {len(actual_data)} pieces of evidence.")
 
@@ -147,12 +161,36 @@ def analyze_company_esg(company_name: str) -> Dict:
     print("🚩 Detecting mismatches...")
 
     mismatches = [c for c in comparisons if c.get("mismatch_type")]
+    total_sources_retrieved = len(actual_data)
+    used_sources = {
+        c.get("mismatch_source") for c in comparisons if c.get("mismatch_source")
+    }
+    if not used_sources:
+        used_sources = {a.get("source") for a in actual_data[:8] if a.get("source")}
+    used_source_count = len(used_sources)
+
+    if total_sources_retrieved >= evidence_threshold:
+        coverage = "HIGH"
+    elif total_sources_retrieved >= max(5, evidence_threshold // 2):
+        coverage = "MEDIUM"
+    else:
+        coverage = "LOW"
 
     if len(mismatches) == 0:
-        if not actual_data:
-            print("🟡 Insufficient external verification. Relying only on company reports is unsafe.")
-            overall_risk = "Unknown"
-            summary = "Insufficient external verification. Requires verified data."
+        if high_signal_company and total_sources_retrieved > 0:
+            print("🟠 High-signal company with partial evidence. Returning moderate risk instead of inconclusive.")
+            overall_risk = "Moderate"
+            summary = (
+                "Partial contradiction signals detected for a high-coverage energy company. "
+                "Additional evidence will refine severity."
+            )
+        elif total_sources_retrieved < evidence_threshold:
+            print("🟡 Evidence below threshold. Outcome is inconclusive.")
+            overall_risk = "Inconclusive"
+            summary = (
+                "Inconclusive due to insufficient external data coverage; "
+                "additional verification required before mismatch conclusions."
+            )
         else:
             print("🟢 No mismatch found for this company based on verified data.")
             overall_risk = "Low"
@@ -254,10 +292,33 @@ def analyze_company_esg(company_name: str) -> Dict:
     
     result = {
         "Company Analyzed": company["company"],
+        "Report Availability": "Unavailable" if report_unavailable else "Available",
         "Overall Greenwashing Risk": overall_risk,
         "Executive Summary": summary,
+        "Data Coverage": {
+            "Total Sources Retrieved": total_sources_retrieved,
+            "Sources Used In Final Reasoning": used_source_count,
+            "Coverage Score": coverage,
+            "Evidence Threshold": evidence_threshold,
+        },
+        "Confidence Score": (
+            "High" if coverage == "HIGH" and len(mismatches) > 0
+            else "Medium" if coverage in ["HIGH", "MEDIUM"]
+            else "Low"
+        ),
         "1. Future Commitments & Progress": formatted_future,
-        "2. Past Promise-Implementation Gaps (Mismatches)": formatted_mismatches if formatted_mismatches else ["No historical implementation gaps or regulatory mismatches detected."]
+        "2. Past Promise-Implementation Gaps (Mismatches)": (
+            formatted_mismatches
+            if formatted_mismatches
+            else [
+                "Partial contradiction signals detected; continue monitoring additional sources."
+                if high_signal_company and total_sources_retrieved > 0 and total_sources_retrieved < evidence_threshold
+                else
+                "No historical implementation gaps or regulatory mismatches detected."
+                if total_sources_retrieved >= evidence_threshold
+                else "Inconclusive due to insufficient data."
+            ]
+        ),
     }
 
     # ------------------------------

@@ -1,50 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { BrainCircuit, CheckCircle2, Download, Loader2, RefreshCw, TerminalSquare } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-
-type AppState = "input" | "processing" | "results";
-
-type LogEntry = {
-  message: string;
-  level: "info" | "warn" | "error" | "success";
-  source: "stdout" | "stderr";
-  ts: string;
-};
-
-type AnalysisResult = {
-  status: string;
-  company_name: string;
-  claim: string;
-  industry: string;
-  risk_level: string;
-  confidence: number;
-  summary: string;
-  report_markdown: string;
-  report_file_name: string;
-  report_created_at: string;
-  parsed_main_report?: {
-    company: string;
-    ticker: string;
-    industry: string;
-    claim: string;
-    reportDate: string;
-    reportConfidence: string;
-    riskScore: string;
-    esgRating: string;
-    riskBand: string;
-    confidence: string;
-    keyDetails: Array<{ key: string; value: string }>;
-    narrative: string[];
-  };
-  json_report?: Record<string, unknown> | null;
-  json_file_name?: string;
-};
+import { type AnalysisResult, type LogEntry, useAnalysisRun } from "@/components/providers/analysis-run-provider";
 
 type AgentResult = {
   agent: string;
@@ -66,14 +29,6 @@ function badgeClass(level: LogEntry["level"]): string {
   if (level === "warn") return "bg-amber-100 text-amber-700";
   if (level === "success") return "bg-emerald-100 text-emerald-700";
   return "bg-neutral-100 text-neutral-700";
-}
-
-function sanitizeDisplayMessage(message: string): string {
-  const normalized = message.toLowerCase();
-  if (/error|failed|traceback|exception/.test(normalized)) {
-    return "Pipeline applied a fallback path and continued processing.";
-  }
-  return message;
 }
 
 function parsePercentText(value?: string): number {
@@ -205,39 +160,14 @@ function summarizeClaimExtraction(agentResults: AgentResult[]): {
   };
 }
 
-function saveHistory(result: AnalysisResult): void {
-  if (typeof window === "undefined") return;
-  const key = "esg-analysis-history";
-  const existingRaw = window.localStorage.getItem(key);
-  const existing = existingRaw ? (JSON.parse(existingRaw) as AnalysisResult[]) : [];
-  const next = [result, ...existing].slice(0, 30);
-  window.localStorage.setItem(key, JSON.stringify(next));
-}
-
 export default function AnalyzePage() {
-  const [appState, setAppState] = useState<AppState>("input");
   const [company, setCompany] = useState("Unilever");
   const [claim, setClaim] = useState("Unilever aims to achieve net-zero emissions across its value chain by 2039.");
-  const [industry, setIndustry] = useState("Consumer Goods");
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [results, setResults] = useState<AnalysisResult | null>(null);
-
-  useEffect(() => {
-    const defaultIndustry = window.localStorage.getItem("esg-default-industry");
-    if (defaultIndustry) {
-      setIndustry(defaultIndustry);
-    }
-  }, []);
-
-  const runStatusLabel = useMemo(() => {
-    if (appState === "processing") {
-      return "Live run in progress";
-    }
-    if (appState === "results") {
-      return "Run completed";
-    }
-    return "Ready";
-  }, [appState]);
+  const [industry, setIndustry] = useState(() => {
+    if (typeof window === "undefined") return "Consumer Goods";
+    return window.localStorage.getItem("esg-default-industry") || "Consumer Goods";
+  });
+  const { appState, logs, results, runStatusLabel, startAnalysis, resetRun } = useAnalysisRun();
 
   const agentResults = useMemo(() => getAgentResults(results), [results]);
   const agentContributions = useMemo(() => toAgentContributions(agentResults), [agentResults]);
@@ -255,125 +185,7 @@ export default function AnalyzePage() {
 
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
-    setResults(null);
-    setLogs([]);
-    setAppState("processing");
-
-    try {
-      const response = await fetch("/api/analyze-company", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ company_name: company, claim, industry }),
-      });
-
-      if (!response.ok || !response.body) {
-        const bodyText = await response.text();
-        throw new Error(bodyText || "Unable to start analysis.");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-      let runResult: AnalysisResult | null = null;
-      let runError = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const chunks = buffer.split("\n\n");
-        buffer = chunks.pop() || "";
-
-        for (const chunk of chunks) {
-          const lines = chunk.split("\n");
-          const eventLine = lines.find((line) => line.startsWith("event:"));
-          const dataLine = lines.find((line) => line.startsWith("data:"));
-          if (!eventLine || !dataLine) continue;
-
-          const event = eventLine.replace("event:", "").trim();
-          const dataJson = dataLine.replace("data:", "").trim();
-          const payload = JSON.parse(dataJson) as Record<string, unknown>;
-
-          if (event === "log") {
-            setLogs((prev) => {
-              const incomingLevel = (payload.level as LogEntry["level"]) || "info";
-              const safeLevel: LogEntry["level"] = incomingLevel === "error" ? "warn" : incomingLevel;
-              const rawMessage = String(payload.message || "");
-              const next = [
-                ...prev,
-                {
-                  message: sanitizeDisplayMessage(rawMessage),
-                  level: safeLevel,
-                  source: (payload.source as LogEntry["source"]) || "stdout",
-                  ts: String(payload.ts || new Date().toISOString()),
-                },
-              ];
-              return next.slice(-120);
-            });
-          }
-
-          if (event === "status") {
-            const state = String(payload.state || "info");
-            const message = String(payload.message || "");
-            if (message) {
-              const level: LogEntry["level"] =
-                state === "fallback" ? "warn" : state === "idle" ? "warn" : "info";
-
-              setLogs((prev) => {
-                const next = [
-                  ...prev,
-                  {
-                    message,
-                    level,
-                    source: "stdout",
-                    ts: String(payload.ts || new Date().toISOString()),
-                  },
-                ];
-                return next.slice(-120);
-              });
-            }
-          }
-
-          if (event === "error") {
-            runError = "fallback";
-          }
-
-          if (event === "result") {
-            const nextResult = payload as unknown as AnalysisResult;
-            runResult = nextResult;
-            setResults(nextResult);
-            saveHistory(nextResult);
-          }
-
-          if (event === "end") {
-            if (payload.ok && runResult !== null) {
-              setAppState("results");
-            } else if (!payload.ok) {
-              setAppState("input");
-            }
-          }
-        }
-      }
-
-      if (!runError && runResult) {
-        setAppState("results");
-      }
-      if (!runResult && !runError) {
-        setAppState("input");
-      }
-    } catch {
-      setLogs((prev) => [
-        ...prev,
-        {
-          message: "Request finished without a new report. Previous fallback data is still available.",
-          level: "warn",
-          source: "stderr",
-          ts: new Date().toISOString(),
-        },
-      ].slice(-120));
-      setAppState("input");
-    }
+    await startAnalysis({ company, claim, industry });
   };
 
   return (
@@ -478,7 +290,7 @@ export default function AnalyzePage() {
                       <Button variant="outline" size="sm" onClick={() => downloadPdf(results.report_file_name)}>
                         <Download className="w-4 h-4 mr-2" /> Download PDF
                       </Button>
-                      <Button size="sm" onClick={() => setAppState("input")}>
+                      <Button size="sm" onClick={resetRun}>
                         <RefreshCw className="w-4 h-4 mr-2" /> New Run
                       </Button>
                     </div>

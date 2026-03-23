@@ -2,6 +2,8 @@ from typing import List, Dict, Optional
 import json
 import re
 
+from utils.web_search import RealTimeDataFetcher
+
 def validate_company(text: str, company_name: str) -> bool:
     """
     Verify that the document actually belongs to the requested company.
@@ -285,3 +287,35 @@ def extract_promises(report_text: str, company_name: str = "") -> List[Dict]:
     except Exception as e:
         print(f"Error parsing LLM output: {e}")
         return _fallback_extract_promises(report_text, company_name)
+
+
+def extract_promises_from_external_sources(company_name: str) -> List[Dict]:
+    """Fallback commitment extraction when ESG report parsing returns no commitments."""
+    try:
+        fetcher = RealTimeDataFetcher()
+        query = f"{company_name} sustainability targets ESG report commitments net zero emissions reduction renewable energy"
+        results = fetcher.search_all_sources(query, max_results=12)
+
+        corpus_parts = []
+        for item in results:
+            title = item.get("title", "")
+            snippet = item.get("snippet", "")
+            combined = f"{title}. {snippet}".strip()
+            if combined:
+                corpus_parts.append(combined)
+
+        corpus = "\n".join(corpus_parts)
+        if not corpus:
+            return []
+
+        promises = extract_promises(corpus, company_name)
+        if not promises:
+            promises = _fallback_extract_promises(corpus, company_name)
+
+        for promise in promises:
+            promise["source"] = promise.get("source") or "External ESG Commitments Search"
+
+        return promises
+    except Exception as e:
+        print(f"External commitment extraction error: {e}")
+        return []

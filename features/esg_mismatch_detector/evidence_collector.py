@@ -2,11 +2,13 @@ from typing import List, Dict
 import os
 import re
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 from utils.web_search import RealTimeDataFetcher
 
 CURRENT_YEAR = datetime.datetime.now().year
+MIN_RETRIEVAL_SOURCES = 15
 
 # ==============================
 # TRUSTED SOURCE LIST
@@ -42,10 +44,192 @@ ESG_KEYWORDS = [
     "energy consumption", "environmental impact"
 ]
 
+CONTROVERSY_KEYWORDS = [
+    "controversy", "greenwashing", "fraud", "investigation", "probe", "lawsuit",
+    "fine", "penalty", "violation", "misleading claims", "enforcement"
+]
+
+ENERGY_KEYWORDS = [
+    "oil production emissions",
+    "fossil fuel expansion",
+    "climate lawsuit",
+    "net zero criticism",
+    "greenwashing investigation",
+    "scope 3 emissions oil",
+    "renewable vs fossil investment",
+    "climate targets criticism",
+    "transition plan criticism",
+    "carbon emissions lawsuit",
+]
+
+NEGATIVE_STANCE_WORDS = [
+    "lawsuit", "criticism", "fails", "failed", "violation", "probe",
+    "investigation", "greenwashing", "fraud", "penalty", "fossil expansion",
+]
+
+POSITIVE_STANCE_WORDS = [
+    "achieved", "reduced", "aligned", "met target", "on track", "improved",
+]
+
+REGULATORY_KEYWORDS = [
+    "SEC", "EPA", "DOJ", "EU regulator", "FCA", "SEBI", "enforcement action", "consent order"
+]
+
+COMMITMENT_KEYWORDS = [
+    "net zero", "science based targets", "sustainability targets", "decarbonization",
+    "scope 1", "scope 2", "scope 3", "transition plan", "climate commitments"
+]
+
 INVALID_TERMS = [
     "guidance", "policy", "dataset", "methodology", "how to measure", 
     "reporting standard", "framework"
 ]
+
+HIGH_SIGNAL_NEWS_DOMAINS = [
+    "reuters.com", "bloomberg.com", "ft.com", "wsj.com", "apnews.com",
+    "bbc.com", "nytimes.com", "theguardian.com",
+]
+
+
+def _normalize_aliases(company_name: str, aliases: List[str] | None) -> List[str]:
+    values = [company_name] + list(aliases or [])
+    out = []
+    seen = set()
+    for item in values:
+        clean = re.sub(r"\s+", " ", str(item or "")).strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(clean)
+        compact = clean.replace(" ", "")
+        if compact.lower() not in seen:
+            seen.add(compact.lower())
+            out.append(compact)
+    return out
+
+
+def _mentions_company(text: str, aliases: List[str]) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    for alias in aliases:
+        a = alias.lower().strip()
+        if not a:
+            continue
+        if " " in a:
+            if a in t:
+                return True
+            compact = a.replace(" ", "")
+            if compact and compact in re.sub(r"[^a-z0-9]", "", t):
+                return True
+        else:
+            if re.search(rf"\b{re.escape(a)}\b", t):
+                return True
+    return False
+
+
+def build_expanded_queries(company_name: str, aliases: List[str], industry: str = "general") -> List[str]:
+    """Build broad ESG retrieval queries across risk + commitments dimensions."""
+    primary = aliases[0] if aliases else company_name
+    secondary = aliases[1] if len(aliases) > 1 else company_name
+
+    bundles = [
+        ESG_KEYWORDS[:6],
+        CONTROVERSY_KEYWORDS,
+        REGULATORY_KEYWORDS,
+        COMMITMENT_KEYWORDS,
+    ]
+
+    domain_filters = [
+        " ".join([f"site:{d}" for d in TRUSTED_DOMAINS[:7]]),
+        " ".join([f"site:{d}" for d in TRUSTED_DOMAINS[7:]]),
+        "",
+    ]
+
+    queries = []
+    for i, keywords in enumerate(bundles):
+        key_phrase = " ".join(keywords[:6])
+        company_fragment = f'"{primary}" "{secondary}"' if secondary != primary else f'"{primary}"'
+        queries.append(f"{company_fragment} {key_phrase}")
+        filters = domain_filters[i % len(domain_filters)]
+        if filters:
+            queries.append(f"{company_fragment} {key_phrase} {filters}")
+
+    # Explicit high-signal template requested for institution-grade retrieval.
+    queries.append(
+        f'"{primary}" ESG controversies climate financing net zero commitments Reuters SEC EPA'
+    )
+
+    # Always include controversy-focused queries for contradiction detection.
+    queries.extend([
+        f'"{primary}" climate controversy Reuters',
+        f'"{primary}" net zero criticism lawsuit',
+        f'"{primary}" fossil fuel expansion vs targets',
+        f'"{primary}" emissions lawsuit ruling',
+    ])
+
+    if industry == "energy":
+        for keyword in ENERGY_KEYWORDS:
+            queries.append(f'"{primary}" {keyword}')
+
+    deduped = []
+    seen = set()
+    for query in queries:
+        q = re.sub(r"\s+", " ", query).strip()
+        key = q.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(q)
+    return deduped
+
+
+def _is_high_signal_domain(url: str) -> bool:
+    domain = urlparse(url).netloc.lower()
+    if is_trusted_source(url):
+        return True
+    return any(d in domain for d in HIGH_SIGNAL_NEWS_DOMAINS)
+
+
+def _classify_stance(text: str) -> str:
+    t = (text or "").lower()
+    if any(word in t for word in NEGATIVE_STANCE_WORDS):
+        return "Contradicts"
+    if any(word in t for word in POSITIVE_STANCE_WORDS):
+        return "Supports"
+    return "Neutral"
+
+
+def _source_priority(url: str) -> int:
+    domain = urlparse(url).netloc.lower()
+    if any(d in domain for d in ["sec.gov", "epa.gov", "europa.eu", "gov.uk", "sebi.gov.in"]):
+        return 0
+    if any(d in domain for d in ["reuters.com", "bloomberg.com", "ft.com", "wsj.com"]):
+        return 1
+    if is_trusted_source(url):
+        return 2
+    if any(d in domain for d in HIGH_SIGNAL_NEWS_DOMAINS):
+        return 3
+    return 4
+
+
+def _run_parallel_search(fetcher: RealTimeDataFetcher, queries: List[str], max_results: int) -> List[Dict]:
+    results: List[Dict] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(queries) or 1)) as pool:
+        future_map = {
+            pool.submit(fetcher.search_all_sources, query, max_results): query
+            for query in queries
+        }
+        for future in as_completed(future_map):
+            try:
+                query_results = future.result() or []
+                results.extend(query_results)
+            except Exception as exc:
+                print(f"⚠️ Search failed for query: {future_map[future]} ({exc})")
+    return results
 
 def is_trusted_source(url: str) -> bool:
     """Verify domain belongs to trusted ESG/legal sources."""
@@ -220,39 +404,37 @@ def detect_qualitative_violation(text: str) -> bool:
 # MAIN EVIDENCE COLLECTION
 # ==============================
 
-def collect_external_evidence(company_name: str) -> List[Dict]:
+def collect_external_evidence(
+    company_name: str,
+    aliases: List[str] | None = None,
+    industry: str = "general",
+    min_sources: int = MIN_RETRIEVAL_SOURCES,
+    target_retrieval: int = 25,
+) -> List[Dict]:
     """
     Collect real-world ESG evidence using only trusted legal/regulatory sources.
     """
 
     evidence = []
     seen_urls = set()
-    company_lower = company_name.lower().split()[0]
+    normalized_aliases = _normalize_aliases(company_name, aliases)
 
     try:
         fetcher = RealTimeDataFetcher()
 
         print("🔍 Searching trusted legal / regulatory sources...")
+        queries = build_expanded_queries(company_name, normalized_aliases, industry=industry)
+        raw_results = _run_parallel_search(fetcher, queries, max_results=16)
+        print(f"📡 Retrieval depth: total retrieved before filtering = {len(raw_results)}")
 
-        domain_filter = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
-        # Sometimes query gets too long for Duckduckgo, split filters or simplify query strings
-        first_half_domains = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS[:7]])
-        second_half_domains = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS[7:]])
+        # Prioritize regulatory and high-credibility news first.
+        raw_results = sorted(raw_results, key=lambda r: _source_priority(r.get("url", "")))
+        if target_retrieval > 0:
+            raw_results = raw_results[:target_retrieval]
 
-        # Remove the OR from the base queries which breaks duckduckgo site searches when mixed with complex booleans
-        queries = [
-            f"{company_name} emissions violation fraud {first_half_domains}",
-            f"{company_name} emissions violation fraud {second_half_domains}",
-            f"{company_name} emissions scandal {first_half_domains}",
-            f"{company_name} emissions scandal {second_half_domains}",
-            f"{company_name} scope 1 scope 2 scope 3 emissions data {first_half_domains}",
-            f"{company_name} scope 1 scope 2 scope 3 emissions data {second_half_domains}"
-        ]
+        filtered_count = 0
 
-        for idx, search_query in enumerate(queries):
-            results = fetcher.search_duckduckgo(search_query, max_results=8)
-
-            for res in results:
+        for res in raw_results:
 
                 url = res.get("url", "")
                 snippet = res.get("snippet", "")
@@ -262,17 +444,20 @@ def collect_external_evidence(company_name: str) -> List[Dict]:
                     continue
                 
                 # --------------------------------
-                # 1. Ensure Company is Mentioned
+                # 1. Ensure company is mentioned across name variants
                 # --------------------------------
-                if company_lower not in text:
+                combined_text = f"{res.get('title', '')} {snippet}"
+                if not _mentions_company(combined_text, normalized_aliases):
                     continue
 
                 # --------------------------------
-                # 2. Strict ESG Evidence Filtering
+                # 2. ESG relevance filtering (retain controversy and commitment signals)
                 # --------------------------------
-                # Temporarily disabled strict keyword matching for qualitative legal findings (like "fraud") where it might just say "emissions scandal" without heavy ESG vernacular.
-                # if not any(kw in text for kw in ESG_KEYWORDS):
-                #     continue
+                has_esg_signal = any(kw in text for kw in ESG_KEYWORDS)
+                has_controversy_signal = any(kw in text for kw in CONTROVERSY_KEYWORDS)
+                has_commitment_signal = any(kw in text for kw in COMMITMENT_KEYWORDS)
+                if not (has_esg_signal or has_controversy_signal or has_commitment_signal):
+                    continue
 
                 # --------------------------------
                 # 3. Reject Generic Documents
@@ -281,13 +466,13 @@ def collect_external_evidence(company_name: str) -> List[Dict]:
                     continue
                 
                 # --------------------------------
-                # 4. Filter ONLY trusted sources
+                # 4. Source quality filter with reduced aggressiveness for high-signal domains
                 # --------------------------------
-                if not is_trusted_source(url):
+                if not _is_high_signal_domain(url):
                     continue
                     
                 score = get_credibility_score(url)
-                if score < 3:
+                if score < 2:
                     continue
 
                 seen_urls.add(url)
@@ -327,7 +512,9 @@ def collect_external_evidence(company_name: str) -> List[Dict]:
                 # --------------------------------
                 # Evidence confidence weighting
                 # --------------------------------
+                stance = _classify_stance(combined_text)
                 if value is not None and score >= 3:
+                    filtered_count += 1
                     evidence.append({
                         "metric": metric,
                         "year": CURRENT_YEAR, # Future iterations will extract precise timeline data here
@@ -337,6 +524,8 @@ def collect_external_evidence(company_name: str) -> List[Dict]:
                         "event_category": event_category,
                         "source": url,
                         "confidence_score": score,
+                        "stance": stance,
+                        "relationship_to_claim": stance,
                         "source_credibility": credibility,
                         "supporting_quote": quote
                         # In the future: Add raw "2020_value", "2023_value" for Time-Series Analysis comparison
@@ -354,21 +543,90 @@ def collect_external_evidence(company_name: str) -> List[Dict]:
                     "dieselgate"
                 ]):
                     if not any(word in text for word in ["antitrust", "monopoly", "licensing", "competition"]):
+                        filtered_count += 1
                         evidence.append({
                             "metric": metric,
                             "year": CURRENT_YEAR,
                             "value": "Regulatory Violation",
                             "source": url,
                             "confidence_score": score,
+                            "stance": "Contradicts",
+                            "relationship_to_claim": "Contradicts",
                             "event_category": evaluate_legal_outcome(text),
                             "source_credibility": f"Regulatory ({domain})",
                             "supporting_quote": quote
                         })
 
+        print(f"🧹 Retrieval depth: after filter = {filtered_count}")
+
+        # Fallback pass: broaden retrieval and relax trust filtering when coverage is too low.
+        if len(evidence) < min_sources:
+            print(
+                f"⚠️ Evidence below threshold ({len(evidence)}/{min_sources}). Running broader fallback retrieval..."
+            )
+            broad_queries = [
+                f'{normalized_aliases[0] if normalized_aliases else company_name} ESG climate risk controversies',
+                f'{normalized_aliases[0] if normalized_aliases else company_name} net zero sustainability targets progress',
+                f'{normalized_aliases[0] if normalized_aliases else company_name} regulatory investigation environmental',
+            ]
+            broad_results = _run_parallel_search(fetcher, broad_queries, max_results=16)
+
+            for res in broad_results:
+                url = res.get("url", "")
+                snippet = res.get("snippet", "")
+                text = snippet.lower()
+                combined_text = f"{res.get('title', '')} {snippet}"
+
+                if not url or url in seen_urls:
+                    continue
+                if not _mentions_company(combined_text, normalized_aliases):
+                    continue
+                if any(inv in text for inv in INVALID_TERMS):
+                    continue
+
+                score = get_credibility_score(url)
+                if score < 3 and not is_trusted_source(url):
+                    # Keep non-trusted fallback only when we are clearly under-covered.
+                    if len(evidence) >= max(5, min_sources // 2):
+                        continue
+                    score = 2
+
+                seen_urls.add(url)
+                metric = detect_metric_from_text(text)
+                domain = urlparse(url).netloc.replace("www.", "")
+                quote = clean_snippet(snippet)
+                fallback_stance = _classify_stance(combined_text)
+                evidence.append({
+                    "metric": metric,
+                    "year": CURRENT_YEAR,
+                    "value": "Reported",
+                    "unit": "",
+                    "is_regulatory_violation": detect_qualitative_violation(text),
+                    "event_category": evaluate_legal_outcome(text),
+                    "source": url,
+                    "confidence_score": score,
+                    "stance": fallback_stance,
+                    "relationship_to_claim": fallback_stance,
+                    "source_credibility": f"Score {score} - Retrieved via fallback ({domain})",
+                    "supporting_quote": quote,
+                })
+
+                if len(evidence) >= min_sources:
+                    break
+
     except Exception as e:
         print(f"Evidence search error: {e}")
 
-    return evidence
+    # Final de-duplication by source URL preserving first-best entry.
+    unique_by_source = {}
+    for item in evidence:
+        source = item.get("source")
+        if source and source not in unique_by_source:
+            unique_by_source[source] = item
+
+    final_evidence = list(unique_by_source.values())
+    print(f"🗂️ Retrieval depth: after dedup = {len(final_evidence)}")
+    return final_evidence
 
 
 # ==============================

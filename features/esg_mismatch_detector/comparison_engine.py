@@ -1,6 +1,37 @@
 from typing import List, Dict
 import datetime
 
+
+def _metric_context_terms(metric: str) -> List[str]:
+    metric = (metric or "").lower()
+    if "carbon" in metric or "emission" in metric:
+        return ["carbon", "emission", "scope 1", "scope 2", "scope 3", "net zero", "fossil"]
+    if "renewable" in metric or "energy" in metric:
+        return ["renewable", "clean energy", "fossil", "oil", "gas", "transition"]
+    return [metric]
+
+
+def _is_negative_stance(item: Dict) -> bool:
+    stance = str(item.get("stance") or item.get("relationship_to_claim") or "").lower()
+    if stance in ["contradicts", "negative"]:
+        return True
+
+    text = f"{item.get('supporting_quote', '')} {item.get('event_category', '')}".lower()
+    return any(
+        term in text
+        for term in ["lawsuit", "criticism", "fails", "violation", "investigation", "greenwashing", "fossil expansion"]
+    )
+
+
+def _find_negative_evidence_for_metric(metric: str, evidence: List[Dict]) -> List[Dict]:
+    terms = _metric_context_terms(metric)
+    matched = []
+    for item in evidence:
+        text = f"{item.get('metric', '')} {item.get('supporting_quote', '')} {item.get('event_category', '')}".lower()
+        if _is_negative_stance(item) and any(term in text for term in terms):
+            matched.append(item)
+    return matched
+
 def compare_promises_vs_actual(promises: List[Dict], actual_data: List[Dict]) -> List[Dict]:
     """
     Compare promised targets vs actual verified data.
@@ -209,12 +240,26 @@ def compare_promises_vs_actual(promises: List[Dict], actual_data: List[Dict]) ->
              risk_score = "Low" 
 
         if actual_value is None and not regulatory_violation:
-            if category == "completed_promise":
+            negative_for_metric = _find_negative_evidence_for_metric(metric, actual_data)
+            if negative_for_metric:
+                lead = negative_for_metric[0]
+                status = "Contradiction Signal"
+                risk_score = "High" if category == "completed_promise" else "Moderate"
+                trend = "worsening"
+                mismatch_type = "Contradictory External Signal"
+                mismatch_explanation = (
+                    "Commitment exists, but external sources show lawsuits/criticism/violations "
+                    "that contradict claimed progress."
+                )
+                actual_value = lead.get("event_category") or "Negative External Signal"
+                actual = lead
+            elif category == "completed_promise":
                 status = "Unverified (Missing Data)"
             else:
                 status = "Monitoring"
-            risk_score = "Unknown"
-            trend = "unknown"
+            if not negative_for_metric:
+                risk_score = "Unknown"
+                trend = "unknown"
             
         # Add Confidence metric loosely mapped from source severity / score
         eval_conf = "Medium"
