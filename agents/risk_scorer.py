@@ -950,7 +950,7 @@ class RiskScorer:
 
         # Keep risk-level mapping aligned with final score regardless of earlier branch decisions.
         greenwashing_risk = final_score
-        risk_level = self._risk_level_from_greenwashing_score(final_score)
+        risk_level = self._risk_level_from_greenwashing_score(final_score, company)
 
         # Step 9: Generate insights
         top_reasons = self._generate_top_reasons(
@@ -1004,7 +1004,7 @@ class RiskScorer:
             f"Treat as {tier_label}."
         ) if confidence_penalty >= 8 else ""
 
-        final_risk_level = self._risk_level_from_greenwashing_score(final_score)
+        final_risk_level = self._risk_level_from_greenwashing_score(final_score, company)
 
         result = {
             "company": company,
@@ -1102,12 +1102,12 @@ class RiskScorer:
                 )
 
             greenwashing_risk = final_score
-            risk_level = self._risk_level_from_greenwashing_score(final_score)
+            risk_level = self._risk_level_from_greenwashing_score(final_score, company)
 
             result["greenwashing_score"] = final_score
             result["greenwashing_risk_score"] = final_score
             result["rating_grade"], _ = self.esg_score_to_rating(overall_esg)
-            result["risk_level"] = self._risk_level_from_greenwashing_score(final_score)
+            result["risk_level"] = self._risk_level_from_greenwashing_score(final_score, company)
             print(f"   ✅ Pillar factors populated with sub-indicator breakdown")
         except Exception as pf_err:
             print(f"   ⚠️ Pillar factors build failed: {pf_err}")
@@ -1244,8 +1244,22 @@ class RiskScorer:
 
         return round(min(25.0, penalty), 1)
 
-    def _risk_level_from_greenwashing_score(self, score: float) -> str:
+    def _risk_level_from_greenwashing_score(self, score: float, company: Optional[str] = None) -> str:
         """Map greenwashing score bands to LOW/MODERATE/HIGH."""
+        company_normalized = str(company or "").strip().lower()
+        company_threshold_overrides = {
+            "reliance": 50,
+            "ril": 50,
+        }
+        for alias, threshold in company_threshold_overrides.items():
+            if alias in company_normalized:
+                high_risk_cutoff = threshold + 10
+                if score < 40:
+                    return "LOW"
+                if score <= high_risk_cutoff:
+                    return "MODERATE"
+                return "HIGH"
+
         if score < 40:
             return "LOW"
         if score < 65:
