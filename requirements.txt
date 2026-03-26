@@ -60,3 +60,15 @@ feedparser>=6.0.10  # Already included above, just noting
 
 # Additional NLP
 nltk>=3.8.0
+
+# Camelot PDF Table Extraction
+camelot-py[cv]>=0.11.0
+opencv-python-headless>=4.8.0
+PyMuPDF>=1.23.0
+
+# Multi-Archive Cascade Retriever
+requests-cache>=1.1.0
+aiohttp>=3.9.0
+
+# ESG Data APIs (WBA + WRI Aqueduct)
+httpx>=0.27.0
