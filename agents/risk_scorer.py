@@ -581,6 +581,16 @@ class RiskScorer:
         print(f"🔍 AGENT 7: {self.name}")
         print(f"{'='*60}")
         print(f"Company: {company}")
+
+        external_payload = all_analyses.get("external_benchmarks", {})
+        if not isinstance(external_payload, dict):
+            external_payload = {}
+        external_sources = external_payload.get("sources", {})
+        if not isinstance(external_sources, dict):
+            external_sources = {}
+        external_scores = external_payload.get("scores", {})
+        if not isinstance(external_scores, dict):
+            external_scores = {}
         
         # Step 0: Calculate ESG pillar scores FIRST (PRIMARY rating source)
         pillar_scores = self.calculate_pillar_scores(all_analyses)
@@ -1150,7 +1160,16 @@ class RiskScorer:
             "report_tier": report_tier,
             "score_disclaimer": score_disclaimer,
             "high_carbon_greenwashing_flag": high_carbon_greenwashing_flag,
-            "esg_override_active": override_ml
+            "esg_override_active": override_ml,
+            "external_benchmarks": {
+                "enabled": bool(external_payload.get("enabled") or external_sources),
+                "sources": external_sources,
+                "scores": external_scores,
+                "wba_company_name": external_payload.get("wba_company_name"),
+                "wba_indicator_count": external_payload.get("wba_indicator_count", 0),
+                "hq_coordinates": external_payload.get("hq_coordinates", {}),
+                "error": external_payload.get("error"),
+            },
         }
         if score_disclaimer:
             result.setdefault("quality_warnings", []).append(score_disclaimer)

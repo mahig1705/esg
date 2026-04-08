@@ -23,8 +23,8 @@ class FreeDataAggregator:
     def __init__(self):
         # Load API keys from .env
         # News APIs
-        self.newsapi_key = os.getenv("NEWSAPI_KEY")
-        self.newsdata_key = os.getenv("NEWSDATA_KEY")
+        self.newsapi_key = os.getenv("NEWSAPI_KEY") or os.getenv("NEWS_API_KEY")
+        self.newsdata_key = os.getenv("NEWSDATA_KEY") or os.getenv("NEWSDATA_API_KEY")
         self.thenews_key = os.getenv("THENEWSAPI_KEY")
         self.mediastack_key = os.getenv("MEDIASTACK_KEY")
         

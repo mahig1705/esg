@@ -6,6 +6,9 @@ import sys
 import os
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Add agents directory to Python path
 agents_dir = Path(__file__).parent.parent / "agents"
@@ -34,8 +37,8 @@ class LiveDataFetcher:
     """Fetches live content for claim extraction"""
     
     def __init__(self):
-        self.news_api_key = os.getenv("NEWS_API_KEY")
-        self.newsdata_api_key = os.getenv("NEWSDATA_API_KEY")
+        self.news_api_key = os.getenv("NEWS_API_KEY") or os.getenv("NEWSAPI_KEY")
+        self.newsdata_api_key = os.getenv("NEWSDATA_API_KEY") or os.getenv("NEWSDATA_KEY")
     
     def fetch_company_content(self, company_name: str, claim: str = None) -> str:
         """
@@ -1186,16 +1189,62 @@ def _enrich_external_esg_benchmarks(state: ESGState) -> Dict[str, Any]:
         return {"enabled": False, "error": "missing company"}
 
     try:
-        filled = fill_missing_pillars(
-            company_name=company,
-            existing_scores={
-                "social": None,
-                "governance": None,
-                "environment": None,
-                "water_risk": None,
-            },
-            wba_api_key=os.getenv("WBA_API_KEY"),
-        )
+        import re
+
+        def _company_variants(raw_name: str) -> list[str]:
+            variants: list[str] = []
+
+            def _add(value: str):
+                text = str(value or "").strip()
+                if text and text not in variants:
+                    variants.append(text)
+
+            base = re.sub(r"\s+", " ", str(raw_name or "")).strip()
+            _add(base)
+
+            camel_split = re.sub(r"([a-z])([A-Z])", r"\1 \2", base)
+            _add(camel_split)
+            _add(camel_split.replace("&", " and "))
+
+            no_punct = re.sub(r"[,&()]+", " ", camel_split)
+            no_punct = re.sub(r"\s+", " ", no_punct).strip()
+            _add(no_punct)
+
+            tokens = [t for t in no_punct.split(" ") if t]
+            if tokens:
+                _add(tokens[0])
+            if len(tokens) >= 2:
+                _add(" ".join(tokens[:2]))
+
+            # Handle fused acronym + word forms like JPMorgan -> JP Morgan.
+            if tokens:
+                first = tokens[0]
+                fused = re.match(r"^([A-Z]{3,})([a-z].*)$", first)
+                if fused:
+                    caps, tail = fused.groups()
+                    split_first = f"{caps[:-1]} {caps[-1]}{tail}"
+                    _add(" ".join([split_first] + tokens[1:]).strip())
+
+            return variants
+
+        candidate_names = _company_variants(company)
+        filled = {}
+        selected_company_name = company
+
+        for candidate_name in candidate_names:
+            selected_company_name = candidate_name
+            filled = fill_missing_pillars(
+                company_name=candidate_name,
+                existing_scores={
+                    "social": None,
+                    "governance": None,
+                    "environment": None,
+                    "water_risk": None,
+                },
+                wba_api_key=os.getenv("WBA_API_KEY"),
+            )
+            if isinstance(filled, dict) and filled.get("_sources"):
+                break
 
         score_keys = {
             "social",
@@ -1214,6 +1263,12 @@ def _enrich_external_esg_benchmarks(state: ESGState) -> Dict[str, Any]:
         sources = filled.get("_sources", {}) if isinstance(filled, dict) else {}
         indicators = filled.get("_wba_indicators", {}) if isinstance(filled, dict) else {}
         hq_coords = filled.get("_wba_hq_coordinates", {}) if isinstance(filled, dict) else {}
+        enrichment_error = None
+        if not sources:
+            enrichment_error = (
+                "No WBA/WRI data returned for company aliases: "
+                + ", ".join(candidate_names[:6])
+            )
 
         return {
             "enabled": bool(sources),
@@ -1222,6 +1277,9 @@ def _enrich_external_esg_benchmarks(state: ESGState) -> Dict[str, Any]:
             "wba_company_name": filled.get("_wba_company_name") if isinstance(filled, dict) else None,
             "hq_coordinates": hq_coords,
             "wba_indicator_count": len(indicators) if isinstance(indicators, dict) else 0,
+            "query_company_name": selected_company_name,
+            "query_attempts": candidate_names,
+            "error": enrichment_error,
         }
     except Exception as exc:
         return {"enabled": False, "error": f"external ESG enrichment failed: {exc}"}
@@ -1645,9 +1703,75 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
     assert agent_count < 100, f"Agent count {agent_count} is unreasonably high - counter not being reset"
     
     avg_confidence = sum(confidences) / len(confidences) if confidences else 0.5
+
+    # Apply reliability guardrails so sparse evidence runs cannot report inflated confidence.
+    evidence_items = state.get("evidence", []) if isinstance(state.get("evidence", []), list) else []
+    evidence_count = len(evidence_items)
+
+    unique_domains = set()
+    verifiable_count = 0
+    for item in evidence_items:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or item.get("link") or "").strip()
+        date = str(item.get("date") or item.get("published_at") or item.get("publishedAt") or "").strip()
+
+        if url:
+            host = url.split("//")[-1].split("/")[0].lower().strip()
+            if host.startswith("www."):
+                host = host[4:]
+            if host:
+                unique_domains.add(host)
+
+        if url and date:
+            verifiable_count += 1
+
+    reliability_caps = []
+    if evidence_count < 3:
+        reliability_caps.append(0.55)
+    elif evidence_count < 5:
+        reliability_caps.append(0.65)
+    elif evidence_count < 8:
+        reliability_caps.append(0.75)
+
+    if len(unique_domains) < 3:
+        reliability_caps.append(0.70)
+    if verifiable_count < 3:
+        reliability_caps.append(0.70)
+
+    risk_outputs = [o for o in state.get("agent_outputs", []) if isinstance(o, dict) and o.get("agent") == "risk_scoring"]
+    risk_result = risk_outputs[-1].get("output", {}) if risk_outputs else {}
+    report_tier = str(risk_result.get("report_tier") or "").upper() if isinstance(risk_result, dict) else ""
+    if report_tier == "TIER_3":
+        reliability_caps.append(0.60)
+    elif report_tier == "TIER_2":
+        reliability_caps.append(0.75)
+
+    failed_agents = 0
+    for out in state.get("agent_outputs", []):
+        if not isinstance(out, dict):
+            continue
+        if out.get("agent") == "confidence_scoring":
+            continue
+        if "error" in out or out.get("output") == "Agent not available":
+            failed_agents += 1
+
+    if failed_agents >= 4:
+        avg_confidence *= 0.85
+    elif failed_agents >= 2:
+        avg_confidence *= 0.92
+
+    cap_applied = min(reliability_caps) if reliability_caps else None
+    if isinstance(cap_applied, float):
+        avg_confidence = min(avg_confidence, cap_applied)
+
+    avg_confidence = max(0.35, min(0.95, avg_confidence))
     state["confidence"] = avg_confidence
-    
-    print(f"✅ Average confidence: {avg_confidence:.2%} (from {agent_count} agents)")
+
+    print(
+        f"✅ Average confidence: {avg_confidence:.2%} "
+        f"(agents={agent_count}, evidence={evidence_count}, verifiable={verifiable_count}, domains={len(unique_domains)})"
+    )
     
     state["agent_outputs"].append({
         "agent": "confidence_scoring",
@@ -1655,6 +1779,13 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
             "average_confidence": avg_confidence,
             "agent_count": agent_count,
             "agents_included": sorted(unique_agent_confidences.keys()),
+            "evidence_count": evidence_count,
+            "verifiable_evidence_count": verifiable_count,
+            "unique_domain_count": len(unique_domains),
+            "failed_agent_count": failed_agents,
+            "reliability_caps": reliability_caps,
+            "cap_applied": cap_applied,
+            "report_tier": report_tier,
         },
         "confidence": avg_confidence,
         "timestamp": datetime.now().isoformat()

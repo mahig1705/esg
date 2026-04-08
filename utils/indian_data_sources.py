@@ -39,8 +39,8 @@ class IndianDataAggregator:
     
     def __init__(self):
         # API keys from .env
-        self.newsapi_key = os.getenv("NEWSAPI_KEY")
-        self.newsdata_key = os.getenv("NEWSDATA_KEY")
+        self.newsapi_key = os.getenv("NEWSAPI_KEY") or os.getenv("NEWS_API_KEY")
+        self.newsdata_key = os.getenv("NEWSDATA_KEY") or os.getenv("NEWSDATA_API_KEY")
         self.world_bank_key = os.getenv("WORLD_BANK_API_KEY", "")  # Usually not needed
         
         # Cache directory

@@ -365,7 +365,7 @@ class FinancialAnalyst:
         import os
         import requests
         
-        api_key = os.getenv("ALPHA_VANTAGE_KEY", "")
+        api_key = os.getenv("ALPHA_VANTAGE_KEY", "") or os.getenv("ALPHAVANTAGE_KEY", "")
         
         print(f"\n{'='*60}")
         print(f"🔍 DEBUG: Alpha Vantage Fallback")
