@@ -70,10 +70,6 @@ type PersistedHistoryItem = {
 const AnalysisRunContext = createContext<AnalysisRunContextValue | null>(null);
 
 function sanitizeDisplayMessage(message: string): string {
-  const normalized = message.toLowerCase();
-  if (/error|failed|traceback|exception/.test(normalized)) {
-    return "Pipeline applied a fallback path and continued processing.";
-  }
   return message;
 }
 
@@ -227,6 +223,8 @@ export function AnalysisRunProvider({ children }: { children: React.ReactNode })
 
   const duplicateGateRef = useRef<Map<string, number>>(new Map());
   const streamActiveRef = useRef(false);
+  const activeRunTokenRef = useRef(0);
+  const inFlightRunsRef = useRef(0);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -275,14 +273,18 @@ export function AnalysisRunProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const startAnalysis = useCallback(async (payload: { company: string; claim: string; industry: string }) => {
-    if (streamActiveRef.current) {
+    const hadActiveRun = inFlightRunsRef.current > 0;
+    const runToken = Date.now();
+    activeRunTokenRef.current = runToken;
+    inFlightRunsRef.current += 1;
+
+    if (hadActiveRun) {
       appendLog({
-        message: "A pipeline run is already in progress. Monitoring the current run.",
+        message: "Starting a new backend run in parallel. Live view switched to the latest run.",
         level: "warn",
         source: "stdout",
         ts: new Date().toISOString(),
       });
-      return;
     }
 
     streamActiveRef.current = true;
@@ -330,18 +332,20 @@ export function AnalysisRunProvider({ children }: { children: React.ReactNode })
           if (event === "log") {
             const incomingLevel = (payloadData.level as LogEntry["level"]) || "info";
             const safeLevel: LogEntry["level"] = incomingLevel === "error" ? "warn" : incomingLevel;
-            appendLog({
-              message: sanitizeDisplayMessage(String(payloadData.message || "")),
-              level: safeLevel,
-              source: (payloadData.source as LogEntry["source"]) || "stdout",
-              ts: String(payloadData.ts || new Date().toISOString()),
-            });
+            if (activeRunTokenRef.current === runToken) {
+              appendLog({
+                message: sanitizeDisplayMessage(String(payloadData.message || "")),
+                level: safeLevel,
+                source: (payloadData.source as LogEntry["source"]) || "stdout",
+                ts: String(payloadData.ts || new Date().toISOString()),
+              });
+            }
           }
 
           if (event === "status") {
             const state = String(payloadData.state || "info");
             const message = String(payloadData.message || "");
-            if (message) {
+            if (message && activeRunTokenRef.current === runToken) {
               const level: LogEntry["level"] = state === "fallback" ? "warn" : state === "idle" ? "warn" : "info";
               appendLog({
                 message,
@@ -359,36 +363,45 @@ export function AnalysisRunProvider({ children }: { children: React.ReactNode })
           if (event === "result") {
             const nextResult = payloadData as unknown as AnalysisResult;
             runResult = nextResult;
-            setResults(nextResult);
+            if (activeRunTokenRef.current === runToken) {
+              setResults(nextResult);
+            }
             saveHistory(nextResult);
           }
 
           if (event === "end") {
-            if (payloadData.ok && runResult) {
-              setAppState("results");
-            } else if (!payloadData.ok) {
-              setAppState("input");
+            if (activeRunTokenRef.current === runToken) {
+              if (payloadData.ok && runResult) {
+                setAppState("results");
+              } else if (!payloadData.ok) {
+                setAppState("input");
+              }
             }
           }
         }
       }
 
-      if (!runError && runResult) {
+      if (!runError && runResult && activeRunTokenRef.current === runToken) {
         setAppState("results");
       }
-      if (!runResult && !runError) {
+      if (!runResult && !runError && activeRunTokenRef.current === runToken) {
         setAppState("input");
       }
     } catch {
-      appendLog({
-        message: "Request finished without a new report. Previous fallback data is still available.",
-        level: "warn",
-        source: "stderr",
-        ts: new Date().toISOString(),
-      });
-      setAppState("input");
+      if (activeRunTokenRef.current === runToken) {
+        appendLog({
+          message: "Request finished without a new report. Previous fallback data is still available.",
+          level: "warn",
+          source: "stderr",
+          ts: new Date().toISOString(),
+        });
+        setAppState("input");
+      }
     } finally {
-      streamActiveRef.current = false;
+      inFlightRunsRef.current = Math.max(0, inFlightRunsRef.current - 1);
+      if (inFlightRunsRef.current === 0) {
+        streamActiveRef.current = false;
+      }
     }
   }, [appendLog]);
 

@@ -1108,6 +1108,12 @@ class RiskScorer:
             result["greenwashing_risk_score"] = final_score
             result["rating_grade"], _ = self.esg_score_to_rating(overall_esg)
             result["risk_level"] = self._risk_level_from_greenwashing_score(final_score)
+
+            # Rating-grade safety rule: CCC/C must always surface as HIGH risk.
+            if result["rating_grade"] in {"CCC", "C"} and result["risk_level"] != "HIGH":
+                result["risk_level"] = "HIGH"
+                result["greenwashing_score"] = max(float(result["greenwashing_score"]), 60.0)
+                result["greenwashing_risk_score"] = max(float(result["greenwashing_risk_score"]), 60.0)
             print(f"   ✅ Pillar factors populated with sub-indicator breakdown")
         except Exception as pf_err:
             print(f"   ⚠️ Pillar factors build failed: {pf_err}")
@@ -1248,7 +1254,7 @@ class RiskScorer:
         """Map greenwashing score bands to LOW/MODERATE/HIGH."""
         if score < 40:
             return "LOW"
-        if score < 65:
+        if score < 60:
             return "MODERATE"
         return "HIGH"
     

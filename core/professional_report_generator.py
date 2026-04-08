@@ -470,6 +470,8 @@ class ProfessionalReportGenerator:
             esg_score = max(0.0, min(100.0, 100.0 - gw_score))
         rating = str(scores.get("esg_rating") or self._rating_from_esg_score(esg_score))
         band = str(scores.get("risk_level") or self._risk_band(gw_score)).upper()
+        if rating.upper() in {"CCC", "C"} and band in {"LOW", "MODERATE"}:
+            band = "HIGH"
         conf_raw = scores.get("confidence")
         conf_pct = float(conf_raw * 100) if isinstance(conf_raw, (int, float)) and conf_raw <= 1 else self._safe_float(conf_raw, 0.0)
         if conf_pct <= 0:

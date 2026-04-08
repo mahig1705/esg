@@ -96,15 +96,7 @@ export function sanitizeCompanyForFileName(company: string): string {
 
 export function isImportantLogLine(line: string): boolean {
     const normalized = line.trim();
-    if (!normalized) {
-        return false;
-    }
-
-    if (/^traceback\s*\(/i.test(normalized) || /^file\s+".*",\s+line\s+\d+/i.test(normalized) || /from\s+agents\./i.test(normalized)) {
-        return false;
-    }
-
-    return /(ANALYZING|Running|COMPLETE|FAILED|ERROR|WARNING|Risk Level|Reports saved|EXECUTIVE SUMMARY|\bAgent\b|workflow|timed out|saved|\u26a0\ufe0f|\u274c|\u2705|\ud83d\udd0d|\ud83d\udcca|\ud83d\udcbe|\ud83d\ude80)/i.test(normalized);
+    return normalized.length > 0;
 }
 
 export function classifyLogLevel(line: string): "info" | "warn" | "error" | "success" {

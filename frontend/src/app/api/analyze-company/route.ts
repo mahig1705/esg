@@ -18,6 +18,16 @@ type StreamEvent = {
   payload: Record<string, unknown>;
 };
 
+function mirrorToBackendTerminal(source: "stdout" | "stderr", line: string): void {
+  const stamp = new Date().toISOString();
+  const formatted = `[analyze-company][${stamp}][${source}] ${line}\n`;
+  if (source === "stderr") {
+    process.stderr.write(formatted);
+    return;
+  }
+  process.stdout.write(formatted);
+}
+
 function toSseChunk(event: StreamEvent): string {
   return `event: ${event.event}\ndata: ${JSON.stringify(event.payload)}\n\n`;
 }
@@ -146,6 +156,8 @@ export async function POST(req: Request) {
               ts: new Date().toISOString(),
             },
           });
+
+          mirrorToBackendTerminal(source, trimmed);
         }
 
         return remainder;
