@@ -778,10 +778,12 @@ class EnterpriseESGDataFetcher:
         
         # Priority order for sources (higher priority = kept if duplicate)
         priority_order = [
+            "government", "financial", "news", "ngo", "academic", "web_fallback",
+            # Backward-compatible keys from older callsites:
             "news_api", "newsdata_io", "sec_edgar", "finnhub_news",
             "reuters", "ft_sustainability", "bloomberg_green",
             "yahoo_finance", "guardian_environment", "ngo_sources",
-            "academic_sources", "esg_book", "web_fallback"
+            "academic_sources", "esg_book"
         ]
         
         for source_key in priority_order:

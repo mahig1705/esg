@@ -70,6 +70,7 @@ from core.llm_call import call_llm
 import asyncio
 from core.evidence_cache import evidence_cache
 from core.safe_utils import normalize_industry_key, normalize_industry_label
+from core.esg_data_apis import fill_missing_pillars
 import json
 import os
 import numpy as np
@@ -105,6 +106,13 @@ STATIC_PEER_BASELINES = {
     "general": [
         {"name": "Average (general)", "ticker": "-", "esg_score": 50.0, "greenwashing_risk_score": 50.0, "environmental_score": 48.0, "social_score": 51.0, "governance_score": 51.0, "rating": "BB", "source": "baseline"},
     ],
+}
+
+WBA_PEER_SEEDS = {
+    "consumer goods": ["Procter & Gamble", "Nestle", "Reckitt", "Colgate-Palmolive"],
+    "banking": ["HSBC", "Barclays", "Citigroup", "Bank of America"],
+    "technology": ["Microsoft", "Apple", "Alphabet"],
+    "oil & gas": ["BP", "TotalEnergies", "ExxonMobil", "Chevron"],
 }
 
 
@@ -434,6 +442,72 @@ class IndustryComparator:
         else:
             return "CCC"
 
+    def _fetch_wba_seed_peers(self, company: str, industry_key: str) -> List[Dict[str, Any]]:
+        """Fetch same-industry peers from WBA using predefined seed issuers."""
+        seeds = [
+            s for s in WBA_PEER_SEEDS.get(industry_key, [])
+            if str(s).strip().lower() != str(company).strip().lower()
+        ]
+        if not seeds:
+            return []
+
+        peers: List[Dict[str, Any]] = []
+        for peer_name in seeds:
+            try:
+                filled = fill_missing_pillars(
+                    company_name=peer_name,
+                    existing_scores={
+                        "social": None,
+                        "governance": None,
+                        "environment": None,
+                        "water_risk": None,
+                    },
+                    wba_api_key=os.getenv("WBA_API_KEY"),
+                )
+            except Exception:
+                continue
+
+            if not isinstance(filled, dict):
+                continue
+
+            env = filled.get("environment")
+            social = filled.get("social")
+            gov = filled.get("governance")
+            numeric = [v for v in [env, social, gov] if isinstance(v, (int, float))]
+            if len(numeric) < 2:
+                continue
+
+            env_v = float(env) if isinstance(env, (int, float)) else float(sum(numeric) / len(numeric))
+            s_v = float(social) if isinstance(social, (int, float)) else float(sum(numeric) / len(numeric))
+            g_v = float(gov) if isinstance(gov, (int, float)) else float(sum(numeric) / len(numeric))
+            esg = round((env_v * 0.35) + (s_v * 0.30) + (g_v * 0.35), 1)
+
+            peers.append({
+                "company": peer_name,
+                "esg": esg,
+                "e": round(env_v, 1),
+                "s": round(s_v, 1),
+                "g": round(g_v, 1),
+                "rating": self._calculate_rating(esg),
+                "source": "wba_live",
+                "industry": normalize_industry_label(industry_key),
+            })
+
+        return peers
+
+    def compare(self, company: str, industry: str) -> Dict[str, Any]:
+        """Primary entrypoint used by the workflow wrapper."""
+        table = self.generate_dynamic_peer_table(company=company, industry=industry)
+        if not isinstance(table, dict):
+            return {"peers": [], "confidence": 0.5, "data_source": "none"}
+
+        table["confidence"] = 0.8 if table.get("real_peer_count", 0) >= 2 else 0.6
+        return table
+
+    def analyze(self, company: str) -> Dict[str, Any]:
+        """Backward-compatible alias for older wrappers."""
+        return self.compare(company=company, industry="general")
+
     def generate_dynamic_peer_table(self, company: str, industry: str, 
                                     esg_score: float = None,
                                     pillar_scores: Dict[str, float] = None) -> Dict[str, Any]:
@@ -471,6 +545,16 @@ class IndustryComparator:
         # ChromaDB fallback if persistent DB has no peers for the industry.
         if not real_peers:
             real_peers = self.get_real_peers_from_db(industry, exclude_company=company, max_peers=10)
+
+        # WBA live fallback before estimated peers.
+        if len(real_peers) < 3:
+            wba_peers = self._fetch_wba_seed_peers(company=company, industry_key=industry_key)
+            existing_names = {str(p.get("company", "")).lower() for p in real_peers if isinstance(p, dict)}
+            for peer in wba_peers:
+                nm = str(peer.get("company", "")).lower()
+                if nm and nm not in existing_names:
+                    real_peers.append(peer)
+                    existing_names.add(nm)
         
         # Step 2: Determine if we need estimated peers
         use_estimates = len(real_peers) < 3
@@ -575,7 +659,7 @@ class IndustryComparator:
         table += f"| Industry Average     | {avg_esg:>6.1f}    | {avg_e:>2.0f} | {avg_s:>2.0f} | {avg_g:>2.0f} | -    | -      |\n"
         
         # Step 8: Determine data source for disclaimer
-        real_count = len([p for p in all_peers if p.get('source') == 'database'])
+        real_count = len([p for p in all_peers if p.get('source') in {'database', 'baseline', 'wba_live'}])
         estimated_count = len([p for p in all_peers if p.get('source') == 'estimated'])
         
         if real_count >= 3:

@@ -150,7 +150,7 @@ class ReportDownloaderService:
         "shell": "https://reports.shell.com/sustainability-report/2023/_assets/downloads/shell-sustainability-report-2023.pdf",
         "tesla": "https://www.tesla.com/ns_videos/2023-tesla-impact-report.pdf",
         "microsoft": "https://query.prod.cms.rt.microsoft.com/cms/api/am/binary/RW1jvLz",
-        "unilever": "https://www.unilever.com/files/92ui5egz/production/6f37b96e8b365fd3db4f485e25fa05f96f3f6906.pdf/unilever-sustainability-report-2023.pdf",
+        "unilever": "https://www.unilever.com/investor-relations/annual-report-and-accounts/",
     }
     
     def __init__(self):

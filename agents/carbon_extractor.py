@@ -544,6 +544,35 @@ class CarbonExtractor:
                 "source": deterministic_scope3.get("source") or "PDF extraction",
                 "confidence": deterministic_scope3.get("confidence", "medium"),
             }
+
+        # Extract Scope 3 category presence from report/evidence text.
+        scope3_categories = self._extract_scope3_category_presence(extraction_text)
+        if scope3_categories:
+            extracted_data.setdefault("scope3", {})
+            existing_categories = extracted_data["scope3"].get("categories")
+            if not isinstance(existing_categories, dict):
+                existing_categories = {}
+            existing_categories.update(scope3_categories)
+            extracted_data["scope3"]["categories"] = existing_categories
+
+        # If CDP disclosure is present and Scope 3 is disclosed, assume category coverage is available.
+        if (
+            isinstance(extracted_data.get("scope3"), dict)
+            and not extracted_data["scope3"].get("categories")
+            and extracted_data["scope3"].get("total") is not None
+            and "cdp" in extraction_text.lower()
+            and ("scope 3" in extraction_text.lower() or "value chain" in extraction_text.lower())
+        ):
+            extracted_data["scope3"]["categories"] = {
+                str(k): "reported_via_cdp_disclosure" for k in self.scope3_categories.keys()
+            }
+
+        # Pull water and waste disclosures so BRSR/ESG environmental checks have structured inputs.
+        ww = self._extract_water_waste_disclosures(extraction_text)
+        if ww.get("water_usage"):
+            extracted_data["water_usage"] = ww["water_usage"]
+        if ww.get("waste_data"):
+            extracted_data["waste_data"] = ww["waste_data"]
         
         # Helper to check if scope has actual data
         def has_emission_value(scope_data):
@@ -594,6 +623,10 @@ class CarbonExtractor:
         # Step 2: Validate and normalize units
         print("🔍 Validating emission figures...")
         validated_data = self._validate_emissions(extracted_data, company)
+        if extracted_data.get("water_usage"):
+            validated_data["water_usage"] = extracted_data.get("water_usage")
+        if extracted_data.get("waste_data"):
+            validated_data["waste_data"] = extracted_data.get("waste_data")
 
         # Magnitude validation to reject parser artifacts (return None, never zero).
         industry_state = self._normalize_industry_for_threshold(industry_hint)
@@ -618,6 +651,13 @@ class CarbonExtractor:
         validated_data["scope1"]["value"] = scope1_value
         validated_data["scope2"]["value"] = scope2_value
         validated_data["scope3"]["total"] = scope3_value
+        scope3_categories = (
+            extracted_data.get("scope3", {}).get("categories")
+            if isinstance(extracted_data.get("scope3"), dict)
+            else None
+        )
+        if isinstance(scope3_categories, dict) and scope3_categories:
+            validated_data["scope3"]["categories"] = scope3_categories
         
         # Step 3: Calculate carbon intensity metrics
         print("📈 Calculating carbon intensity...")
@@ -645,6 +685,17 @@ class CarbonExtractor:
                 "verification_status": known_data.get("verification"),
                 "data_source": "BRSR Filing / CDP Disclosure"
             }
+
+        # SBTi registry fallback for target-validation confirmation.
+        if additional_info.get("science_based_target") is None:
+            sbti_registry = self._fetch_sbti_registry_status(company)
+            if isinstance(sbti_registry, dict):
+                if sbti_registry.get("science_based_target") is not None:
+                    additional_info["science_based_target"] = sbti_registry.get("science_based_target")
+                if sbti_registry.get("sbti_status"):
+                    additional_info["sbti_status"] = sbti_registry.get("sbti_status")
+                if sbti_registry.get("sbti_source"):
+                    additional_info["sbti_source"] = sbti_registry.get("sbti_source")
 
         claim_text = ""
         if isinstance(claim, dict):
@@ -688,6 +739,8 @@ class CarbonExtractor:
             "red_flags": self._detect_carbon_red_flags(validated_data, extraction_text),
             "annual_emissions": self._extract_annual_emissions(extraction_text),
             "source_coverage": source_meta,
+            "water_usage": extracted_data.get("water_usage"),
+            "waste_data": extracted_data.get("waste_data"),
             **additional_info  # Include net zero target, renewable %, etc.
         }
 
@@ -1028,6 +1081,113 @@ class CarbonExtractor:
 
         parsed = self._parse_cdp_results(text_hits)
         return parsed
+
+    def _fetch_sbti_registry_status(self, company_name: str) -> Dict[str, Any]:
+        """Best-effort SBTi registry signal extraction from public search results."""
+        query = f"site:sciencebasedtargets.org/companies-taking-action {company_name}"
+        try:
+            from ddgs import DDGS
+
+            text_hits: List[str] = []
+            source_url = ""
+            with DDGS() as ddgs:
+                for result in ddgs.text(query, max_results=5):
+                    title = result.get("title", "")
+                    body = result.get("body", "")
+                    href = result.get("href", "")
+                    if not source_url and href:
+                        source_url = href
+                    text_hits.append(f"{title} {body}")
+
+            blob = " ".join(text_hits).lower()
+            if not blob:
+                return {}
+
+            if any(tok in blob for tok in ["targets set", "target set", "validated", "approved"]):
+                status = "Targets set / validated"
+                sbti_bool = True
+            elif any(tok in blob for tok in ["committed", "commitment"]):
+                status = "Committed"
+                sbti_bool = True
+            elif "removed" in blob or "inactive" in blob:
+                status = "Not active"
+                sbti_bool = False
+            else:
+                status = "Unverified"
+                sbti_bool = None
+
+            out: Dict[str, Any] = {
+                "sbti_status": status,
+                "sbti_source": source_url or "sciencebasedtargets.org/companies-taking-action",
+            }
+            out["science_based_target"] = sbti_bool
+            return out
+        except Exception:
+            return {}
+
+    def _extract_scope3_category_presence(self, text: str) -> Dict[str, Any]:
+        """Extract Scope 3 category presence from report/evidence text (GHG 15-category taxonomy)."""
+        lower = (text or "").lower()
+        if not lower:
+            return {}
+
+        categories: Dict[str, Any] = {}
+
+        # Direct mention of full category coverage.
+        if re.search(r"scope\s*3[^\n\r]{0,80}(15\s*categories|categories\s*1\s*[-to]{1,3}\s*15)", lower):
+            return {str(idx): "reported" for idx in self.scope3_categories.keys()}
+
+        for idx, label in self.scope3_categories.items():
+            label_lower = label.lower()
+            number_hit = re.search(rf"(?:category|cat\.?|scope\s*3\s*category)\s*{idx}\b", lower)
+            name_hit = label_lower in lower
+            if number_hit or name_hit:
+                categories[str(idx)] = "reported"
+
+        return categories
+
+    def _extract_water_waste_disclosures(self, text: str) -> Dict[str, Any]:
+        """Extract water and waste disclosure snippets for downstream compliance checks."""
+        lower = (text or "").lower()
+        out: Dict[str, Any] = {}
+        if not lower:
+            return out
+
+        water_match = re.search(
+            r"(?:water\s*(?:withdrawn|consumption|used|usage)|freshwater)[^\n\r]{0,80}?(\d[\d,\.]+)\s*(million\s*m3|m3|m\^3|cubic\s*met(?:er|re)s?)",
+            lower,
+            re.IGNORECASE,
+        )
+        if water_match:
+            out["water_usage"] = {
+                "value": water_match.group(1).replace(",", ""),
+                "unit": water_match.group(2),
+                "source": "Report/Evidence extraction",
+            }
+        elif "water" in lower and any(k in lower for k in ["withdraw", "consumption", "stress", "wastewater"]):
+            out["water_usage"] = {
+                "status": "disclosed",
+                "source": "Report/Evidence extraction",
+            }
+
+        waste_match = re.search(
+            r"(?:waste\s*(?:generated|disposed|recycled)|hazardous\s*waste)[^\n\r]{0,80}?(\d[\d,\.]+)\s*(tonnes|tons|t)",
+            lower,
+            re.IGNORECASE,
+        )
+        if waste_match:
+            out["waste_data"] = {
+                "value": waste_match.group(1).replace(",", ""),
+                "unit": waste_match.group(2),
+                "source": "Report/Evidence extraction",
+            }
+        elif "waste" in lower and any(k in lower for k in ["recycled", "landfill", "hazardous", "circular"]):
+            out["waste_data"] = {
+                "status": "disclosed",
+                "source": "Report/Evidence extraction",
+            }
+
+        return out
 
     def _parse_cdp_results(self, results: List[str]) -> Dict[str, Any]:
         text = "\n".join(results or [])
