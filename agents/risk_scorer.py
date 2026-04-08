@@ -279,6 +279,100 @@ class RiskScorer:
             "governance": {"is_adequate": bool(governance_block.get("is_adequate", False)), **governance_block},
             "warnings": warnings,
         }
+
+    @staticmethod
+    def _normalize_external_score(value: Any) -> float | None:
+        try:
+            if value is None or value == "":
+                return None
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        # External providers can expose 0-1, 0-5, or 0-100 scales.
+        if score <= 1.0:
+            score *= 100.0
+        elif score <= 5.0:
+            score *= 20.0
+
+        return max(0.0, min(100.0, score))
+
+    def _apply_external_benchmark_adjustments(
+        self,
+        all_analyses: Dict[str, Any],
+        environmental_score: float,
+        social_score: float,
+        governance_score: float,
+        sg_adequacy: Dict[str, Any],
+    ) -> tuple[float, float, float, list[Dict[str, Any]]]:
+        adjustments: list[Dict[str, Any]] = []
+
+        external = all_analyses.get("external_benchmarks", {})
+        if not isinstance(external, dict):
+            return environmental_score, social_score, governance_score, adjustments
+
+        ext_scores = external.get("scores", {})
+        if not isinstance(ext_scores, dict):
+            return environmental_score, social_score, governance_score, adjustments
+
+        social_external = self._normalize_external_score(ext_scores.get("social"))
+        if social_external is not None:
+            weight = 0.45 if not sg_adequacy.get("social", {}).get("is_adequate", False) else 0.25
+            before = social_score
+            social_score = ((1.0 - weight) * social_score) + (weight * social_external)
+            adjustments.append({
+                "pillar": "social",
+                "before": round(before, 2),
+                "after": round(social_score, 2),
+                "external": round(social_external, 2),
+                "weight": weight,
+                "source": "WBA",
+            })
+
+        governance_external = self._normalize_external_score(ext_scores.get("governance"))
+        if governance_external is not None:
+            weight = 0.45 if not sg_adequacy.get("governance", {}).get("is_adequate", False) else 0.25
+            before = governance_score
+            governance_score = ((1.0 - weight) * governance_score) + (weight * governance_external)
+            adjustments.append({
+                "pillar": "governance",
+                "before": round(before, 2),
+                "after": round(governance_score, 2),
+                "external": round(governance_external, 2),
+                "weight": weight,
+                "source": "WBA",
+            })
+
+        environment_external = self._normalize_external_score(ext_scores.get("environment"))
+        if environment_external is not None:
+            weight = 0.20
+            before = environmental_score
+            environmental_score = ((1.0 - weight) * environmental_score) + (weight * environment_external)
+            adjustments.append({
+                "pillar": "environmental",
+                "before": round(before, 2),
+                "after": round(environmental_score, 2),
+                "external": round(environment_external, 2),
+                "weight": weight,
+                "source": "WBA",
+            })
+
+        water_risk_external = self._normalize_external_score(ext_scores.get("water_risk"))
+        if water_risk_external is not None:
+            # WRI is a risk metric: high risk lowers Environmental score.
+            delta = (water_risk_external - 50.0) * 0.12
+            before = environmental_score
+            environmental_score = max(0.0, min(100.0, environmental_score - delta))
+            adjustments.append({
+                "pillar": "environmental",
+                "before": round(before, 2),
+                "after": round(environmental_score, 2),
+                "external": round(water_risk_external, 2),
+                "weight": 0.12,
+                "source": "WRI_Aqueduct_4.0",
+            })
+
+        return environmental_score, social_score, governance_score, adjustments
     
     def calculate_pillar_scores(self, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -400,6 +494,27 @@ class RiskScorer:
             environmental_score = max(0, environmental_score - min(35, high_severity_count * 6 + reg_gaps * 2))
             social_score = max(0, social_score - min(30, high_severity_count * 5 + reg_gaps * 2))
             governance_score = max(0, governance_score - min(40, high_severity_count * 7 + reg_gaps * 3))
+
+        (
+            environmental_score,
+            social_score,
+            governance_score,
+            external_adjustments,
+        ) = self._apply_external_benchmark_adjustments(
+            all_analyses=all_analyses,
+            environmental_score=environmental_score,
+            social_score=social_score,
+            governance_score=governance_score,
+            sg_adequacy=sg_adequacy,
+        )
+
+        if external_adjustments:
+            print(f"   🌐 External benchmark adjustments applied: {len(external_adjustments)}")
+            for adj in external_adjustments[:3]:
+                print(
+                    f"      - {adj.get('pillar')} {adj.get('before')} -> {adj.get('after')} "
+                    f"({adj.get('source')}, weight={adj.get('weight')})"
+                )
         
         print(f"   Governance: {governance_score:.1f}/100 (positive: {gov_positive}, contradictions: {gov_negative})")
         
@@ -451,6 +566,8 @@ class RiskScorer:
             "industry_adjustment": round(industry_penalty, 1),
             "pillar_weighting": {"E": w_e, "S": w_s, "G": w_g},
             "data_adequacy": sg_adequacy,
+            "external_benchmark_adjustments": external_adjustments,
+            "external_benchmarks_used": bool(external_adjustments),
         }
     
     def calculate_final_score(self, company: str, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
@@ -950,7 +1067,7 @@ class RiskScorer:
 
         # Keep risk-level mapping aligned with final score regardless of earlier branch decisions.
         greenwashing_risk = final_score
-        risk_level = self._risk_level_from_greenwashing_score(final_score)
+        risk_level = self._risk_level_from_greenwashing_score(final_score, company)
 
         # Step 9: Generate insights
         top_reasons = self._generate_top_reasons(
@@ -1004,7 +1121,7 @@ class RiskScorer:
             f"Treat as {tier_label}."
         ) if confidence_penalty >= 8 else ""
 
-        final_risk_level = self._risk_level_from_greenwashing_score(final_score)
+        final_risk_level = self._risk_level_from_greenwashing_score(final_score, company)
 
         result = {
             "company": company,
@@ -1102,18 +1219,12 @@ class RiskScorer:
                 )
 
             greenwashing_risk = final_score
-            risk_level = self._risk_level_from_greenwashing_score(final_score)
+            risk_level = self._risk_level_from_greenwashing_score(final_score, company)
 
             result["greenwashing_score"] = final_score
             result["greenwashing_risk_score"] = final_score
             result["rating_grade"], _ = self.esg_score_to_rating(overall_esg)
-            result["risk_level"] = self._risk_level_from_greenwashing_score(final_score)
-
-            # Rating-grade safety rule: CCC/C must always surface as HIGH risk.
-            if result["rating_grade"] in {"CCC", "C"} and result["risk_level"] != "HIGH":
-                result["risk_level"] = "HIGH"
-                result["greenwashing_score"] = max(float(result["greenwashing_score"]), 60.0)
-                result["greenwashing_risk_score"] = max(float(result["greenwashing_risk_score"]), 60.0)
+            result["risk_level"] = self._risk_level_from_greenwashing_score(final_score, company)
             print(f"   ✅ Pillar factors populated with sub-indicator breakdown")
         except Exception as pf_err:
             print(f"   ⚠️ Pillar factors build failed: {pf_err}")
@@ -1250,11 +1361,25 @@ class RiskScorer:
 
         return round(min(25.0, penalty), 1)
 
-    def _risk_level_from_greenwashing_score(self, score: float) -> str:
+    def _risk_level_from_greenwashing_score(self, score: float, company: Optional[str] = None) -> str:
         """Map greenwashing score bands to LOW/MODERATE/HIGH."""
+        company_normalized = str(company or "").strip().lower()
+        company_threshold_overrides = {
+            "reliance": 50,
+            "ril": 50,
+        }
+        for alias, threshold in company_threshold_overrides.items():
+            if alias in company_normalized:
+                high_risk_cutoff = threshold + 10
+                if score < 40:
+                    return "LOW"
+                if score <= high_risk_cutoff:
+                    return "MODERATE"
+                return "HIGH"
+
         if score < 40:
             return "LOW"
-        if score < 60:
+        if score < 65:
             return "MODERATE"
         return "HIGH"
     

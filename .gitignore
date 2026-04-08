@@ -25,11 +25,13 @@ chroma_db/
 reports/
 *.log
 
-# Test files and outputs
+# Test files and artifacts
 test_*.py
-test_*.txt
-test_*.json
 tests/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # Development documentation
 *_INTEGRATION*.md
