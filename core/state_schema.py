@@ -69,6 +69,7 @@ class ESGState(TypedDict):
     indian_financials: Optional[Dict[str, Any]]  # Revenue, profit from Screener/Yahoo/NSE
     company_reports: Optional[Dict[str, Any]]  # PDF reports with extracted ESG metrics
     carbon_extraction: Optional[Dict[str, Any]]  # Scope 1/2/3 carbon analysis
+    external_esg_data: Optional[Dict[str, Any]]  # WBA/WRI benchmark enrichment used in risk scoring
     
     # NEW: Advanced Detection (2026 Features)
     greenwishing_analysis: Optional[Dict[str, Any]]  # Greenwishing/greenhushing detection

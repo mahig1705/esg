@@ -22,6 +22,9 @@ GEMINI_API_KEY=your_gemini_key
 # Optional Premium Tool APIs
 NEWS_API_KEY=your_newsapi_key
 NEWSDATA_API_KEY=your_newsdata_key
+
+# WBA Data API (Bearer token)
+WBA_API_KEY=your_wba_api_key
 ```
 
 ### 3. Run the Application

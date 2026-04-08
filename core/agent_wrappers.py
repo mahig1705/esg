@@ -24,6 +24,7 @@ except ImportError as e:
 from core.state_schema import ESGState
 from core.evidence_cache import evidence_cache
 from typing import Dict, Any
+from core.esg_data_apis import fill_missing_pillars
 
 # ============================================================
 # LIVE DATA FETCHER - Gets fresh content for analysis
@@ -1178,6 +1179,54 @@ def peer_comparison_node(state: ESGState) -> ESGState:
     return state
 
 
+def _enrich_external_esg_benchmarks(state: ESGState) -> Dict[str, Any]:
+    """Fetch external WBA/WRI benchmark signals used by downstream risk scoring."""
+    company = state.get("company", "")
+    if not company:
+        return {"enabled": False, "error": "missing company"}
+
+    try:
+        filled = fill_missing_pillars(
+            company_name=company,
+            existing_scores={
+                "social": None,
+                "governance": None,
+                "environment": None,
+                "water_risk": None,
+            },
+            wba_api_key=os.getenv("WBA_API_KEY"),
+        )
+
+        score_keys = {
+            "social",
+            "governance",
+            "environment",
+            "water_risk",
+            "water_risk_physical",
+            "water_risk_regulatory",
+            "water_risk_reputational",
+        }
+        scores = {
+            key: value
+            for key, value in (filled or {}).items()
+            if key in score_keys
+        }
+        sources = filled.get("_sources", {}) if isinstance(filled, dict) else {}
+        indicators = filled.get("_wba_indicators", {}) if isinstance(filled, dict) else {}
+        hq_coords = filled.get("_wba_hq_coordinates", {}) if isinstance(filled, dict) else {}
+
+        return {
+            "enabled": bool(sources),
+            "scores": scores,
+            "sources": sources,
+            "wba_company_name": filled.get("_wba_company_name") if isinstance(filled, dict) else None,
+            "hq_coordinates": hq_coords,
+            "wba_indicator_count": len(indicators) if isinstance(indicators, dict) else 0,
+        }
+    except Exception as exc:
+        return {"enabled": False, "error": f"external ESG enrichment failed: {exc}"}
+
+
 def risk_scoring_node(state: ESGState) -> ESGState:
     """LIVE: RiskScorer with ML + Formula hybrid approach"""
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
@@ -1209,6 +1258,25 @@ def risk_scoring_node(state: ESGState) -> ESGState:
         }
         all_analyses["company"] = state["company"]
         all_analyses["industry"] = state.get("industry", "")
+
+        # Enrich with external benchmark data (WBA/WRI) before final scoring.
+        external_benchmarks = _enrich_external_esg_benchmarks(state)
+        all_analyses["external_benchmarks"] = external_benchmarks
+        state["external_esg_data"] = external_benchmarks
+        state["agent_outputs"].append({
+            "agent": "external_esg_enrichment",
+            "output": external_benchmarks,
+            "confidence": 0.8 if external_benchmarks.get("enabled") else 0.5,
+            "timestamp": datetime.now().isoformat()
+        })
+        if external_benchmarks.get("enabled"):
+            print(
+                "🌐 External ESG enrichment active: "
+                f"sources={external_benchmarks.get('sources', {})}, "
+                f"indicators={external_benchmarks.get('wba_indicator_count', 0)}"
+            )
+        elif external_benchmarks.get("error"):
+            print(f"⚠️ External ESG enrichment unavailable: {external_benchmarks.get('error')}")
         
         # Call calculate_final_score with proper parameters
         result = scorer.calculate_final_score(
@@ -1308,7 +1376,8 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
         "debate_activated": False,
         "financial_context": None,
         "agent_outputs": list(state.get("agent_outputs", [])),
-        "industry": state.get("industry", "")
+        "industry": state.get("industry", ""),
+        "external_benchmarks": state.get("external_esg_data", {}),
     }
     
     for output in state.get("agent_outputs", []):
@@ -1363,6 +1432,9 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
         elif agent_name == "debate":
             analyses["debate_activated"] = True
             analyses["debate_result"] = agent_result
+
+        elif agent_name == "external_esg_enrichment":
+            analyses["external_benchmarks"] = agent_result
     
     return analyses
 

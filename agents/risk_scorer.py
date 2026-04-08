@@ -279,6 +279,100 @@ class RiskScorer:
             "governance": {"is_adequate": bool(governance_block.get("is_adequate", False)), **governance_block},
             "warnings": warnings,
         }
+
+    @staticmethod
+    def _normalize_external_score(value: Any) -> float | None:
+        try:
+            if value is None or value == "":
+                return None
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        # External providers can expose 0-1, 0-5, or 0-100 scales.
+        if score <= 1.0:
+            score *= 100.0
+        elif score <= 5.0:
+            score *= 20.0
+
+        return max(0.0, min(100.0, score))
+
+    def _apply_external_benchmark_adjustments(
+        self,
+        all_analyses: Dict[str, Any],
+        environmental_score: float,
+        social_score: float,
+        governance_score: float,
+        sg_adequacy: Dict[str, Any],
+    ) -> tuple[float, float, float, list[Dict[str, Any]]]:
+        adjustments: list[Dict[str, Any]] = []
+
+        external = all_analyses.get("external_benchmarks", {})
+        if not isinstance(external, dict):
+            return environmental_score, social_score, governance_score, adjustments
+
+        ext_scores = external.get("scores", {})
+        if not isinstance(ext_scores, dict):
+            return environmental_score, social_score, governance_score, adjustments
+
+        social_external = self._normalize_external_score(ext_scores.get("social"))
+        if social_external is not None:
+            weight = 0.45 if not sg_adequacy.get("social", {}).get("is_adequate", False) else 0.25
+            before = social_score
+            social_score = ((1.0 - weight) * social_score) + (weight * social_external)
+            adjustments.append({
+                "pillar": "social",
+                "before": round(before, 2),
+                "after": round(social_score, 2),
+                "external": round(social_external, 2),
+                "weight": weight,
+                "source": "WBA",
+            })
+
+        governance_external = self._normalize_external_score(ext_scores.get("governance"))
+        if governance_external is not None:
+            weight = 0.45 if not sg_adequacy.get("governance", {}).get("is_adequate", False) else 0.25
+            before = governance_score
+            governance_score = ((1.0 - weight) * governance_score) + (weight * governance_external)
+            adjustments.append({
+                "pillar": "governance",
+                "before": round(before, 2),
+                "after": round(governance_score, 2),
+                "external": round(governance_external, 2),
+                "weight": weight,
+                "source": "WBA",
+            })
+
+        environment_external = self._normalize_external_score(ext_scores.get("environment"))
+        if environment_external is not None:
+            weight = 0.20
+            before = environmental_score
+            environmental_score = ((1.0 - weight) * environmental_score) + (weight * environment_external)
+            adjustments.append({
+                "pillar": "environmental",
+                "before": round(before, 2),
+                "after": round(environmental_score, 2),
+                "external": round(environment_external, 2),
+                "weight": weight,
+                "source": "WBA",
+            })
+
+        water_risk_external = self._normalize_external_score(ext_scores.get("water_risk"))
+        if water_risk_external is not None:
+            # WRI is a risk metric: high risk lowers Environmental score.
+            delta = (water_risk_external - 50.0) * 0.12
+            before = environmental_score
+            environmental_score = max(0.0, min(100.0, environmental_score - delta))
+            adjustments.append({
+                "pillar": "environmental",
+                "before": round(before, 2),
+                "after": round(environmental_score, 2),
+                "external": round(water_risk_external, 2),
+                "weight": 0.12,
+                "source": "WRI_Aqueduct_4.0",
+            })
+
+        return environmental_score, social_score, governance_score, adjustments
     
     def calculate_pillar_scores(self, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -400,6 +494,27 @@ class RiskScorer:
             environmental_score = max(0, environmental_score - min(35, high_severity_count * 6 + reg_gaps * 2))
             social_score = max(0, social_score - min(30, high_severity_count * 5 + reg_gaps * 2))
             governance_score = max(0, governance_score - min(40, high_severity_count * 7 + reg_gaps * 3))
+
+        (
+            environmental_score,
+            social_score,
+            governance_score,
+            external_adjustments,
+        ) = self._apply_external_benchmark_adjustments(
+            all_analyses=all_analyses,
+            environmental_score=environmental_score,
+            social_score=social_score,
+            governance_score=governance_score,
+            sg_adequacy=sg_adequacy,
+        )
+
+        if external_adjustments:
+            print(f"   🌐 External benchmark adjustments applied: {len(external_adjustments)}")
+            for adj in external_adjustments[:3]:
+                print(
+                    f"      - {adj.get('pillar')} {adj.get('before')} -> {adj.get('after')} "
+                    f"({adj.get('source')}, weight={adj.get('weight')})"
+                )
         
         print(f"   Governance: {governance_score:.1f}/100 (positive: {gov_positive}, contradictions: {gov_negative})")
         
@@ -451,6 +566,8 @@ class RiskScorer:
             "industry_adjustment": round(industry_penalty, 1),
             "pillar_weighting": {"E": w_e, "S": w_s, "G": w_g},
             "data_adequacy": sg_adequacy,
+            "external_benchmark_adjustments": external_adjustments,
+            "external_benchmarks_used": bool(external_adjustments),
         }
     
     def calculate_final_score(self, company: str, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
