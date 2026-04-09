@@ -728,6 +728,31 @@ class RegulatoryHorizonScanner:
             kw in claim_text for kw in ["net zero", "net-zero", "carbon neutral", "carbon negative", "climate positive"]
         )
         framework_name = str(reg.get("name") or "").strip().lower()
+        sbti_evidence_present = any(
+            token in evidence_lower
+            for token in [
+                "science based targets initiative",
+                "science-based targets",
+                "companies-taking-action",
+                "sbti",
+                "validated target",
+                "targets set",
+            ]
+        )
+
+        # For net-zero claims, explicit SBTi registry evidence should count as confirmation.
+        if (
+            "science based targets initiative" in framework_name
+            and net_zero_claim
+            and sbti_evidence_present
+            and not requirements_met
+        ):
+            requirements_met.append({
+                "triggered_by": "net-zero claim + SBTi evidence",
+                "requirement": "Must have SBTi validated target",
+                "status": "Likely Compliant",
+            })
+
         evidence_confirms_compliance = len(requirements_met) > 0 and len(requirements_unverified) == 0
 
         is_required_framework = any(req in framework_name for req in net_zero_required_frameworks)

@@ -9,8 +9,8 @@ class Settings(BaseModel):
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-    NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
-    NEWSDATA_API_KEY: str = os.getenv("NEWSDATA_API_KEY", "")
+    NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "") or os.getenv("NEWSAPI_KEY", "")
+    NEWSDATA_API_KEY: str = os.getenv("NEWSDATA_API_KEY", "") or os.getenv("NEWSDATA_KEY", "")
     SEC_API_KEY: str = os.getenv("SEC_API_KEY", "")
     
     # Model Configuration - Updated October 2025

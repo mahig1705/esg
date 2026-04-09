@@ -41,6 +41,8 @@ class ReportDiscoveryService:
         "{company} sustainability report pdf",
         "{company} ESG report pdf",
         "{company} annual report sustainability pdf",
+        "{company} annual report and accounts pdf",
+        "{company} investor relations annual report",
         "{company} corporate responsibility report",
         "{company} environmental report pdf",
         "{company} CSR report pdf",
@@ -48,6 +50,14 @@ class ReportDiscoveryService:
         "{company} climate report pdf",
         "{company} net zero commitment report",
     ]
+
+    KNOWN_REPORT_PAGES = {
+        "unilever": [
+            "https://www.unilever.com/investor-relations/annual-report-and-accounts/",
+            "https://www.unilever.com/investor-relations/annual-report/",
+            "https://www.unilever.com/sustainability/reporting-and-disclosures/",
+        ]
+    }
     
     def __init__(self):
         self.name = "ESG Report Discovery Service"
@@ -107,6 +117,17 @@ class ReportDiscoveryService:
         all_results = []
         
         canonical_company = self._resolve_company_search_name(company_name)
+
+        # Seed trusted issuer pages so HTML-to-PDF extraction has deterministic anchors.
+        company_key = company_name.strip().lower()
+        for seeded_url in self.KNOWN_REPORT_PAGES.get(company_key, []):
+            all_results.append({
+                "url": seeded_url,
+                "title": f"{company_name} annual/sustainability reporting page",
+                "snippet": "Official investor relations sustainability disclosure landing page.",
+                "source": "Known issuer endpoint",
+                "search_date": datetime.now().isoformat(),
+            })
 
         # Execute multiple search queries for comprehensive discovery
         for query_template in self.SEARCH_QUERIES:

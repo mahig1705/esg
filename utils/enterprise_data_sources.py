@@ -14,10 +14,10 @@ class EnterpriseESGDataFetcher:
     
     def __init__(self):
         # API Keys
-        self.news_api_key = os.getenv("NEWS_API_KEY", "")
-        self.newsdata_api_key = os.getenv("NEWSDATA_API_KEY", "")
-        self.alpha_vantage_key = os.getenv("ALPHA_VANTAGE_KEY", "")
-        self.finnhub_key = os.getenv("FINNHUB_API_KEY", "")
+        self.news_api_key = os.getenv("NEWS_API_KEY", "") or os.getenv("NEWSAPI_KEY", "")
+        self.newsdata_api_key = os.getenv("NEWSDATA_API_KEY", "") or os.getenv("NEWSDATA_KEY", "")
+        self.alpha_vantage_key = os.getenv("ALPHA_VANTAGE_KEY", "") or os.getenv("ALPHAVANTAGE_KEY", "")
+        self.finnhub_key = os.getenv("FINNHUB_API_KEY", "") or os.getenv("FINNHUB_KEY", "")
         
         # Rate limiting
         self.last_call_time = {}
@@ -169,7 +169,7 @@ class EnterpriseESGDataFetcher:
     
     def _fetch_news_api(self, company: str, query: str, max_results: int) -> List[Dict]:
         """NewsAPI source with better error handling"""
-        news_api_key = os.getenv("NEWS_API_KEY", "")
+        news_api_key = os.getenv("NEWS_API_KEY", "") or os.getenv("NEWSAPI_KEY", "")
         if not news_api_key or news_api_key == "demo_key":
             print(f"   ⏭️  NewsAPI skipped (no valid API key)")
             return []
@@ -266,7 +266,7 @@ class EnterpriseESGDataFetcher:
     def _fetch_finnhub_news(self, company: str, max_results: int) -> List[Dict]:
         """Finnhub financial news API"""
         
-        finnhub_key = os.getenv("FINNHUB_API_KEY", "")
+        finnhub_key = os.getenv("FINNHUB_API_KEY", "") or os.getenv("FINNHUB_KEY", "")
         if not finnhub_key:
             return []
         
@@ -778,10 +778,12 @@ class EnterpriseESGDataFetcher:
         
         # Priority order for sources (higher priority = kept if duplicate)
         priority_order = [
+            "government", "financial", "news", "ngo", "academic", "web_fallback",
+            # Backward-compatible keys from older callsites:
             "news_api", "newsdata_io", "sec_edgar", "finnhub_news",
             "reuters", "ft_sustainability", "bloomberg_green",
             "yahoo_finance", "guardian_environment", "ngo_sources",
-            "academic_sources", "esg_book", "web_fallback"
+            "academic_sources", "esg_book"
         ]
         
         for source_key in priority_order:

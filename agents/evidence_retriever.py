@@ -33,6 +33,11 @@ REUTERS_RSS_FETCH_CAP = 5
 SCHOLAR_FETCH_CAP = 5
 CDP_FETCH_CAP = 3
 COMPANY_IR_FETCH_CAP = 3
+SBTI_FETCH_CAP = 2
+COMPANIES_HOUSE_FETCH_CAP = 2
+INFLUENCEMAP_FETCH_CAP = 2
+GRI_FETCH_CAP = 2
+OPENSANCTIONS_FETCH_CAP = 1
 
 # -- Stage 2: survivors after filter -------------------------------------------
 MAX_FULL_TEXT_FETCH = 15
@@ -394,6 +399,184 @@ async def fetch_cdp_evidence(company: str, session: httpx.AsyncClient) -> list[d
         return []
 
 
+async def fetch_sbti_registry_evidence(company: str, session: httpx.AsyncClient) -> list[dict]:
+    """Fetch SBTi registry evidence for target validation status."""
+    search_url = (
+        "https://sciencebasedtargets.org/companies-taking-action"
+        f"?search={quote(company)}"
+    )
+    results: list[dict] = []
+
+    try:
+        r = await session.get(search_url, timeout=FULL_TEXT_TIMEOUT_SECS)
+        if r.status_code == 200:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            page_text = " ".join(soup.get_text(" ", strip=True).split())
+            lower = page_text.lower()
+
+            status_tokens = []
+            for token in ["targets set", "committed", "net-zero target", "validated target", "science-based target"]:
+                if token in lower:
+                    status_tokens.append(token)
+
+            snippet = f"SBTi companies-taking-action listing for {company}."
+            if status_tokens:
+                snippet += " Signals detected: " + ", ".join(status_tokens[:3]) + "."
+
+            results.append({
+                "source_name": "Science Based Targets initiative",
+                "source": "Science Based Targets initiative",
+                "url": search_url,
+                "title": f"SBTi registry search: {company}",
+                "snippet": snippet,
+                "reliability_tier": "CDP / Third-Party Verified",
+                "stance": "Neutral",
+                "data_source_api": "SBTi Registry",
+                "source_type": "UK/EU Regulatory",
+            })
+    except Exception as exc:
+        logger.warning("SBTi registry fetch failed for %s: %s", company, exc)
+
+    return results[:SBTI_FETCH_CAP]
+
+
+async def fetch_companies_house_evidence(company: str, session: httpx.AsyncClient) -> list[dict]:
+    """Fetch UK Companies House profile/officers pages for governance signals."""
+    search_url = (
+        "https://find-and-update.company-information.service.gov.uk/search/companies"
+        f"?q={quote(company)}"
+    )
+    results: list[dict] = []
+
+    try:
+        response = await session.get(search_url, timeout=FULL_TEXT_TIMEOUT_SECS)
+        if response.status_code != 200:
+            return results
+
+        html = response.text
+        first_company = re.search(r'href="(/company/[A-Z0-9]{8})"', html)
+        if not first_company:
+            results.append({
+                "source_name": "UK Companies House",
+                "source": "UK Companies House",
+                "url": search_url,
+                "title": f"Companies House search for {company}",
+                "snippet": "Public UK filing index for company profile, directors, and filing history.",
+                "reliability_tier": "Regulatory Filing",
+                "stance": "Neutral",
+                "data_source_api": "UK Companies House (Public)",
+                "source_type": "Government/Regulatory",
+            })
+            return results[:COMPANIES_HOUSE_FETCH_CAP]
+
+        company_path = first_company.group(1)
+        company_url = f"https://find-and-update.company-information.service.gov.uk{company_path}"
+        officers_url = f"{company_url}/officers"
+
+        results.append({
+            "source_name": "UK Companies House",
+            "source": "UK Companies House",
+            "url": company_url,
+            "title": f"Companies House profile: {company}",
+            "snippet": "Official registry profile including filing history and corporate status.",
+            "reliability_tier": "Regulatory Filing",
+            "stance": "Neutral",
+            "data_source_api": "UK Companies House (Public)",
+            "source_type": "Government/Regulatory",
+        })
+        results.append({
+            "source_name": "UK Companies House",
+            "source": "UK Companies House",
+            "url": officers_url,
+            "title": f"Companies House officers: {company}",
+            "snippet": "Directors and officers listing used for governance and board-composition verification.",
+            "reliability_tier": "Regulatory Filing",
+            "stance": "Neutral",
+            "data_source_api": "UK Companies House (Public)",
+            "source_type": "Government/Regulatory",
+        })
+    except Exception as exc:
+        logger.warning("Companies House fetch failed for %s: %s", company, exc)
+
+    return results[:COMPANIES_HOUSE_FETCH_CAP]
+
+
+async def fetch_influencemap_evidence(company: str) -> list[dict]:
+    """Fetch InfluenceMap company profile evidence via public search."""
+    query = f"site:influencemap.org/company {company} climate lobbying"
+    try:
+        from ddgs import DDGS
+
+        results: list[dict] = []
+        with DDGS() as ddgs:
+            for item in ddgs.text(query, max_results=INFLUENCEMAP_FETCH_CAP):
+                url = item.get("href", "")
+                if is_blocked(url):
+                    continue
+                results.append({
+                    "source_name": "InfluenceMap",
+                    "source": "InfluenceMap",
+                    "url": url,
+                    "title": item.get("title", "InfluenceMap company profile"),
+                    "snippet": (item.get("body", "") or "")[:300],
+                    "reliability_tier": "Major News Outlet",
+                    "stance": "Neutral",
+                    "data_source_api": "InfluenceMap Public",
+                    "source_type": "Climate NGO",
+                })
+        return results[:INFLUENCEMAP_FETCH_CAP]
+    except Exception as exc:
+        logger.warning("InfluenceMap fetch failed for %s: %s", company, exc)
+        return []
+
+
+async def fetch_gri_database_evidence(company: str) -> list[dict]:
+    """Fetch GRI database evidence links via public search."""
+    query = f"site:database.globalreporting.org {company} sustainability report"
+    try:
+        from ddgs import DDGS
+
+        results: list[dict] = []
+        with DDGS() as ddgs:
+            for item in ddgs.text(query, max_results=GRI_FETCH_CAP):
+                url = item.get("href", "")
+                if is_blocked(url):
+                    continue
+                results.append({
+                    "source_name": "Global Reporting Initiative",
+                    "source": "Global Reporting Initiative",
+                    "url": url,
+                    "title": item.get("title", "GRI database entry"),
+                    "snippet": (item.get("body", "") or "")[:300],
+                    "reliability_tier": "CDP / Third-Party Verified",
+                    "stance": "Neutral",
+                    "data_source_api": "GRI Database",
+                    "source_type": "NGO",
+                })
+        return results[:GRI_FETCH_CAP]
+    except Exception as exc:
+        logger.warning("GRI database fetch failed for %s: %s", company, exc)
+        return []
+
+
+async def fetch_opensanctions_evidence(company: str) -> list[dict]:
+    """Add OpenSanctions search endpoint for governance/sanctions checks."""
+    url = f"https://www.opensanctions.org/search/?q={quote(company)}"
+    return [{
+        "source_name": "OpenSanctions",
+        "source": "OpenSanctions",
+        "url": url,
+        "title": f"OpenSanctions search: {company}",
+        "snippet": "Public sanctions and PEP screening dataset search for governance risk checks.",
+        "reliability_tier": "Regulatory Filing",
+        "stance": "Neutral",
+        "data_source_api": "OpenSanctions",
+        "source_type": "Compliance/Sanctions Database",
+    }][:OPENSANCTIONS_FETCH_CAP]
+
+
 async def fetch_company_ir(company: str, ticker: str, country: str, session: httpx.AsyncClient) -> list[dict]:
     """Fetches likely investor relations/sustainability pages for the company."""
     company_slug = (company or "").lower().replace(" ", "")
@@ -406,6 +589,12 @@ async def fetch_company_ir(company: str, ticker: str, country: str, session: htt
         f"https://www.{company_slug}.com/investors",
         f"https://www.{company_slug}.com/annual-report",
     ]
+    if "unilever" in (company or "").lower():
+        candidates.extend([
+            "https://www.unilever.com/investor-relations/annual-report-and-accounts/",
+            "https://www.unilever.com/investor-relations/annual-report/",
+            "https://www.unilever.com/sustainability/reporting-and-disclosures/",
+        ])
     if country in ("DK", "SE", "NO", "FI"):
         candidates.append(f"https://www.{company_slug}.com/en/sustainability")
     if country in ("GB", "UK"):
@@ -418,7 +607,9 @@ async def fetch_company_ir(company: str, ticker: str, country: str, session: htt
         candidates.append("https://www.sec.gov/cgi-bin/browse-edgar?company=" + quote(company) + "&action=getcompany")
 
     results = []
-    for url in candidates[:COMPANY_IR_FETCH_CAP]:
+    for url in candidates:
+        if len(results) >= COMPANY_IR_FETCH_CAP:
+            break
         if is_blocked(url):
             continue
         try:
@@ -438,7 +629,9 @@ async def fetch_company_ir(company: str, ticker: str, country: str, session: htt
             continue
     if not results:
         # Keep at least one official disclosure candidate even when HEAD checks fail.
-        for url in candidates[:COMPANY_IR_FETCH_CAP]:
+        for url in candidates:
+            if len(results) >= COMPANY_IR_FETCH_CAP:
+                break
             if is_blocked(url):
                 continue
             results.append({
@@ -918,7 +1111,13 @@ class EvidenceRetriever:
 
             async with httpx.AsyncClient() as session:
                 raw += await fetch_cdp_evidence(company, session)
+                raw += await fetch_sbti_registry_evidence(company, session)
                 raw += await fetch_company_ir(company, ticker, country, session)
+                raw += await fetch_companies_house_evidence(company, session)
+                raw += await fetch_opensanctions_evidence(company)
+
+            raw += await fetch_influencemap_evidence(company)
+            raw += await fetch_gri_database_evidence(company)
 
             # Ensure minimum evidence coverage even when news APIs or Reuters feeds fail.
             if len(raw) < 10:

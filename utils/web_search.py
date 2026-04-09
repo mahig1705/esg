@@ -13,9 +13,9 @@ class RealTimeDataFetcher:
     """
     
     def __init__(self):
-        self.news_api_key = os.getenv("NEWS_API_KEY", "")
+        self.news_api_key = os.getenv("NEWS_API_KEY", "") or os.getenv("NEWSAPI_KEY", "")
         self.sec_api_key = os.getenv("SEC_API_KEY", "")
-        self.newsdata_api_key = os.getenv("NEWSDATA_API_KEY", "")
+        self.newsdata_api_key = os.getenv("NEWSDATA_API_KEY", "") or os.getenv("NEWSDATA_KEY", "")
         
     def search_all_sources(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """

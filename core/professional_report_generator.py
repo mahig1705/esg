@@ -479,8 +479,49 @@ class ProfessionalReportGenerator:
         conf_ceiling = calibration.get("confidence_ceiling_pct")
         if isinstance(conf_ceiling, (int, float)):
             conf_pct = min(conf_pct, float(conf_ceiling))
+        report_confidence = str(quality.get("report_confidence_level", "MEDIUM") or "MEDIUM").upper()
+
+        # Reliability guardrails: cap displayed confidence by evidence quality and report tier.
+        confidence_caps: List[float] = []
+        if report_confidence == "LOW":
+            confidence_caps.append(59.0)
+        elif report_confidence == "MEDIUM":
+            confidence_caps.append(74.0)
+        else:
+            confidence_caps.append(90.0)
+
+        evidence_citations = evidence.get("citations", []) if isinstance(evidence, dict) else []
+        total_citations = len(evidence_citations) if isinstance(evidence_citations, list) else 0
+        verified_sources = int(
+            quality.get("verified_source_count")
+            or evidence.get("verifiable_citations")
+            or 0
+        )
+        real_peer_count = int(quality.get("real_peer_count") or 0)
+
+        if total_citations < 3:
+            confidence_caps.append(55.0)
+        elif total_citations < 5:
+            confidence_caps.append(65.0)
+
+        if verified_sources < 3:
+            confidence_caps.append(58.0)
+
+        raw_report_tier = str(safe_get(scores, "raw", "report_tier", default="") or "").upper()
+        if raw_report_tier == "TIER_3":
+            confidence_caps.append(55.0)
+        elif raw_report_tier == "TIER_2":
+            confidence_caps.append(72.0)
+
+        if real_peer_count <= 0:
+            confidence_caps.append(85.0)
+
+        if confidence_caps:
+            capped_conf = min(confidence_caps)
+            if conf_pct > capped_conf:
+                conf_pct = capped_conf
+
         conf_label = self._confidence_label(conf_pct)
-        report_confidence = quality.get("report_confidence_level", "MEDIUM")
 
         _raw_threshold = calibration.get("optimal_threshold")
         threshold = float(_raw_threshold) if isinstance(_raw_threshold, (int, float)) else None
@@ -628,6 +669,25 @@ class ProfessionalReportGenerator:
                 continue
             same_industry_peers.append(p)
 
+        risk_raw = scores.get("raw", {}) if isinstance(scores.get("raw"), dict) else {}
+        external_state = state.get("external_esg_data", {})
+        if not isinstance(external_state, dict):
+            external_state = {}
+        external_from_risk = risk_raw.get("external_benchmarks", {})
+        if not isinstance(external_from_risk, dict):
+            external_from_risk = {}
+        external_data = dict(external_state)
+        if external_from_risk:
+            external_data.update(external_from_risk)
+
+        external_sources = external_data.get("sources", {}) if isinstance(external_data.get("sources"), dict) else {}
+        external_scores = external_data.get("scores", {}) if isinstance(external_data.get("scores"), dict) else {}
+        external_adjustments = safe_get(scores, "pillar_scores", "external_benchmark_adjustments", default=[])
+        if not isinstance(external_adjustments, list):
+            external_adjustments = []
+        external_used = bool(safe_get(scores, "pillar_scores", "external_benchmarks_used", default=False))
+        external_enabled = bool(external_data.get("enabled") or external_sources)
+
         return {
             "metadata": metadata,
             "scores": scores,
@@ -661,6 +721,16 @@ class ProfessionalReportGenerator:
             "quality_warnings": quality.get("quality_warnings", []),
             "report_confidence": report_confidence,
             "limitations": structured.get("limitations", []) or [],
+            "external_benchmarks": {
+                "enabled": external_enabled,
+                "used": external_used,
+                "sources": external_sources,
+                "scores": external_scores,
+                "adjustments": external_adjustments,
+                "wba_company_name": external_data.get("wba_company_name"),
+                "wba_indicator_count": external_data.get("wba_indicator_count", 0),
+                "error": external_data.get("error"),
+            },
         }
 
     def _render_v4_report(self, state: Dict[str, Any], structured: Dict[str, Any], quality: Dict[str, Any]) -> str:
@@ -708,6 +778,19 @@ class ProfessionalReportGenerator:
             f"{'#':<4} {'Source Name':<32} {'Tier':<28} {'Verifiable':<11} {'Stance':<12}",
             "-" * 92,
         ]
+        source_tier_counts = {
+            "t1": 0,
+            "t2": 0,
+            "t3": 0,
+            "t4": 0,
+            "other": 0,
+        }
+        company_tokens = [
+            t for t in re.findall(r"[a-z0-9]+", str(v.get("company") or "").lower())
+            if t not in {"inc", "plc", "ltd", "limited", "corp", "corporation", "co", "company", "group", "sa", "ag", "nv", "llc"}
+        ]
+        primary_company_token = company_tokens[0] if company_tokens else ""
+        first_party_count = 0
         for i, c in enumerate(v["citations"], start=1):
             src = str(c.get("source_name") or "").strip()
             if not src or src.lower() in {"unknown", "web source", "general web", "general web / other"}:
@@ -721,6 +804,23 @@ class ProfessionalReportGenerator:
             if not src or src.lower() in {"unknown", "unknown source", "known source"}:
                 src = f"Documented Source {i}"
             tier = str(c.get("reliability_tier") or "General Web / Other")
+            tier_lower = tier.lower()
+            if "regulatory filing" in tier_lower:
+                source_tier_counts["t1"] += 1
+            elif "cdp / third-party verified" in tier_lower:
+                source_tier_counts["t2"] += 1
+            elif "major news" in tier_lower:
+                source_tier_counts["t3"] += 1
+            elif "general web" in tier_lower:
+                source_tier_counts["t4"] += 1
+            else:
+                source_tier_counts["other"] += 1
+
+            source_domain = (urlparse(str(c.get("url") or "")).netloc or "").replace("www.", "").lower()
+            source_label = src.lower()
+            if primary_company_token and (primary_company_token in source_domain or primary_company_token in source_label):
+                first_party_count += 1
+
             ver = "YES" if c.get("verifiable") else "NO"
             stance_raw = str(c.get("claim_support") or "Neutral").lower()
             if "contradict" in stance_raw:
@@ -735,6 +835,24 @@ class ProfessionalReportGenerator:
             "Footnote - Tier legend: T1 Regulatory Filing; T2 CDP/Third-Party Verified; T3 Major News; T4 General Web; T5 Estimated/Synthetic; T6 Unverifiable.",
             major,
         ])
+
+        total_sources = len(v["citations"])
+        if total_sources > 0 and (source_tier_counts["t1"] + source_tier_counts["t2"]) == 0:
+            sec2_lines.extend([
+                "CURRENT EVIDENCE DEPTH NOTE",
+                "-" * 28,
+                f"Tier-1/Tier-2 premium sources: 0/{total_sources} in this run.",
+                (
+                    f"Current mix is concentrated in web/news and company-controlled disclosures "
+                    f"(first-party sources detected: {first_party_count}/{total_sources})."
+                ),
+                (
+                    "Demo context: this is explicitly treated as preliminary evidence depth. "
+                    "Production ingestion is designed to incorporate Bloomberg, CDP, and SBTi feeds "
+                    "to strengthen verification coverage."
+                ),
+                major,
+            ])
 
         carbon = v["carbon"]
         emissions = carbon.get("emissions", {}) if isinstance(carbon.get("emissions"), dict) else {}
@@ -777,7 +895,7 @@ class ProfessionalReportGenerator:
             "  " + "─" * 98,
         ]
 
-        def _append_pillar_rows(block: Dict[str, Any], fallback_score: float, expected_total: int) -> None:
+        def _append_pillar_rows(block: Dict[str, Any], fallback_score: float, expected_total: int) -> Tuple[int, int, float]:
             sub = block.get("sub_indicators", []) if isinstance(block, dict) else []
             if not isinstance(sub, list):
                 sub = []
@@ -790,7 +908,7 @@ class ProfessionalReportGenerator:
                 score_header.append("  " + "─" * 98)
                 score_header.append(f"  Pillar weighted total: {fallback_score:.1f}/100")
                 score_header.append(f"  Coverage: scored 0/{total_indicators} indicators - treat with caution")
-                return
+                return 0, total_indicators, fallback_score
 
             points_sum = 0.0
             for factor in sub:
@@ -820,6 +938,7 @@ class ProfessionalReportGenerator:
             score_header.append(f"  Pillar weighted total: {pillar_total:.1f}/100")
             coverage_note = "" if scored_indicators == total_indicators else " - treat with caution"
             score_header.append(f"  Coverage: scored {scored_indicators}/{total_indicators} indicators{coverage_note}")
+            return scored_indicators, total_indicators, pillar_total
 
         env_block = pillar_factors.get("environmental", {}) if isinstance(pillar_factors, dict) else {}
         _append_pillar_rows(env_block, e_score, 6)
@@ -831,7 +950,7 @@ class ProfessionalReportGenerator:
             "  " + "─" * 98,
         ])
         social_block = pillar_factors.get("social", {}) if isinstance(pillar_factors, dict) else {}
-        _append_pillar_rows(social_block, s_score, 5)
+        social_scored, social_total, _ = _append_pillar_rows(social_block, s_score, 5)
         score_header.extend([
             "",
             f"GOVERNANCE PILLAR - {g_score:.1f}/100",
@@ -840,7 +959,65 @@ class ProfessionalReportGenerator:
             "  " + "─" * 98,
         ])
         gov_block = pillar_factors.get("governance", {}) if isinstance(pillar_factors, dict) else {}
-        _append_pillar_rows(gov_block, g_score, 6)
+        governance_scored, governance_total, _ = _append_pillar_rows(gov_block, g_score, 6)
+        if (s_score <= 15 or g_score <= 15) and (
+            social_scored < social_total or governance_scored < governance_total
+        ):
+            score_header.extend([
+                "",
+                "SOCIAL/GOVERNANCE COVERAGE SAFEGUARD NOTE",
+                "─" * 43,
+                (
+                    "Very low Social/Governance values here reflect sparse disclosure evidence and "
+                    "limited scored indicators, not fabricated scoring."
+                ),
+                (
+                    "The platform intentionally applies conservative scoring when evidence depth is "
+                    "insufficient, rather than imputing unsupported performance."
+                ),
+            ])
+        ext = v.get("external_benchmarks", {}) if isinstance(v.get("external_benchmarks"), dict) else {}
+        ext_sources = ext.get("sources", {}) if isinstance(ext.get("sources"), dict) else {}
+        ext_adjustments = ext.get("adjustments", []) if isinstance(ext.get("adjustments"), list) else []
+        ext_enabled = bool(ext.get("enabled"))
+        ext_used = bool(ext.get("used"))
+
+        score_header.extend([
+            "",
+            "EXTERNAL BENCHMARK INTEGRATION (WBA / WRI)",
+            "─" * 50,
+        ])
+        if ext_enabled:
+            score_header.append(
+                f"  Status: {'APPLIED' if ext_used else 'AVAILABLE (no numeric adjustment applied)'}"
+            )
+            score_header.append(
+                f"  WBA company match: {ext.get('wba_company_name') or v['company']}"
+            )
+            score_header.append(
+                f"  WBA indicators observed: {int(ext.get('wba_indicator_count') or 0)}"
+            )
+            if ext_sources:
+                source_pairs = ", ".join(f"{k}={val}" for k, val in sorted(ext_sources.items()))
+                score_header.append(f"  Sources: {source_pairs}")
+            if ext_adjustments:
+                score_header.append("  Scoring adjustments:")
+                for adj in ext_adjustments[:6]:
+                    if not isinstance(adj, dict):
+                        continue
+                    score_header.append(
+                        "    - "
+                        f"{adj.get('pillar', 'pillar')}: {adj.get('before', 'N/A')} -> {adj.get('after', 'N/A')} "
+                        f"via {adj.get('source', 'external')} (weight={adj.get('weight', 'N/A')})"
+                    )
+            else:
+                score_header.append("  No benchmark adjustments were triggered for this run.")
+        else:
+            score_header.append("  Status: UNAVAILABLE")
+            score_header.append(
+                f"  Reason: {ext.get('error') or 'WBA/WRI source data not returned for this run.'}"
+            )
+
         score_header.extend([
             "",
             major,
@@ -1397,7 +1574,17 @@ class ProfessionalReportGenerator:
                 defaults = {"LOW": 25.0, "MODERATE": 55.0, "HIGH": 80.0}
                 greenwashing_risk_score = defaults.get(str(risk_level).upper(), 55.0)
 
-        confidence = float(state.get("confidence") or 0.0)
+        state_confidence = float(state.get("confidence") or 0.0)
+        scorer_confidence_level = risk_scorer_result.get("confidence_level")
+        scorer_confidence = (
+            float(scorer_confidence_level) / 100.0
+            if isinstance(scorer_confidence_level, (int, float))
+            else 0.0
+        )
+        if state_confidence > 0 and scorer_confidence > 0:
+            confidence = min(state_confidence, scorer_confidence)
+        else:
+            confidence = state_confidence or scorer_confidence
 
         component_scores = risk_scorer_result.get("component_scores") or {}
         if not isinstance(component_scores, dict):
@@ -2128,7 +2315,7 @@ class ProfessionalReportGenerator:
         real_peers = [
             p
             for p in peers
-            if isinstance(p, dict) and (p.get("source") or "").lower() in {"database", "baseline"}
+            if isinstance(p, dict) and (p.get("source") or "").lower() in {"database", "baseline", "wba_live"}
         ]
         estimated_peers = [
             p
@@ -3189,15 +3376,15 @@ Score: {score:.1f}/100 — {level}
             lines.append("  Dataset:           Not available — ground truth dataset not found or empty")
             lines.append("  Status:            NOT_AVAILABLE — calibration numbers suppressed")
         else:
-            lines.append(f"  Dataset:           Ground Truth ESG Dataset v1.0 (data/ground_truth_dataset.csv)")
+            lines.append("  Dataset:           Ground Truth ESG Dataset v1.0")
             lines.append(f"  Verified Cases:    {dataset_size} company-claim pairs with regulatory verdicts")
             lines.append(f"  Status:            {cal_state}")
 
         # ML Model Performance
-        lines.append("")
-        lines.append("ML Model Performance (from latest evaluation):")
         eval_path = os.path.join(os.path.dirname(__file__), '../reports/ml_evaluation_results.json')
         if os.path.exists(eval_path):
+            lines.append("")
+            lines.append("ML Model Performance (from latest evaluation):")
             with open(eval_path) as f:
                 ml = json.load(f)
             best = ml.get('best_model', 'N/A')
@@ -3206,8 +3393,6 @@ Score: {score:.1f}/100 — {level}
             best_auc = ml.get('holdout_results', {}).get(best, {}).get('auc', 'N/A')
             lines.append(f"  Best Model:        {best} (F1: {best_f1:.3f}, AUC: {best_auc})")
             lines.append(f"  Baseline F1:       {dummy_f1} (majority class)")
-        else:
-            lines.append("  Best Model:        Not yet evaluated")
 
         # Score Calibration
         lines.append("")
@@ -4349,6 +4534,20 @@ KEY PERFORMANCE METRICS
         if not isinstance(risk_scoring_output, dict):
             risk_scoring_output = {}
 
+        external_meta = risk_scoring_output.get("external_benchmarks", {}) if isinstance(risk_scoring_output.get("external_benchmarks"), dict) else {}
+        external_state = analysis_state.get("external_esg_data", {}) if isinstance(analysis_state.get("external_esg_data"), dict) else {}
+        external_sources = external_meta.get("sources") if isinstance(external_meta.get("sources"), dict) else external_state.get("sources", {})
+        if not isinstance(external_sources, dict):
+            external_sources = {}
+        external_scores = external_meta.get("scores") if isinstance(external_meta.get("scores"), dict) else external_state.get("scores", {})
+        if not isinstance(external_scores, dict):
+            external_scores = {}
+
+        pillar_ext_adjustments = pillar_scores.get("external_benchmark_adjustments", []) if isinstance(pillar_scores, dict) else []
+        if not isinstance(pillar_ext_adjustments, list):
+            pillar_ext_adjustments = []
+        pillar_ext_used = bool(pillar_scores.get("external_benchmarks_used", False)) if isinstance(pillar_scores, dict) else False
+
         export = {
             "report_id": report_metadata.get("report_id"),
             "analysis_date": report_metadata.get("analysis_date"),
@@ -4408,6 +4607,16 @@ KEY PERFORMANCE METRICS
                 "optimal_threshold": calibration.get("optimal_threshold"),
                 "dataset_size": calibration.get("dataset_size"),
                 "calibration_status": calibration.get("calibration_status"),
+            },
+            "external_benchmarks": {
+                "enabled": bool(external_meta.get("enabled") or external_state.get("enabled") or external_sources),
+                "used_in_scoring": pillar_ext_used,
+                "sources": external_sources,
+                "scores": external_scores,
+                "adjustments": pillar_ext_adjustments,
+                "wba_company_name": external_meta.get("wba_company_name") or external_state.get("wba_company_name"),
+                "wba_indicator_count": external_meta.get("wba_indicator_count", external_state.get("wba_indicator_count", 0)),
+                "error": external_meta.get("error") or external_state.get("error"),
             },
             "report_generation_log": analysis_state.get("report_generation_log", {
                 "status": "success",
