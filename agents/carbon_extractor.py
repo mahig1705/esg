@@ -12,6 +12,7 @@ Supports: Global companies + Indian enterprises (SEBI BRSR, MCA compliance)
 
 import json
 import re
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from core.llm_call import call_llm
 from config.agent_prompts import CARBON_EXTRACTION_PROMPT
@@ -442,7 +443,8 @@ class CarbonExtractor:
     def extract_carbon_data(self, company: str, evidence: List[Dict[str, Any]],
                            claim: Dict[str, Any] = None,
                            report_chunks: Optional[List[Dict[str, Any]]] = None,
-                           report_claims_by_year: Optional[Dict[Any, List[str]]] = None) -> Dict[str, Any]:
+                           report_claims_by_year: Optional[Dict[Any, List[str]]] = None,
+                           report_files: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Extract comprehensive carbon emissions data from evidence
         
@@ -463,6 +465,7 @@ class CarbonExtractor:
         print(f"Company: {company}")
         print(f"Evidence documents: {len(evidence)}")
         print(f"Report chunks: {len(report_chunks or [])}")
+        print(f"Report files: {len(report_files or [])}")
         print(f"Report claim years: {len((report_claims_by_year or {}).keys())}")
 
         if not report_chunks and isinstance(claim, dict):
@@ -490,6 +493,32 @@ class CarbonExtractor:
         deterministic_scope2 = self._extract_scope_emissions_from_chunks(chunk_texts, 2, industry_hint)
         deterministic_scope3 = self._extract_scope_emissions_from_chunks(chunk_texts, 3, industry_hint)
         deterministic_scope12 = self._extract_scope12_combined(chunk_texts, industry_hint)
+        table_extracted = self._extract_from_report_files(report_files or [])
+
+        if table_extracted.get("scope1") is not None:
+            deterministic_scope1 = {
+                "value": table_extracted.get("scope1"),
+                "year": table_extracted.get("year"),
+                "source": table_extracted.get("source"),
+                "confidence": "high",
+                "candidates_found": table_extracted.get("tables_found", 0),
+            }
+        if table_extracted.get("scope2") is not None:
+            deterministic_scope2 = {
+                "value": table_extracted.get("scope2"),
+                "year": table_extracted.get("year"),
+                "source": table_extracted.get("source"),
+                "confidence": "high",
+                "candidates_found": table_extracted.get("tables_found", 0),
+            }
+        if table_extracted.get("scope3") is not None:
+            deterministic_scope3 = {
+                "value": table_extracted.get("scope3"),
+                "year": table_extracted.get("year"),
+                "source": table_extracted.get("source"),
+                "confidence": "high",
+                "candidates_found": table_extracted.get("tables_found", 0),
+            }
 
         if deterministic_scope1.get("value") is None and deterministic_scope12.get("scope1") is not None:
             deterministic_scope1 = {
@@ -739,6 +768,7 @@ class CarbonExtractor:
             "red_flags": self._detect_carbon_red_flags(validated_data, extraction_text),
             "annual_emissions": self._extract_annual_emissions(extraction_text),
             "source_coverage": source_meta,
+            "table_extraction": table_extracted,
             "water_usage": extracted_data.get("water_usage"),
             "waste_data": extracted_data.get("waste_data"),
             **additional_info  # Include net zero target, renewable %, etc.
@@ -772,6 +802,60 @@ class CarbonExtractor:
             if year_match:
                 return f"Net zero by {year_match.group(0)} (from claim)"
         return None
+
+    def _extract_from_report_files(self, report_files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Run the Camelot table extractor over downloaded PDF reports when available."""
+        result = {
+            "scope1": None,
+            "scope2": None,
+            "scope3": None,
+            "unit": None,
+            "year": None,
+            "tables_found": 0,
+            "source": None,
+            "report_path": None,
+        }
+        if not report_files:
+            return result
+
+        try:
+            from core.extractors.pdf_table_extractor import extract_emissions_values
+        except Exception:
+            return result
+
+        def _coverage_score(payload: Dict[str, Any]) -> Tuple[int, int]:
+            scope_count = sum(1 for key in ("scope1", "scope2", "scope3") if payload.get(key) is not None)
+            tables_found = int(payload.get("tables_found") or 0)
+            return (scope_count, tables_found)
+
+        best_payload: Optional[Dict[str, Any]] = None
+
+        for report in report_files:
+            local_path = str((report or {}).get("local_path") or "").strip()
+            if not local_path or Path(local_path).suffix.lower() != ".pdf":
+                continue
+            try:
+                payload = extract_emissions_values(local_path)
+            except Exception:
+                continue
+
+            if _coverage_score(payload) > _coverage_score(best_payload or {}):
+                best_payload = payload
+                result["report_path"] = local_path
+
+        if not best_payload:
+            return result
+
+        result.update({
+            "scope1": best_payload.get("scope1"),
+            "scope2": best_payload.get("scope2"),
+            "scope3": best_payload.get("scope3"),
+            "unit": best_payload.get("unit"),
+            "year": best_payload.get("year"),
+            "tables_found": best_payload.get("tables_found", 0),
+            "source": best_payload.get("source"),
+        })
+        return result
 
     def _extract_emission_value_with_unit(self, text: str) -> Tuple[Optional[float], Optional[str]]:
         """Extract emission values and normalize to tCO2e using unit multipliers."""

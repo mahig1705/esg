@@ -1,0 +1,273 @@
+"""
+Fact-centric ESG graph builder.
+
+Builds a lightweight, justification-centric graph from evidence and agent outputs
+so downstream scoring can reason over structured facts instead of loose text only.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Tuple
+import re
+
+
+HIGH_TRUST_SOURCE_TYPES = {
+    "Government/Regulatory",
+    "Government/International Data",
+    "Legal/Court Documents",
+    "Compliance/Sanctions Database",
+    "UK/EU Regulatory",
+    "NGO",
+    "Climate NGO",
+    "Supply Chain Database",
+    "Tier-1 Financial Media",
+}
+
+
+def _safe_year(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int) and 1900 <= value <= 2100:
+        return value
+    text = str(value)
+    match = re.search(r"(19|20)\d{2}", text)
+    if not match:
+        return None
+    year = int(match.group(0))
+    return year if 1900 <= year <= 2100 else None
+
+
+def _pillar_from_text(text: str) -> str:
+    low = text.lower()
+    env_hits = sum(
+        1
+        for kw in ["carbon", "emission", "water", "climate", "waste", "energy", "pollution", "biodiversity"]
+        if kw in low
+    )
+    soc_hits = sum(
+        1
+        for kw in ["labor", "employee", "worker", "human rights", "community", "safety", "diversity", "inclusion"]
+        if kw in low
+    )
+    gov_hits = sum(
+        1
+        for kw in ["board", "audit", "governance", "ethics", "corruption", "compliance", "transparency", "disclosure"]
+        if kw in low
+    )
+    if env_hits >= soc_hits and env_hits >= gov_hits:
+        return "E"
+    if soc_hits >= env_hits and soc_hits >= gov_hits:
+        return "S"
+    return "G"
+
+
+def _fact_polarity(text: str) -> str:
+    low = text.lower()
+    negative_markers = [
+        "violation",
+        "fine",
+        "penalty",
+        "lawsuit",
+        "investigation",
+        "non-compliance",
+        "breach",
+        "greenwashing",
+        "controversy",
+    ]
+    if any(token in low for token in negative_markers):
+        return "negative"
+    return "neutral_or_positive"
+
+
+def _verifiability_score(text: str, source_type: str, url: str) -> float:
+    score = 0.25
+    if url:
+        score += 0.25
+    if source_type in HIGH_TRUST_SOURCE_TYPES:
+        score += 0.25
+    if any(ch.isdigit() for ch in text):
+        score += 0.15
+    if len(text) >= 80:
+        score += 0.10
+    return round(min(1.0, score), 3)
+
+
+def _token_set(text: str) -> set[str]:
+    return {tok for tok in re.findall(r"[a-zA-Z]{4,}", text.lower())}
+
+
+def _extract_base_evidence(evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for idx, ev in enumerate(evidence, start=1):
+        if not isinstance(ev, dict):
+            continue
+        top_text = str(ev.get("relevant_text") or ev.get("snippet") or ev.get("content") or "").strip()
+        if top_text:
+            records.append(
+                {
+                    "source_id": ev.get("source_id") or ev.get("id") or f"ev_{idx}",
+                    "text": top_text,
+                    "url": str(ev.get("url") or ev.get("link") or "").strip(),
+                    "source": str(ev.get("source_name") or ev.get("source") or "Unknown"),
+                    "source_type": str(ev.get("source_type") or ""),
+                    "year": _safe_year(ev.get("year") or ev.get("date")),
+                }
+            )
+
+        nested = ev.get("evidence", [])
+        if not isinstance(nested, list):
+            continue
+        for n_idx, item in enumerate(nested, start=1):
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("relevant_text") or item.get("snippet") or "").strip()
+            if not text:
+                continue
+            records.append(
+                {
+                    "source_id": item.get("source_id") or item.get("id") or f"ev_{idx}_{n_idx}",
+                    "text": text,
+                    "url": str(item.get("url") or ev.get("url") or "").strip(),
+                    "source": str(item.get("source_name") or ev.get("source_name") or ev.get("source") or "Unknown"),
+                    "source_type": str(item.get("source_type") or ev.get("source_type") or ""),
+                    "year": _safe_year(item.get("year") or item.get("date") or ev.get("year") or ev.get("date")),
+                }
+            )
+    return records
+
+
+def build_esg_fact_graph(
+    company: str,
+    claim_text: str,
+    evidence: List[Dict[str, Any]],
+    contradictions: List[Dict[str, Any]] | None = None,
+    temporal_consistency: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    contradictions = contradictions or []
+    temporal_consistency = temporal_consistency or {}
+
+    records = _extract_base_evidence(evidence if isinstance(evidence, list) else [])
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    facts: List[Dict[str, Any]] = []
+
+    claim_id = "claim_root"
+    nodes.append(
+        {
+            "id": claim_id,
+            "node_type": "claim",
+            "text": claim_text or "",
+            "company": company or "",
+        }
+    )
+
+    claim_tokens = _token_set(claim_text or "")
+    pillar_counter = {"E": 0, "S": 0, "G": 0}
+    linked_count = 0
+
+    for idx, rec in enumerate(records[:200], start=1):
+        text = rec.get("text", "")
+        if not text:
+            continue
+        fact_id = f"fact_{idx}"
+        source_id = f"source_{idx}"
+        pillar = _pillar_from_text(text)
+        pillar_counter[pillar] += 1
+        score = _verifiability_score(text, rec.get("source_type", ""), rec.get("url", ""))
+        polarity = _fact_polarity(text)
+
+        fact_node = {
+            "id": fact_id,
+            "node_type": "fact",
+            "text": text,
+            "pillar": pillar,
+            "polarity": polarity,
+            "verifiability_score": score,
+            "year": rec.get("year"),
+        }
+        source_node = {
+            "id": source_id,
+            "node_type": "source",
+            "source_name": rec.get("source", "Unknown"),
+            "source_type": rec.get("source_type", ""),
+            "url": rec.get("url", ""),
+        }
+
+        nodes.append(fact_node)
+        nodes.append(source_node)
+        edges.append({"from": fact_id, "to": source_id, "relation": "sourced_from", "weight": score})
+
+        overlap = len(claim_tokens.intersection(_token_set(text)))
+        if overlap >= 2:
+            linked_count += 1
+            edges.append({"from": claim_id, "to": fact_id, "relation": "supported_by", "weight": min(1.0, overlap / 6.0)})
+
+        facts.append(
+            {
+                "fact_id": fact_id,
+                "text": text,
+                "pillar": pillar,
+                "polarity": polarity,
+                "year": rec.get("year"),
+                "source_id": source_id,
+                "source_name": rec.get("source", "Unknown"),
+                "source_type": rec.get("source_type", ""),
+                "url": rec.get("url", ""),
+                "verifiability_score": score,
+            }
+        )
+
+    contradiction_count = 0
+    for c_idx, row in enumerate(contradictions[:60], start=1):
+        if not isinstance(row, dict):
+            continue
+        verdict = str(row.get("overall_verdict") or "").strip() or "Unknown"
+        text = str(row.get("claim_text") or row.get("description") or row.get("reasoning") or "").strip()
+        if not text:
+            continue
+        contradiction_count += 1
+        fact_id = f"contradiction_{c_idx}"
+        nodes.append(
+            {
+                "id": fact_id,
+                "node_type": "contradiction_fact",
+                "text": text,
+                "verdict": verdict,
+                "pillar": _pillar_from_text(text),
+            }
+        )
+        edges.append({"from": claim_id, "to": fact_id, "relation": "challenged_by", "weight": 1.0})
+
+    temporal_flags = 0
+    temporal_evidence = temporal_consistency.get("evidence", []) if isinstance(temporal_consistency, dict) else []
+    if isinstance(temporal_evidence, list):
+        for t_idx, item in enumerate(temporal_evidence[:30], start=1):
+            text = str(item).strip()
+            if not text:
+                continue
+            temporal_flags += 1
+            node_id = f"temporal_{t_idx}"
+            nodes.append({"id": node_id, "node_type": "temporal_fact", "text": text, "pillar": _pillar_from_text(text)})
+            edges.append({"from": claim_id, "to": node_id, "relation": "time_consistency_check", "weight": 0.8})
+
+    verified_fact_count = sum(1 for f in facts if float(f.get("verifiability_score", 0)) >= 0.6)
+    summary = {
+        "fact_count": len(facts),
+        "verified_fact_count": verified_fact_count,
+        "claim_linked_fact_count": linked_count,
+        "contradiction_fact_count": contradiction_count,
+        "temporal_fact_count": temporal_flags,
+        "coverage_by_pillar": pillar_counter,
+        "graph_density": round(len(edges) / max(1, len(nodes)), 3),
+        "is_decision_ready": bool(verified_fact_count >= 4 and linked_count >= 1),
+    }
+
+    return {
+        "company": company,
+        "claim_text": claim_text,
+        "nodes": nodes,
+        "edges": edges,
+        "facts": facts,
+        "summary": summary,
+    }
+

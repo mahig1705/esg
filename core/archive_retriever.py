@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -94,7 +95,17 @@ def fetch_wayback(url: str, target_year: int) -> str | None:
         return None
 
 
-def fetch_archive_today(url: str) -> str | None:
+def _parse_http_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        # Example: "Mon, 20 Apr 2020 10:00:00 GMT"
+        return datetime.strptime(value.strip(), "%a, %d %b %Y %H:%M:%S GMT")
+    except ValueError:
+        return None
+
+
+def fetch_archive_today(url: str, target_year: int | None = None) -> str | None:
     """Query Archive.today (archive.ph / archive.is) for a saved snapshot.
 
     Archive.today has no public JSON API.  We query the search page and
@@ -110,6 +121,53 @@ def fetch_archive_today(url: str) -> str | None:
     str | None
         Archive.today snapshot URL, or ``None`` if not found.
     """
+    # Prefer timemap lookup when target_year is provided so we can choose
+    # a closer snapshot than just "newest".
+    if target_year is not None:
+        timemap_endpoints = [
+            f"https://archive.ph/timemap/{url}",
+            f"https://archive.is/timemap/{url}",
+        ]
+        best_url = None
+        best_distance = 10_000
+        for tm_url in timemap_endpoints:
+            try:
+                tm_resp = requests.get(tm_url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT)
+                if tm_resp.status_code != 200:
+                    continue
+                body = tm_resp.text or ""
+                # Timemap lines often contain:
+                # <https://archive.ph/xxxx>; rel="memento"; datetime="Mon, 20 Apr 2020 10:00:00 GMT"
+                for line in body.splitlines():
+                    if 'rel="memento"' not in line:
+                        continue
+                    parts = [p.strip() for p in line.split(";")]
+                    if not parts:
+                        continue
+                    uri_part = parts[0]
+                    if not (uri_part.startswith("<") and uri_part.endswith(">")):
+                        continue
+                    snapshot_url = uri_part[1:-1].strip()
+                    datetime_part = next((p for p in parts if p.startswith('datetime=')), "")
+                    dt_raw = datetime_part.replace('datetime=', "").strip().strip('"')
+                    dt = _parse_http_datetime(dt_raw)
+                    if dt is None:
+                        continue
+                    distance = abs(dt.year - int(target_year))
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_url = snapshot_url
+                if best_url:
+                    logger.info(
+                        "Archive.today timemap: selected closest snapshot %s (target_year=%s, delta=%s)",
+                        best_url, target_year, best_distance,
+                    )
+                    return best_url
+            except requests.exceptions.Timeout:
+                logger.warning("Archive.today timemap: request timed out for %s", tm_url)
+            except requests.exceptions.RequestException as exc:
+                logger.warning("Archive.today timemap: request failed for %s — %s", tm_url, exc)
+
     # archive.ph and archive.is search endpoints use redirect-based lookup.
     search_endpoints = [
         f"https://archive.ph/newest/{url}",
@@ -242,7 +300,7 @@ def get_historical_snapshot(
 
     archive_functions = [
         ("wayback", lambda: fetch_wayback(url, target_year)),
-        ("archive_today", lambda: fetch_archive_today(url)),
+        ("archive_today", lambda: fetch_archive_today(url, target_year=target_year)),
         ("memento", lambda: fetch_memento(url, target_year)),
     ]
 

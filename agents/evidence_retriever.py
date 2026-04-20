@@ -16,6 +16,7 @@ from urllib.parse import quote, urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
+from core.company_knowledge_graph import CompanyKnowledgeGraph
 from core.vector_store import vector_store
 from utils.enterprise_data_sources import enterprise_fetcher
 from utils.web_search import classify_source
@@ -1249,6 +1250,15 @@ class EvidenceRetriever:
 
         print(f"\n📝 Analyzing evidence relationships...")
         structured_evidence = self._structure_evidence(pipeline["final"], claim_text)
+        graph_context = CompanyKnowledgeGraph().hybrid_retrieve(
+            company=company,
+            claim_text=claim_text,
+            ticker=str(claim.get("ticker") or ""),
+        )
+        graph_evidence = graph_context.get("graph_evidence", []) if isinstance(graph_context, dict) else []
+        if isinstance(graph_evidence, list) and graph_evidence:
+            structured_evidence.extend(graph_evidence)
+            print(f"   GraphRAG evidence added: {len(graph_evidence)}")
         
         # 6. Store in vector DB
         self._store_evidence_in_vectordb(structured_evidence, company, claim_id)
@@ -1369,6 +1379,7 @@ class EvidenceRetriever:
             "financial_context": financial_context,
             "company_reports": company_reports,
             "indian_financials": indian_financials,
+            "graph_retrieval": graph_context,
             "retrieval_timestamp": datetime.now().isoformat()
         }
         

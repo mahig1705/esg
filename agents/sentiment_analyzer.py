@@ -30,6 +30,21 @@ class SentimentAnalyzer:
             "might", "could", "may", "possibly", "potentially", "approximately",
             "around", "roughly", "about", "nearly", "almost", "up to"
         ]
+        
+        self.boilerplate_phrases = [
+            "committed to sustainability",
+            "for a better future",
+            "doing our part",
+            "we believe in sustainability",
+            "on our journey",
+            "towards a greener future",
+            "responsible business practices",
+            "creating long-term value",
+            "for future generations",
+            "we are dedicated to",
+            "we remain focused on",
+            "driving meaningful change",
+        ]
     
     def analyze_claim_language(self, claim: Dict[str, Any], evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -87,6 +102,16 @@ class SentimentAnalyzer:
 
         claim_sentiment_score = claim_analysis.get("score", int((claim_analysis.get("polarity_score", 0.0) + 1) * 50))
         evidence_sentiment_score = evidence_analysis.get("score", int((evidence_analysis.get("polarity_score", 0.0) + 1) * 50))
+        boilerplate = self._calculate_boilerplate_score(claim_text, claim_analysis)
+        source_breakdown = self._sentiment_source_breakdown(evidence)
+        gsi = self._calculate_greenwashing_severity_index(
+            claim_analysis=claim_analysis,
+            evidence_analysis=evidence_analysis,
+            source_breakdown=source_breakdown,
+            greenwashing_flags=greenwashing_flags,
+            boilerplate_score=boilerplate.get("score", 0),
+            divergence_score=min(100, int(sentiment_divergence * 100)),
+        )
 
         low_confidence = bool(llm_analysis.get("low_confidence", False))
         
@@ -102,12 +127,15 @@ class SentimentAnalyzer:
             "sentiment_divergence": round(sentiment_divergence, 3),
             "divergence_score": min(100, int(sentiment_divergence * 100)),
             "greenwashing_flags": greenwashing_flags,
+            "boilerplate_assessment": boilerplate,
+            "greenwashing_severity_index": gsi,
+            "gsi_score": gsi.get("score", 0),
             "llm_linguistic_analysis": llm_analysis,
             "sentiment_label": evidence_sentiment_label,
             "sentiment_score": evidence_analysis.get("polarity_score", 0.0),
             "articles_analyzed": len(evidence),
             "notable_signal": self._build_notable_signal(evidence, greenwashing_flags),
-            "source_breakdown": self._sentiment_source_breakdown(evidence),
+            "source_breakdown": source_breakdown,
             "overall_linguistic_risk": self._calculate_linguistic_risk(
                 claim_analysis, evidence_analysis, sentiment_divergence, greenwashing_flags
             )
@@ -116,6 +144,8 @@ class SentimentAnalyzer:
         print(f"\n✅ Linguistic analysis complete:")
         print(f"   Sentiment divergence: {sentiment_divergence:.3f}")
         print(f"   Greenwashing flags: {len(greenwashing_flags)}")
+        print(f"   Boilerplate score: {boilerplate.get('score', 0)}/100")
+        print(f"   GSI: {gsi.get('score', 0)}/100 ({gsi.get('level', 'Unknown')})")
         print(f"   Linguistic risk: {result['overall_linguistic_risk']}/100")
         
         return result
@@ -304,6 +334,105 @@ class SentimentAnalyzer:
             risk_score += 10
         
         return min(100, risk_score)
+
+    def _calculate_boilerplate_score(self, claim_text: str, claim_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Estimate how generic/non-substantive the claim language is."""
+        text = (claim_text or "").lower()
+        words = [w for w in re.findall(r"[a-zA-Z]+", text)]
+        unique_ratio = (len(set(words)) / len(words)) if words else 0.0
+        phrase_hits = [p for p in self.boilerplate_phrases if p in text]
+        buzzword_count = int(claim_analysis.get("buzzword_count", 0) or 0)
+        hedge_count = len(claim_analysis.get("hedge_words", []))
+
+        has_numbers = bool(re.search(r"\d", text))
+        has_time_bound = bool(re.search(r"\b(20\d{2}|by\s+\d{4}|q[1-4])\b", text))
+        has_verification_anchor = any(
+            marker in text for marker in [
+                "scope 1", "scope 2", "scope 3", "sbti", "audited", "verified", "iso ", "cdp"
+            ]
+        )
+
+        score = 0
+        score += min(35, len(phrase_hits) * 8)
+        score += min(20, buzzword_count * 3)
+        score += min(15, hedge_count * 4)
+        if unique_ratio < 0.55:
+            score += 12
+        if not has_numbers:
+            score += 10
+        if not has_time_bound:
+            score += 8
+        if not has_verification_anchor:
+            score += 8
+
+        score = int(max(0, min(100, score)))
+        level = "Low"
+        if score >= 70:
+            level = "High"
+        elif score >= 45:
+            level = "Moderate"
+
+        return {
+            "score": score,
+            "level": level,
+            "phrase_hits": phrase_hits[:8],
+            "lexical_uniqueness_ratio": round(unique_ratio, 3),
+            "has_quantification": has_numbers,
+            "has_time_bound_target": has_time_bound,
+            "has_verification_anchor": has_verification_anchor,
+        }
+
+    def _calculate_greenwashing_severity_index(
+        self,
+        claim_analysis: Dict[str, Any],
+        evidence_analysis: Dict[str, Any],
+        source_breakdown: Dict[str, int],
+        greenwashing_flags: List[Dict[str, Any]],
+        boilerplate_score: int,
+        divergence_score: int,
+    ) -> Dict[str, Any]:
+        """Greenwashing Severity Index (GSI): discrepancy between self-representation and external narrative."""
+        total_sources = max(1, sum(int(v) for v in source_breakdown.values()))
+        negative_ratio = float(source_breakdown.get("negative", 0)) / total_sources
+        positive_ratio = float(source_breakdown.get("positive", 0)) / total_sources
+        claim_pos = max(0.0, float(claim_analysis.get("polarity_score", 0.0)))
+        evidence_neg = max(0.0, -float(evidence_analysis.get("polarity_score", 0.0)))
+        narrative_discrepancy = max(0.0, claim_pos - evidence_neg + (negative_ratio - positive_ratio))
+
+        severity_weights = {"High": 12, "Moderate": 7, "Low": 3}
+        flag_score = sum(severity_weights.get(str(f.get("severity", "Low")), 4) for f in greenwashing_flags)
+
+        score = 0.0
+        score += divergence_score * 0.32
+        score += boilerplate_score * 0.26
+        score += min(100.0, flag_score * 2.5) * 0.22
+        score += min(100.0, narrative_discrepancy * 100.0) * 0.20
+        score = round(max(0.0, min(100.0, score)), 1)
+
+        if score >= 75:
+            level = "Severe"
+        elif score >= 50:
+            level = "Elevated"
+        elif score >= 30:
+            level = "Moderate"
+        else:
+            level = "Low"
+
+        return {
+            "score": score,
+            "level": level,
+            "components": {
+                "sentiment_divergence_score": divergence_score,
+                "boilerplate_score": boilerplate_score,
+                "flag_signal_score": min(100.0, flag_score * 2.5),
+                "narrative_discrepancy_score": round(min(100.0, narrative_discrepancy * 100.0), 1),
+            },
+            "source_mix": {
+                "positive_ratio": round(positive_ratio, 3),
+                "negative_ratio": round(negative_ratio, 3),
+                "total_sources": total_sources,
+            },
+        }
 
     def _label_from_polarity(self, polarity: float) -> str:
         if polarity <= -0.15:

@@ -28,6 +28,9 @@ from core.state_schema import ESGState
 from core.evidence_cache import evidence_cache
 from typing import Dict, Any
 from core.esg_data_apis import fill_missing_pillars
+from core.fact_graph_builder import build_esg_fact_graph
+from core.adversarial_audit import build_adversarial_audit
+from core.company_knowledge_graph import CompanyKnowledgeGraph
 
 # ============================================================
 # LIVE DATA FETCHER - Gets fresh content for analysis
@@ -469,6 +472,11 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
         # Gather parsed report chunks and report claims for prioritized carbon extraction
         parser_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "report_parser"]
         parsed_chunks = parser_outputs[-1].get("output", {}).get("chunks", []) if parser_outputs else []
+        parsed_report_files = parser_outputs[-1].get("output", {}).get("downloaded_reports", []) if parser_outputs else []
+
+        if not parsed_report_files:
+            downloader_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "report_downloader"]
+            parsed_report_files = downloader_outputs[-1].get("output", {}).get("downloads", []) if downloader_outputs else []
 
         claim_extractor_outputs = [
             o for o in state.get("agent_outputs", [])
@@ -496,7 +504,8 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
             evidence=evidence,
             claim=claim_dict,
             report_chunks=parsed_chunks,
-            report_claims_by_year=report_claims_by_year
+            report_claims_by_year=report_claims_by_year,
+            report_files=parsed_report_files,
         )
         
         if isinstance(result, dict):
@@ -1335,6 +1344,17 @@ def risk_scoring_node(state: ESGState) -> ESGState:
             )
         elif external_benchmarks.get("error"):
             print(f"⚠️ External ESG enrichment unavailable: {external_benchmarks.get('error')}")
+
+        fact_graph_payload = all_analyses.get("fact_graph", {})
+        if isinstance(fact_graph_payload, dict):
+            fg_summary = fact_graph_payload.get("summary", {})
+            if isinstance(fg_summary, dict) and fg_summary:
+                print(
+                    "🕸️ Fact graph active: "
+                    f"facts={fg_summary.get('fact_count', 0)}, "
+                    f"verified={fg_summary.get('verified_fact_count', 0)}, "
+                    f"linked={fg_summary.get('claim_linked_fact_count', 0)}"
+                )
         
         # Call calculate_final_score with proper parameters
         result = scorer.calculate_final_score(
@@ -1355,7 +1375,19 @@ def risk_scoring_node(state: ESGState) -> ESGState:
             print(f"   Rating Grade: {rating_grade}")
             print(f"   Source: {risk_source}")
             print(f"   Greenwashing Risk: {result.get('greenwashing_risk_score', 50):.1f}/100")
+            if result.get("greenwashing_risk_score_raw") is not None:
+                print(f"   Raw Risk Before Recalibration: {result.get('greenwashing_risk_score_raw', 50):.1f}/100")
             print(f"   ESG Score: {result.get('esg_score', 50):.1f}/100")
+            archive_quality = result.get("historical_archive_quality", {}) if isinstance(result.get("historical_archive_quality"), dict) else {}
+            if archive_quality:
+                print(
+                    "   Historical Archive Quality: "
+                    f"{archive_quality.get('archive_confidence', 'N/A')}/100 "
+                    f"({archive_quality.get('archive_quality_band', 'UNKNOWN')})"
+                )
+            if result.get("abstain_recommended"):
+                print(f"   Abstention: RECOMMENDED")
+                print(f"   Reason: {result.get('abstention_reason', 'Insufficient evidence')}")
             
             if pillar_scores:
                 print(f"   📊 Pillar Scores:")
@@ -1436,6 +1468,7 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
         "agent_outputs": list(state.get("agent_outputs", [])),
         "industry": state.get("industry", ""),
         "external_benchmarks": state.get("external_esg_data", {}),
+        "fact_graph": state.get("fact_graph", {}),
     }
     
     for output in state.get("agent_outputs", []):
@@ -1493,8 +1526,103 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
 
         elif agent_name == "external_esg_enrichment":
             analyses["external_benchmarks"] = agent_result
+        elif agent_name == "fact_graph_builder":
+            analyses["fact_graph"] = agent_result
     
     return analyses
+
+
+def fact_graph_node(state: ESGState) -> ESGState:
+    """
+    Build a fact-centric ESG knowledge graph from collected evidence.
+    This supports justification-centric scoring and abstention decisions.
+    """
+    print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
+    print("Node: fact_graph_builder")
+    print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
+    print("=" * 70)
+
+    try:
+        contradictions = []
+        contradiction_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "contradiction_analysis"]
+        if contradiction_outputs:
+            payload = contradiction_outputs[-1].get("output", {})
+            if isinstance(payload, list):
+                contradictions = payload
+            elif isinstance(payload, dict):
+                contradictions = (
+                    payload.get("contradictions")
+                    or payload.get("contradiction_list")
+                    or payload.get("specific_contradictions")
+                    or []
+                )
+
+        temporal_payload = {}
+        temporal_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "temporal_consistency"]
+        if temporal_outputs:
+            temporal_payload = temporal_outputs[-1].get("output", {}) or {}
+
+        result = build_esg_fact_graph(
+            company=state.get("company", ""),
+            claim_text=state.get("claim", ""),
+            evidence=state.get("evidence", []),
+            contradictions=contradictions if isinstance(contradictions, list) else [],
+            temporal_consistency=temporal_payload if isinstance(temporal_payload, dict) else {},
+        )
+
+        summary = result.get("summary", {}) if isinstance(result, dict) else {}
+        state["fact_graph"] = result if isinstance(result, dict) else {}
+        try:
+            kg_status = CompanyKnowledgeGraph().ingest_state(state)
+        except Exception as kg_err:
+            kg_status = {
+                "status": "ingest_error",
+                "error": str(kg_err),
+            }
+        state["company_knowledge_graph"] = kg_status if isinstance(kg_status, dict) else {}
+        state.setdefault("node_execution_order", []).append("Fact Graph Builder")
+        state["agent_outputs"].append(
+            {
+                "agent": "fact_graph_builder",
+                "output": result if isinstance(result, dict) else {"summary": {}},
+                "confidence": 0.82,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+        state["agent_outputs"].append(
+            {
+                "agent": "company_knowledge_graph",
+                "output": kg_status if isinstance(kg_status, dict) else {},
+                "confidence": 0.78 if isinstance(kg_status, dict) and not kg_status.get("error") else 0.35,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+        print("✅ Fact graph built")
+        if isinstance(summary, dict):
+            print(
+                f"   Facts: {summary.get('fact_count', 0)} | "
+                f"Verified: {summary.get('verified_fact_count', 0)} | "
+                f"Claim-linked: {summary.get('claim_linked_fact_count', 0)}"
+            )
+        if isinstance(kg_status, dict):
+            print(
+                f"   KG status: {kg_status.get('status', 'unknown')} | "
+                f"Anchor: {kg_status.get('organization_anchor', 'N/A')}"
+            )
+        print(f"{'✅ NODE COMPLETED':^70}")
+    except Exception as e:
+        print(f"❌ Fact graph builder error: {e}")
+        state["agent_outputs"].append(
+            {
+                "agent": "fact_graph_builder",
+                "error": str(e),
+                "confidence": 0.3,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+    return state
 
 
 def sentiment_analysis_node(state: ESGState) -> ESGState:
@@ -1742,10 +1870,21 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
     risk_outputs = [o for o in state.get("agent_outputs", []) if isinstance(o, dict) and o.get("agent") == "risk_scoring"]
     risk_result = risk_outputs[-1].get("output", {}) if risk_outputs else {}
     report_tier = str(risk_result.get("report_tier") or "").upper() if isinstance(risk_result, dict) else ""
+    abstain_recommended = bool(risk_result.get("abstain_recommended", False)) if isinstance(risk_result, dict) else False
     if report_tier == "TIER_3":
         reliability_caps.append(0.60)
     elif report_tier == "TIER_2":
         reliability_caps.append(0.75)
+    if abstain_recommended:
+        reliability_caps.append(0.55)
+
+    audit_outputs = [o for o in state.get("agent_outputs", []) if isinstance(o, dict) and o.get("agent") == "adversarial_audit"]
+    audit_result = audit_outputs[-1].get("output", {}) if audit_outputs else {}
+    if isinstance(audit_result, dict):
+        audit_penalty = float(audit_result.get("confidence_penalty", 0.0) or 0.0)
+        if audit_penalty > 0:
+            avg_confidence = max(0.0, avg_confidence - audit_penalty)
+            reliability_caps.append(max(0.50, 1.0 - audit_penalty))
 
     failed_agents = 0
     for out in state.get("agent_outputs", []):
@@ -1786,6 +1925,8 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
             "reliability_caps": reliability_caps,
             "cap_applied": cap_applied,
             "report_tier": report_tier,
+            "abstain_recommended": abstain_recommended,
+            "adversarial_audit": audit_result if isinstance(audit_result, dict) else {},
         },
         "confidence": avg_confidence,
         "timestamp": datetime.now().isoformat()
@@ -1793,6 +1934,41 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
     
     print(f"{'✅ NODE COMPLETED':^70}")
     
+    return state
+
+
+def adversarial_audit_node(state: ESGState) -> ESGState:
+    """
+    Compute coordination risk diagnostics across all upstream agents.
+    """
+    print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
+    print("Node: adversarial_audit")
+    print("=" * 70)
+    try:
+        result = build_adversarial_audit(state)
+        state["adversarial_audit"] = result
+        state.setdefault("node_execution_order", []).append("Adversarial Audit")
+        state["agent_outputs"].append({
+            "agent": "adversarial_audit",
+            "output": result,
+            "confidence": max(0.5, 1.0 - float(result.get("coordination_risk", 0.0))),
+            "timestamp": datetime.now().isoformat(),
+        })
+        print(
+            "✅ Adversarial audit complete: "
+            f"risk={result.get('coordination_risk_band')} "
+            f"({result.get('coordination_risk', 0)}), "
+            f"failed_agents={result.get('failed_agents', 0)}"
+        )
+        print(f"{'✅ NODE COMPLETED':^70}")
+    except Exception as e:
+        print(f"❌ Adversarial audit error: {e}")
+        state["agent_outputs"].append({
+            "agent": "adversarial_audit",
+            "error": str(e),
+            "confidence": 0.4,
+            "timestamp": datetime.now().isoformat(),
+        })
     return state
 
 
@@ -1809,6 +1985,54 @@ def verdict_generation_node(state: ESGState) -> ESGState:
     # PRIORITY 0: CHECK FOR ESG PILLAR OVERRIDE (HIGHEST PRIORITY)
     # ============================================================
     risk_scorer_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "risk_scoring"]
+
+    # ============================================================
+    # PRIORITY -1: ABSTENTION-AWARE DECISION (HARDEST GUARDRAIL)
+    # ============================================================
+    if risk_scorer_outputs:
+        risk_scorer_result = risk_scorer_outputs[-1].get("output", {})
+        if isinstance(risk_scorer_result, dict) and bool(risk_scorer_result.get("abstain_recommended", False)):
+            decision_status = str(risk_scorer_result.get("decision_status") or "ABSTAIN_RECOMMENDED")
+            abstention_reason = str(risk_scorer_result.get("abstention_reason") or "Evidence is insufficient for decision-grade scoring.")
+            abstention_triggers = risk_scorer_result.get("abstention_triggers", [])
+            if not isinstance(abstention_triggers, list):
+                abstention_triggers = []
+
+            state["risk_level"] = "ABSTAIN"
+            state["rating_grade"] = None
+            state["confidence"] = min(float(state.get("confidence", 0.55) or 0.55), 0.55)
+            state["verdict_locked"] = True
+
+            verdict_data = {
+                "company": state["company"],
+                "claim": state["claim"],
+                "risk_level": "ABSTAIN",
+                "rating_grade": None,
+                "final_confidence": state["confidence"],
+                "decision_status": decision_status,
+                "abstain_recommended": True,
+                "abstention_reason": abstention_reason,
+                "abstention_triggers": abstention_triggers,
+                "score_disclaimer": risk_scorer_result.get("score_disclaimer", ""),
+                "report_tier": risk_scorer_result.get("report_tier", "TIER_3"),
+                "timestamp": datetime.now().isoformat(),
+                "locked_by": "abstention_guardrail",
+            }
+
+            state["final_verdict"] = verdict_data
+            state["agent_outputs"].append({
+                "agent": "verdict_generation",
+                "output": verdict_data,
+                "confidence": state["confidence"],
+                "timestamp": datetime.now().isoformat(),
+                "verdict_locked": True,
+            })
+
+            print("\n🛑 ABSTENTION-AWARE DECISION ENFORCED")
+            print(f"   Status: {decision_status}")
+            print(f"   Reason: {abstention_reason}")
+            print(f"{'✅ NODE COMPLETED':^70}")
+            return state
     
     if risk_scorer_outputs:
         risk_scorer_result = risk_scorer_outputs[-1].get("output", {})
@@ -2428,6 +2652,7 @@ def report_parser_node(state: ESGState) -> ESGState:
                 "company": company,
                 "chunks": parsed_chunks,
                 "chunk_count": len(parsed_chunks),
+                "downloaded_reports": downloaded_reports,
                 "status": "success"
             },
             "confidence": confidence,

@@ -439,6 +439,8 @@ def get_wri_water_risk(
     lat: float,
     lon: float,
     industry: str | None = None,
+    api_key: str | None = None,
+    bearer_token: str | None = None,
 ) -> dict[str, Any]:
     """Fetch water risk data from WRI Aqueduct via the Resource Watch API.
 
@@ -477,7 +479,24 @@ def get_wri_water_risk(
         "error": None,
     }
 
+    api_key = (
+        api_key
+        or os.environ.get("RESOURCE_WATCH_API_KEY")
+        or os.environ.get("WRI_AQUEDUCT_API_KEY")
+        or ""
+    ).strip()
+    bearer_token = (
+        bearer_token
+        or os.environ.get("RESOURCE_WATCH_TOKEN")
+        or os.environ.get("WRI_AQUEDUCT_TOKEN")
+        or ""
+    ).strip()
+
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if api_key:
+        headers["x-api-key"] = api_key
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
 
     # Create a small polygon buffer around the point (~1km) since
     # the Aqueduct raster may not intersect a bare Point geometry.
@@ -499,6 +518,14 @@ def get_wri_water_risk(
             "properties": {},
         }],
     }
+
+    if not api_key:
+        result["error"] = (
+            "Resource Watch API key not set "
+            "(RESOURCE_WATCH_API_KEY or WRI_AQUEDUCT_API_KEY)"
+        )
+        logger.warning("WRI: API key not available - skipping Aqueduct lookup")
+        return result
 
     try:
         with httpx.Client(timeout=_TIMEOUT) as client:

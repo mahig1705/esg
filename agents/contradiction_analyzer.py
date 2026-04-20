@@ -3,6 +3,7 @@ import logging
 import re
 from typing import Dict, Any, List, Optional
 
+from core.company_knowledge_graph import CompanyKnowledgeGraph
 from core.llm_call import call_llm
 from config.agent_prompts import CONTRADICTION_ANALYSIS_PROMPT
 import asyncio
@@ -49,6 +50,9 @@ class ContradictionAnalyzer:
     ) -> Dict[str, Any]:
         """Deterministic contradiction analysis merging known DB + evidence + LLM signals."""
         known = self._check_known_contradictions(company=company, claim_text=claim)
+        graph_context = CompanyKnowledgeGraph().hybrid_retrieve(company=company, claim_text=claim)
+        graph_evidence = graph_context.get("graph_evidence", []) if isinstance(graph_context, dict) else []
+        reasoning_paths = graph_context.get("reasoning_paths", []) if isinstance(graph_context, dict) else []
 
         prioritized = list(contradicting_evidence or [])
         if not prioritized:
@@ -56,6 +60,10 @@ class ContradictionAnalyzer:
                 e for e in (evidence or [])
                 if str(e.get("stance", e.get("relationship_to_claim", ""))).lower() == "contradicts"
             ]
+        prioritized.extend(
+            ev for ev in graph_evidence
+            if str(ev.get("relationship_to_claim", "")).lower() == "contradicts"
+        )
 
         evidence_contradictions = self._extract_contradictions_from_evidence(prioritized)
 
@@ -66,6 +74,12 @@ class ContradictionAnalyzer:
             llm_found = []
 
         merged = self._merge_contradictions(known, evidence_contradictions, llm_found)
+        for item in merged:
+            if isinstance(item, dict) and reasoning_paths and not item.get("reasoning_path"):
+                item["reasoning_path"] = reasoning_paths[0]
+
+        text_signal_count = len(prioritized) + len(known) + len(llm_found)
+        abstain = bool((graph_context or {}).get("abstain_recommended", False)) and len(merged) == 0 and text_signal_count == 0
 
         return {
             "contradictions_found": len(merged),
@@ -78,6 +92,10 @@ class ContradictionAnalyzer:
             "controversy_count": len(merged),
             "assessment": "Clean" if not merged else f"{len(merged)} confirmed case(s)",
             "confidence": 0.5 if not merged else 0.8,
+            "graph_reasoning_paths": reasoning_paths,
+            "graph_evidence_count": len(graph_evidence),
+            "abstain_recommended": abstain,
+            "abstention_reason": "ABSTAIN: Insufficient verifiable evidence in Knowledge Graph" if abstain else None,
         }
 
     def analyze_claim(self, claim: Dict[str, Any], evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -110,6 +128,8 @@ class ContradictionAnalyzer:
         neutral = [e for e in evidence if str(e.get("relationship_to_claim", "")).lower() == "neutral"]
         merged["claim_id"] = claim_id
         merged["overall_verdict"] = "Contradicted" if merged["contradictions_found"] > 0 else "Unverifiable"
+        if merged.get("abstain_recommended"):
+            merged["overall_verdict"] = "ABSTAIN"
         merged["verification_confidence"] = int((merged.get("confidence") or 0.5) * 100)
         merged["specific_contradictions"] = merged.get("contradiction_list", [])
         merged["supportive_evidence"] = [e.get("source_name") for e in supporting[:3]]

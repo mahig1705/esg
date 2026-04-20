@@ -9,6 +9,7 @@ from core.supervisor_agent import assess_complexity_node, classify_workflow
 from core.agent_wrappers import (
     claim_extraction_node,
     evidence_retrieval_node,
+    fact_graph_node,
     carbon_extraction_node,
     greenwishing_detection_node,
     regulatory_scanning_node,
@@ -17,6 +18,7 @@ from core.agent_wrappers import (
     temporal_analysis_node,
     peer_comparison_node,
     risk_scoring_node,
+    adversarial_audit_node,
     sentiment_analysis_node,
     credibility_analysis_node,
     realtime_monitoring_node,
@@ -154,6 +156,7 @@ def build_phase2_graph():
     workflow.add_node("fast_claim", claim_extraction_node)
     workflow.add_node("fast_risk", risk_scoring_node)
     workflow.add_node("fast_confidence", confidence_scoring_node)
+    workflow.add_node("fast_audit", adversarial_audit_node)
     workflow.add_node("fast_verdict", verdict_generation_node)
     workflow.add_node("fast_save_peer", save_peer_to_database_node)  # NEW: Save to peer DB
     workflow.add_node("fast_report", report_generation_node)
@@ -180,8 +183,10 @@ def build_phase2_graph():
     workflow.add_node("std_credibility", credibility_analysis_node)
     workflow.add_node("std_sentiment", sentiment_analysis_node)
     workflow.add_node("std_realtime", realtime_monitoring_node)
+    workflow.add_node("std_fact_graph", fact_graph_node)
     workflow.add_node("std_risk", risk_scoring_node)
     workflow.add_node("std_explainability", explainability_node)  # NEW: SHAP/LIME
+    workflow.add_node("std_audit", adversarial_audit_node)
     workflow.add_node("std_confidence", confidence_scoring_node)
     workflow.add_node("std_verdict", verdict_generation_node)
     workflow.add_node("std_save_peer", save_peer_to_database_node)
@@ -209,8 +214,10 @@ def build_phase2_graph():
     workflow.add_node("deep_credibility", credibility_analysis_node)
     workflow.add_node("deep_sentiment", sentiment_analysis_node)
     workflow.add_node("deep_realtime", realtime_monitoring_node)
+    workflow.add_node("deep_fact_graph", fact_graph_node)
     workflow.add_node("deep_risk", risk_scoring_node)
     workflow.add_node("deep_explainability", explainability_node)  # NEW: SHAP/LIME
+    workflow.add_node("deep_audit", adversarial_audit_node)
     workflow.add_node("deep_confidence", confidence_scoring_node)
     workflow.add_node("deep_verdict", verdict_generation_node)
     workflow.add_node("deep_debate", debate_node)
@@ -237,7 +244,8 @@ def build_phase2_graph():
     
     # Fast track path (linear - no loops)
     workflow.add_edge("fast_claim", "fast_risk")
-    workflow.add_edge("fast_risk", "fast_confidence")
+    workflow.add_edge("fast_risk", "fast_audit")
+    workflow.add_edge("fast_audit", "fast_confidence")
     workflow.add_edge("fast_confidence", "fast_verdict")
     workflow.add_edge("fast_verdict", "fast_save_peer")  # NEW: Save peer data
     workflow.add_edge("fast_save_peer", "fast_report")
@@ -262,9 +270,11 @@ def build_phase2_graph():
     workflow.add_edge("std_credibility", "std_sentiment")
     workflow.add_edge("std_sentiment", "std_realtime")
     workflow.add_edge("std_realtime", "std_temporal_consistency")  # Temporal analysis after broader evidence context
-    workflow.add_edge("std_temporal_consistency", "std_risk")
+    workflow.add_edge("std_temporal_consistency", "std_fact_graph")
+    workflow.add_edge("std_fact_graph", "std_risk")
     workflow.add_edge("std_risk", "std_explainability")  # NEW: SHAP/LIME after risk
-    workflow.add_edge("std_explainability", "std_confidence")
+    workflow.add_edge("std_explainability", "std_audit")
+    workflow.add_edge("std_audit", "std_confidence")
     workflow.add_edge("std_confidence", "std_verdict")
     workflow.add_edge("std_verdict", "std_save_peer")
     workflow.add_edge("std_save_peer", "std_report")
@@ -289,9 +299,11 @@ def build_phase2_graph():
     workflow.add_edge("deep_credibility", "deep_sentiment")
     workflow.add_edge("deep_sentiment", "deep_realtime")
     workflow.add_edge("deep_realtime", "deep_temporal_consistency")  # Temporal analysis after broader evidence context
-    workflow.add_edge("deep_temporal_consistency", "deep_risk")
+    workflow.add_edge("deep_temporal_consistency", "deep_fact_graph")
+    workflow.add_edge("deep_fact_graph", "deep_risk")
     workflow.add_edge("deep_risk", "deep_explainability")  # NEW: SHAP/LIME after risk
-    workflow.add_edge("deep_explainability", "deep_confidence")
+    workflow.add_edge("deep_explainability", "deep_audit")
+    workflow.add_edge("deep_audit", "deep_confidence")
     workflow.add_edge("deep_confidence", "deep_verdict")
     workflow.add_edge("deep_verdict", "deep_debate")
     workflow.add_edge("deep_debate", "deep_save_peer")

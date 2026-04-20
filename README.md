@@ -25,6 +25,63 @@ NEWSDATA_API_KEY=your_newsdata_key
 
 # WBA Data API (Bearer token)
 WBA_API_KEY=your_wba_api_key
+
+# Resource Watch / WRI Aqueduct
+RESOURCE_WATCH_API_KEY=your_resource_watch_api_key
+RESOURCE_WATCH_TOKEN=your_resource_watch_jwt
+
+# Optional dynamic materiality profile source
+# If set, this remote JSON overlays local config/materiality_map.json.
+# Supported formats: { "profiles": { ... } } or direct { ... } map.
+MATERIALITY_PROFILE_URL=
+MATERIALITY_PROFILE_PATH=config/materiality_map.json
+
+# Optional SASB-style dataset source (CSV/JSON) used to auto-build/overlay profiles
+SASB_MATERIALITY_DATA_URL=
+
+# Company-centric Knowledge Graph (Neo4j)
+KG_ENABLED=true
+KG_USE_LLM_GRAPH_TRANSFORMER=true
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your_neo4j_password
+NEO4J_DATABASE=neo4j
+```
+
+To refresh `config/materiality_map.json` from remote sources:
+```bash
+venv\Scripts\python.exe scripts\refresh_materiality_profiles.py
+```
+
+Research telemetry summary (aggregates all logged runs):
+```bash
+venv\Scripts\python.exe scripts\summarize_research_runs.py
+```
+
+Sector-wise benchmark evaluation artifacts (JSON/CSV/Markdown):
+```bash
+venv\Scripts\python.exe scripts\run_sector_benchmark.py
+```
+This now includes bootstrap confidence intervals, near-threshold counts around the 50-point decision boundary, and explicit small-sample warning bands.
+
+Append new validated ground-truth rows from `data/ground_truth_additions.csv`:
+```bash
+venv\Scripts\python.exe scripts\append_ground_truth_cases.py
+```
+
+Each generated report also persists the justification graph to `reports/fact_graphs/` as a JSON artifact for auditability and presentation review.
+Each standard/deep analysis run also builds a company-centric KG payload in `reports/company_kg/`, and will ingest it into Neo4j when the `NEO4J_*` environment variables are configured.
+
+Neo4j verification helper:
+```bash
+venv\Scripts\python.exe scripts\verify_company_kg.py --scenario shell
+venv\Scripts\python.exe scripts\verify_company_kg.py --scenario microsoft
+```
+
+Example Cypher checks:
+```cypher
+MATCH (o:Organization {name: 'Shell'})-->(g) RETURN g
+MATCH (o:Organization {name: 'Microsoft'})-[:HAS_KPI]->(k:KPI {name: 'GHG_Intensity'}) RETURN k.year, k.value ORDER BY k.year
 ```
 
 ### 3. Run the Application

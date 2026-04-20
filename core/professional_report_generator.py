@@ -3095,6 +3095,9 @@ class ProfessionalReportGenerator:
                 claim_sent = output.get("claim_sentiment", "neutral")
                 evidence_sent = output.get("evidence_sentiment", "neutral")
                 divergence_score = float(output.get("sentiment_divergence", 0) or 0)
+                gsi_score = float(output.get("gsi_score", 0) or 0)
+                boilerplate = output.get("boilerplate_assessment", {}) if isinstance(output.get("boilerplate_assessment"), dict) else {}
+                boilerplate_score = float(boilerplate.get("score", 0) or 0)
                 if divergence_score >= 0.4:
                     divergence_label = "High"
                 elif divergence_score >= 0.2:
@@ -3104,6 +3107,8 @@ class ProfessionalReportGenerator:
                 lines.append(
                     f"The sentiment analyzer processed {output.get('articles_analyzed', 0)} external sources. Corporate claim tone: {claim_sent}. "
                     f"External evidence tone: {evidence_sent}. Sentiment divergence: {divergence_label}. "
+                    f"Boilerplate language score: {boilerplate_score:.1f}/100. "
+                    f"Greenwashing Severity Index (GSI): {gsi_score:.1f}/100. "
                     f"Notable signal: {output.get('notable_signal') or 'No dominant signal identified'}."
                 )
             elif name == "temporal_analysis":
@@ -4556,6 +4561,7 @@ KEY PERFORMANCE METRICS
             "claim_analyzed": analysis_state.get("claim"),
             "scores": {
                 "greenwashing_score": scores.get("greenwashing_risk_score"),
+                "greenwashing_score_raw": risk_scoring_output.get("greenwashing_risk_score_raw"),
                 "esg_score": esg_score,
                 "esg_rating": scores.get("esg_rating"),
                 "environmental": pillar_scores.get("environmental_score"),
@@ -4566,6 +4572,11 @@ KEY PERFORMANCE METRICS
                 "confidence_penalty_applied": risk_scoring_output.get("confidence_penalty_applied", 0),
                 "report_tier": risk_scoring_output.get("report_tier"),
                 "score_disclaimer": risk_scoring_output.get("score_disclaimer", ""),
+                "decision_status": risk_scoring_output.get("decision_status"),
+                "abstain_recommended": risk_scoring_output.get("abstain_recommended", False),
+                "abstention_reason": risk_scoring_output.get("abstention_reason", ""),
+                "historical_archive_quality": risk_scoring_output.get("historical_archive_quality", {}),
+                "adversarial_audit": analysis_state.get("adversarial_audit", {}),
                 "compliance": regulatory.get("compliance_score"),
             },
             "pillar_factors": raw_scores.get("pillar_factors") or {},
@@ -5182,6 +5193,99 @@ ADDITIONAL METRICS FROM REPORTS
                         section += f"  • {key_display}: {value}\n"
                 section += "\n"
 
+        # === FACT-CENTRIC JUSTIFICATION GRAPH ===
+        fact_graph = state.get("fact_graph", {})
+        if not isinstance(fact_graph, dict) or not fact_graph:
+            risk_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "risk_scoring"]
+            if risk_outputs:
+                risk_output = risk_outputs[-1].get("output", {})
+                if isinstance(risk_output, dict):
+                    fact_graph = risk_output.get("fact_graph", {})
+
+        fg_summary = fact_graph.get("summary", {}) if isinstance(fact_graph, dict) else {}
+        if isinstance(fg_summary, dict) and fg_summary:
+            has_data = True
+            section += f"""
+FACT-CENTRIC JUSTIFICATION GRAPH
+{'â”€'*80}
+
+  â€¢ Total facts extracted: {fg_summary.get('fact_count', 0)}
+  â€¢ Verified facts: {fg_summary.get('verified_fact_count', 0)}
+  â€¢ Claim-linked facts: {fg_summary.get('claim_linked_fact_count', 0)}
+  â€¢ Contradiction facts: {fg_summary.get('contradiction_fact_count', 0)}
+  â€¢ Temporal facts: {fg_summary.get('temporal_fact_count', 0)}
+  â€¢ Decision-ready graph: {fg_summary.get('is_decision_ready', False)}
+
+"""
+
+        company_kg = state.get("company_knowledge_graph", {})
+        if isinstance(company_kg, dict) and company_kg:
+            has_data = True
+            section += f"""
+SYSTEM-WIDE COMPANY KNOWLEDGE GRAPH
+{'Ã¢â€â‚¬'*80}
+
+  - Status: {company_kg.get('status', 'UNKNOWN')}
+  - Neo4j configured: {company_kg.get('configured', False)}
+  - Organization anchor: {company_kg.get('organization_anchor', 'N/A')}
+  - Entity count: {company_kg.get('entity_count', 0)}
+  - Relationship count: {company_kg.get('relationship_count', 0)}
+  - Payload path: {company_kg.get('payload_path', 'N/A')}
+
+"""
+            reasoning_paths = company_kg.get("reasoning_paths", [])
+            if isinstance(reasoning_paths, list) and reasoning_paths:
+                section += "  - Justification paths:\n"
+                for path in reasoning_paths[:5]:
+                    section += f"    * {path}\n"
+                section += "\n"
+
+        # === HISTORICAL ARCHIVE QUALITY ===
+        archive_quality = {}
+        risk_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "risk_scoring"]
+        if risk_outputs:
+            risk_output = risk_outputs[-1].get("output", {})
+            if isinstance(risk_output, dict):
+                archive_quality = risk_output.get("historical_archive_quality", {})
+
+        if isinstance(archive_quality, dict) and archive_quality:
+            has_data = True
+            section += f"""
+HISTORICAL ARCHIVE QUALITY
+{'â”€'*80}
+
+  - Snapshot count: {archive_quality.get('snapshot_count', 0)}
+  - Archive confidence: {archive_quality.get('archive_confidence', 'N/A')}/100
+  - Quality band: {archive_quality.get('archive_quality_band', 'UNKNOWN')}
+  - Confidence penalty from archive quality: +{archive_quality.get('archive_penalty_points', 0)} pts
+
+"""
+
+        # === ADVERSARIAL AUDIT FRAMEWORK ===
+        adversarial_audit = state.get("adversarial_audit", {})
+        if not isinstance(adversarial_audit, dict) or not adversarial_audit:
+            audit_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "adversarial_audit"]
+            if audit_outputs:
+                candidate = audit_outputs[-1].get("output", {})
+                if isinstance(candidate, dict):
+                    adversarial_audit = candidate
+
+        if isinstance(adversarial_audit, dict) and adversarial_audit:
+            has_data = True
+            section += f"""
+ADVERSARIAL AUDIT FRAMEWORK
+{'â”€'*80}
+
+  - Coordination risk: {adversarial_audit.get('coordination_risk', 'N/A')} ({adversarial_audit.get('coordination_risk_band', 'UNKNOWN')})
+  - Failed agents: {adversarial_audit.get('failed_agents', 0)}
+  - Mean agent confidence: {adversarial_audit.get('mean_agent_confidence', 'N/A')}
+  - Confidence spread: {adversarial_audit.get('confidence_spread', 'N/A')}
+  - Debate conflict ratio: {adversarial_audit.get('debate_conflict_ratio', 'N/A')}
+  - Contradictions observed: {adversarial_audit.get('contradictions_count', 0)}
+  - Confidence penalty from coordination risk: +{adversarial_audit.get('confidence_penalty', 0)} pts
+
+"""
+
         # === NO DATA FOUND ===
         if not has_data:
             section += f"""
@@ -5260,6 +5364,62 @@ def professional_report_generation_node(state: Dict[str, Any]) -> Dict[str, Any]
         state["json_export"] = f.read()
     state["json_export_path"] = json_path
     print(f"[RPT] Step 5 done ({_time.time()-_t0:.1f}s)", flush=True)
+
+    print(f"[RPT] Step 6: fact-graph artifact export...", flush=True)
+    try:
+        from core.fact_graph_persistence import persist_fact_graph
+
+        fact_graph_payload = state.get("fact_graph", {})
+        if isinstance(fact_graph_payload, dict) and fact_graph_payload:
+            fact_graph_path = persist_fact_graph(
+                fact_graph=fact_graph_payload,
+                company=state.get("company", ""),
+                report_id=metadata.get("report_id"),
+            )
+            state["fact_graph_path"] = fact_graph_path
+            state["agent_outputs"].append({
+                "agent": "fact_graph_persistence",
+                "confidence": 0.9,
+                "timestamp": datetime.now().isoformat(),
+                "output": {
+                    "fact_graph_path": fact_graph_path,
+                    "node_count": len(fact_graph_payload.get("nodes", []) if isinstance(fact_graph_payload.get("nodes"), list) else []),
+                    "edge_count": len(fact_graph_payload.get("edges", []) if isinstance(fact_graph_payload.get("edges"), list) else []),
+                },
+            })
+            print(f"[RPT] Step 6 done ({_time.time()-_t0:.1f}s) -> {fact_graph_path}", flush=True)
+        else:
+            print(f"[RPT] Step 6 skipped: no fact graph payload available", flush=True)
+    except Exception as fact_graph_err:
+        print(f"[RPT] Step 6 skipped: {fact_graph_err}", flush=True)
+
+    print(f"[RPT] Step 7: research telemetry log...", flush=True)
+    try:
+        from core.research_telemetry import extract_run_metrics, append_run_metrics
+
+        run_metrics = extract_run_metrics(
+            state=state,
+            structured=structured,
+            quality=quality,
+            json_export_path=json_path,
+        )
+        telemetry_path = append_run_metrics(run_metrics, log_path="reports/research_runs.jsonl")
+        state["research_telemetry"] = run_metrics
+        state["research_telemetry_path"] = telemetry_path
+        state["agent_outputs"].append({
+            "agent": "research_telemetry",
+            "confidence": 0.9,
+            "timestamp": datetime.now().isoformat(),
+            "output": {
+                "log_path": telemetry_path,
+                "report_id": run_metrics.get("report_id"),
+                "abstain_recommended": (run_metrics.get("abstention", {}) or {}).get("abstain_recommended", False),
+                "fact_graph_path": state.get("fact_graph_path"),
+            },
+        })
+        print(f"[RPT] Step 7 done ({_time.time()-_t0:.1f}s) -> {telemetry_path}", flush=True)
+    except Exception as telemetry_err:
+        print(f"[RPT] Step 7 skipped: {telemetry_err}", flush=True)
 
     print(f"[OK] Professional report generated ({len(professional_report)} characters)")
     print(f"[OK] JSON export generated ({json_size} characters)")

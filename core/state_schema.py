@@ -70,6 +70,9 @@ class ESGState(TypedDict):
     company_reports: Optional[Dict[str, Any]]  # PDF reports with extracted ESG metrics
     carbon_extraction: Optional[Dict[str, Any]]  # Scope 1/2/3 carbon analysis
     external_esg_data: Optional[Dict[str, Any]]  # WBA/WRI benchmark enrichment used in risk scoring
+    fact_graph: Optional[Dict[str, Any]]  # Justification-centric ESG fact graph
+    fact_graph_path: Optional[str]  # Persisted JSON artifact for the fact graph
+    company_knowledge_graph: Optional[Dict[str, Any]]  # Persistent company-centric KG status/payload metadata
     
     # NEW: Advanced Detection (2026 Features)
     greenwishing_analysis: Optional[Dict[str, Any]]  # Greenwishing/greenhushing detection
@@ -77,7 +80,10 @@ class ESGState(TypedDict):
     climatebert_analysis: Optional[Dict[str, Any]]  # ClimateBERT NLP analysis  
     esg_mismatch_analysis: Optional[Dict[str, Any]]  # Promise vs Actual gap detection
     explainability_report: Optional[Dict[str, Any]]  # SHAP/LIME explanations
+    adversarial_audit: Optional[Dict[str, Any]]  # Multi-agent coordination risk diagnostics
     additional_evidence: Optional[List[Dict[str, Any]]]
+    research_telemetry: Optional[Dict[str, Any]]
+    research_telemetry_path: Optional[str]
     
     # Final output
     final_verdict: Dict[str, Any]

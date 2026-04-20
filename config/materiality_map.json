@@ -1,0 +1,151 @@
+{
+  "general": {
+    "weights": {
+      "E": 0.35,
+      "S": 0.3,
+      "G": 0.35
+    },
+    "rationale": "Balanced default profile when no stronger sector materiality signal is available.",
+    "material_topics": [
+      "climate",
+      "workforce",
+      "governance"
+    ]
+  },
+  "oil_and_gas": {
+    "weights": {
+      "E": 0.48,
+      "S": 0.2,
+      "G": 0.32
+    },
+    "rationale": "SASB-inspired weighting prioritizing emissions, transition risk, and governance oversight for extractives.",
+    "material_topics": [
+      "carbon",
+      "methane",
+      "water",
+      "transition plan",
+      "safety",
+      "governance"
+    ]
+  },
+  "coal": {
+    "weights": {
+      "E": 0.52,
+      "S": 0.18,
+      "G": 0.3
+    },
+    "rationale": "Highest environmental intensity sector with elevated governance exposure.",
+    "material_topics": [
+      "emissions",
+      "pollution",
+      "water",
+      "worker safety",
+      "closure planning"
+    ]
+  },
+  "mining": {
+    "weights": {
+      "E": 0.44,
+      "S": 0.26,
+      "G": 0.3
+    },
+    "rationale": "Mining requires stronger weighting on environmental footprint and community/workforce impacts.",
+    "material_topics": [
+      "tailings",
+      "water",
+      "biodiversity",
+      "community",
+      "worker safety"
+    ]
+  },
+  "aviation": {
+    "weights": {
+      "E": 0.42,
+      "S": 0.28,
+      "G": 0.3
+    },
+    "rationale": "Aviation remains emissions-heavy but also exposed to customer and workforce factors.",
+    "material_topics": [
+      "emissions",
+      "fuel efficiency",
+      "safety",
+      "customer impact",
+      "governance"
+    ]
+  },
+  "banking": {
+    "weights": {
+      "E": 0.18,
+      "S": 0.36,
+      "G": 0.46
+    },
+    "rationale": "SASB-inspired weighting emphasizes governance, conduct, risk controls, and financial inclusion over direct operational footprint.",
+    "material_topics": [
+      "financial inclusion",
+      "conduct",
+      "governance",
+      "ethics",
+      "financed emissions"
+    ]
+  },
+  "consumer_goods": {
+    "weights": {
+      "E": 0.3,
+      "S": 0.4,
+      "G": 0.3
+    },
+    "rationale": "Consumer sectors carry meaningful labor, supply chain, and product responsibility exposure.",
+    "material_topics": [
+      "supply chain",
+      "labor",
+      "packaging",
+      "water",
+      "product safety"
+    ]
+  },
+  "food_beverage": {
+    "weights": {
+      "E": 0.36,
+      "S": 0.34,
+      "G": 0.3
+    },
+    "rationale": "Food and beverage issuers face material water, sourcing, labor, and product impacts.",
+    "material_topics": [
+      "water",
+      "agriculture",
+      "nutrition",
+      "labor",
+      "supply chain"
+    ]
+  },
+  "technology": {
+    "weights": {
+      "E": 0.22,
+      "S": 0.3,
+      "G": 0.48
+    },
+    "rationale": "Technology issuers tend to be governance-led because privacy, ethics, and oversight are more material than direct emissions.",
+    "material_topics": [
+      "privacy",
+      "ethics",
+      "governance",
+      "ai",
+      "workforce"
+    ]
+  },
+  "software": {
+    "weights": {
+      "E": 0.18,
+      "S": 0.3,
+      "G": 0.52
+    },
+    "rationale": "Software businesses are typically governance-dominant with lower direct environmental footprint.",
+    "material_topics": [
+      "privacy",
+      "cybersecurity",
+      "ethics",
+      "governance",
+      "human capital"
+    ]
+  }
+}

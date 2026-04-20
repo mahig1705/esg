@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+from core.archive_retriever import get_historical_snapshot
 from utils.source_tracker import source_tracker
 
 class FreeDataAggregator:
@@ -949,7 +950,7 @@ class FreeDataAggregator:
     
     @source_tracker.track("Wayback Machine")
     def _fetch_wayback_machine(self, company: str, url: str = None, limit: int = 3) -> List[Dict]:
-        """Internet Archive Wayback Machine - Historical snapshots of company websites"""
+        """Historical snapshots of company websites via the multi-archive retriever."""
         try:
             time.sleep(1)
             
@@ -957,26 +958,49 @@ class FreeDataAggregator:
             if not url:
                 # Simple heuristic: company.com
                 url = f"http://www.{company.lower().replace(' ', '')}.com"
-            
-            # Get available snapshots
+            current_year = datetime.now().year
+            results = []
+            seen_urls = set()
+
+            for offset in range(limit):
+                target_year = current_year - offset - 1
+                archive_result = get_historical_snapshot(url=url, target_year=target_year, strategy="cascade")
+                snapshot_url = archive_result.get("snapshot_url")
+                source_name = archive_result.get("source")
+
+                if not snapshot_url or snapshot_url in seen_urls:
+                    continue
+
+                seen_urls.add(snapshot_url)
+                results.append({
+                    'title': f"{company} Website Snapshot - {target_year}",
+                    'snippet': f"Historical snapshot for {target_year} retrieved via {source_name or 'archive lookup'}",
+                    'url': snapshot_url,
+                    'source': source_name or 'Historical Archive',
+                    'date': f"{target_year}-01-01",
+                    'data_source_api': 'Multi-Archive Retriever',
+                    'archive_lookup_year': target_year,
+                    'archive_candidates': archive_result.get("all_results", {}),
+                })
+
+            if results:
+                print(f"   ✅ Historical archives: {len(results)} snapshots")
+                return results
+
+            # Fallback: direct Wayback CDX lookup if the multi-archive cascade yields nothing.
             api_url = f"https://web.archive.org/cdx/search/cdx?url={quote(url)}&output=json&limit={limit}"
             response = requests.get(api_url, timeout=10)
-            
+
             if response.status_code == 200:
                 data = response.json()
-                
-                if len(data) <= 1:  # Only header or no data
+                if len(data) <= 1:
                     return []
-                
-                results = []
-                for row in data[1:limit+1]:  # Skip header
+
+                for row in data[1:limit+1]:
                     timestamp = row[1]
                     original_url = row[2]
                     status_code = row[4]
-                    
-                    # Format timestamp
                     date_str = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
-                    
                     results.append({
                         'title': f"{company} Website Snapshot - {date_str}",
                         'snippet': f"Archived version from {date_str} (HTTP {status_code})",
@@ -985,9 +1009,9 @@ class FreeDataAggregator:
                         'date': date_str,
                         'data_source_api': 'Wayback Machine API'
                     })
-                
+
                 if results:
-                    print(f"   ✅ Wayback Machine: {len(results)} snapshots")
+                    print(f"   ✅ Wayback fallback: {len(results)} snapshots")
                 return results
         
         except Exception as e:

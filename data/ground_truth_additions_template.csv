@@ -1,0 +1,2 @@
+company_name,sector,jurisdiction,claim_text,greenwashing_label,confidence,source_url,year,case_type,regulatory_body,wikirate_ghg,wikirate_ghg_year,notes
+Example Corp,Technology,USA,Example sustainability claim text,1,high,https://example.com/case,2025,regulatory_action,US FTC,,,Add evidence rationale here

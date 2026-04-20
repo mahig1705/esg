@@ -13,8 +13,10 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from typing import Callable, Dict, Any
+from functools import lru_cache
 from scipy.stats import spearmanr, pointbiserialr, mannwhitneyu
 from sklearn.calibration import calibration_curve
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_curve
 import matplotlib.pyplot as plt
 
@@ -42,6 +44,116 @@ def linguistic_greenwashing_score(claim_text: str, company_name: str, sector: st
     if any(s in sector.lower() for s in high_risk_sectors):
         score += 5
     return max(0.0, min(100.0, score))
+
+
+def _safe_logit(prob: np.ndarray) -> np.ndarray:
+    clipped = np.clip(prob, 1e-4, 1 - 1e-4)
+    return np.log(clipped / (1 - clipped))
+
+
+def _safe_sigmoid(values: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-values))
+
+
+def _map_sector_label(sector: str | None) -> str | None:
+    sector_key = str(sector or "").strip().lower()
+    mapping = {
+        "oil_and_gas": "Energy",
+        "energy": "Energy",
+        "banking": "Finance",
+        "finance": "Finance",
+        "consumer_goods": "Consumer Goods",
+        "food_beverage": "Food & Beverage",
+        "aviation": "Aviation",
+        "technology": "Technology",
+        "software": "Technology",
+        "retail": "Retail",
+        "fast_fashion": "Retail/Fashion",
+        "automotive": "Automotive",
+        "manufacturing": "Manufacturing",
+    }
+    return mapping.get(sector_key) or (sector if sector else None)
+
+
+def build_threshold_weights(
+    scores: np.ndarray,
+    sectors: pd.Series | None = None,
+    target_sector: str | None = None,
+    threshold: float = 50.0,
+) -> np.ndarray:
+    """Emphasize calibration near the operational threshold and optionally for a sector."""
+    distance = np.abs(scores - threshold)
+    weights = 1.0 + (2.5 * np.exp(-(distance / 12.0)))
+
+    if sectors is not None and target_sector:
+        sector_label = _map_sector_label(target_sector)
+        if sector_label:
+            sector_matches = sectors.astype(str).str.lower() == str(sector_label).lower()
+            sector_count = int(sector_matches.sum())
+            if sector_count > 0:
+                boost = 2.0 if sector_count < 30 else 1.0
+                weights = weights + (sector_matches.astype(float).to_numpy() * boost)
+
+    return weights
+
+
+@lru_cache(maxsize=16)
+def fit_weighted_logistic_recalibration(
+    sector: str | None = None,
+    dataset_path: str | None = None,
+    threshold: float = 50.0,
+) -> Dict[str, Any]:
+    """Fit alpha/beta for logit-space recalibration with threshold-focused weights."""
+    dataset_path = dataset_path or os.path.join(os.path.dirname(__file__), "../data/ground_truth_dataset.csv")
+    df = pd.read_csv(dataset_path)
+
+    raw_scores = np.array([
+        linguistic_greenwashing_score(row["claim_text"], row["company_name"], row["sector"])
+        for _, row in df.iterrows()
+    ], dtype=float)
+    labels = df["greenwashing_label"].astype(int).to_numpy()
+    weights = build_threshold_weights(raw_scores, df["sector"], sector, threshold=threshold)
+
+    x = _safe_logit(np.clip(raw_scores / 100.0, 1e-4, 1 - 1e-4)).reshape(-1, 1)
+    model = LogisticRegression(solver="lbfgs", max_iter=1000)
+    model.fit(x, labels, sample_weight=weights)
+
+    return {
+        "alpha": float(model.intercept_[0]),
+        "beta": float(model.coef_[0][0]),
+        "dataset_size": int(len(df)),
+        "sector": _map_sector_label(sector),
+        "threshold": float(threshold),
+    }
+
+
+def recalibrate_greenwashing_score(
+    raw_score: float,
+    sector: str | None = None,
+    dataset_path: str | None = None,
+    threshold: float = 50.0,
+) -> Dict[str, Any]:
+    """Apply weighted logistic recalibration and return recalibrated score metadata."""
+    clipped_score = float(max(0.0, min(100.0, raw_score)))
+    fit = fit_weighted_logistic_recalibration(sector=sector, dataset_path=dataset_path, threshold=threshold)
+
+    raw_prob = np.clip(clipped_score / 100.0, 1e-4, 1 - 1e-4)
+    recalibrated_prob = _safe_sigmoid(
+        fit["alpha"] + (fit["beta"] * _safe_logit(np.array([raw_prob])))
+    )[0]
+    recalibrated_score = float(max(0.0, min(100.0, recalibrated_prob * 100.0)))
+
+    return {
+        "raw_score": round(clipped_score, 2),
+        "recalibrated_score": round(recalibrated_score, 2),
+        "delta": round(recalibrated_score - clipped_score, 2),
+        "alpha": round(fit["alpha"], 6),
+        "beta": round(fit["beta"], 6),
+        "threshold": fit["threshold"],
+        "dataset_size": fit["dataset_size"],
+        "sector": fit["sector"],
+        "method": "weighted_logistic_recalibration",
+    }
 
 def run_calibration(score_fn: Callable[[str, str, str], float] = None) -> Dict[str, Any]:
     """

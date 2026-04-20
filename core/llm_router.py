@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 class Provider(Enum):
     GEMINI     = "gemini"
@@ -213,6 +214,12 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
         OR("meta-llama/llama-3.3-70b-instruct:free", max_tokens=1500),
         Cerebras("qwen-3-235b-a22b-instruct-2507", json_mode=True, max_tokens=1500),
     ],
+
+    "kg_extraction": [
+        Groq("llama-3.3-70b-versatile",     json_mode=True, max_tokens=2000, temperature=0.0),
+        Gemini("gemini-2.0-flash",          json_mode=True, max_tokens=2000),
+        OR("mistralai/mistral-small-3.1-24b-instruct:free", json_mode=True, max_tokens=2000),
+    ],
 }
 
 
@@ -227,3 +234,88 @@ NO_LLM_AGENTS = {
     "evidence_retrieval",
     "realtime_monitoring",
 }
+
+
+def get_primary_model_config(agent_name: str) -> ModelConfig:
+    chain = ROUTING_TABLE.get(agent_name)
+    if not chain:
+        raise ValueError(f"No routing chain configured for agent '{agent_name}'.")
+    return chain[0]
+
+
+def render_chat_messages_as_prompt(messages: List[Any]) -> tuple[str | None, str]:
+    system_parts: List[str] = []
+    user_parts: List[str] = []
+    role_map = {
+        "system": system_parts,
+        "human": user_parts,
+        "user": user_parts,
+        "ai": user_parts,
+        "assistant": user_parts,
+    }
+    for message in messages:
+        role = getattr(message, "type", None) or getattr(message, "role", None) or "user"
+        content = getattr(message, "content", "")
+        bucket = role_map.get(str(role).lower(), user_parts)
+        bucket.append(str(content))
+    system = "\n\n".join(part for part in system_parts if part).strip() or None
+    prompt = "\n\n".join(part for part in user_parts if part).strip()
+    return system, prompt
+
+
+def get_langchain_chat_model(
+    agent_name: str,
+    system_prompt: str | None = None,
+    json_mode: bool = True,
+):
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    import asyncio
+
+    class RoutedLangChainChatModel(BaseChatModel):
+        agent_name: str
+        system_prompt: Optional[str] = None
+        force_json_mode: bool = True
+
+        @property
+        def _llm_type(self) -> str:
+            return "esglens_routed_chat_model"
+
+        @property
+        def _identifying_params(self) -> Dict[str, Any]:
+            primary = get_primary_model_config(self.agent_name)
+            return {
+                "agent_name": self.agent_name,
+                "provider": primary.provider.value,
+                "model_id": primary.model_id,
+                "json_mode": self.force_json_mode,
+            }
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            from core.llm_call import call_llm
+
+            system, prompt = render_chat_messages_as_prompt(messages)
+            effective_system = self.system_prompt or system
+            effective_prompt = prompt
+            if self.force_json_mode:
+                effective_prompt = (
+                    f"{prompt}\n\n"
+                    "Return valid JSON only. Use the allowed graph schema exactly."
+                )
+            text = asyncio.run(
+                call_llm(
+                    self.agent_name,
+                    effective_prompt,
+                    system=effective_system,
+                    use_cache=False,
+                )
+            )
+            generation = ChatGeneration(message=AIMessage(content=text))
+            return ChatResult(generations=[generation])
+
+    return RoutedLangChainChatModel(
+        agent_name=agent_name,
+        system_prompt=system_prompt,
+        force_json_mode=json_mode,
+    )

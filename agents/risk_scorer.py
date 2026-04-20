@@ -10,6 +10,7 @@ from core.llm_call import call_llm
 import asyncio
 from config.agent_prompts import RISK_SCORING_PROMPT
 from core.pillar_factors_builder import build_pillar_factors
+from core.materiality_profile_loader import load_materiality_profiles
 import json
 import os
 import logging
@@ -18,6 +19,7 @@ from ml_models.xgboost_risk_model import XGBoostRiskModel
 from ml_models.lightgbm_esg_predictor import LightGBMESGPredictor
 from ml_models.lstm_trend_predictor import get_lstm_predictor
 from ml_models.anomaly_detector import get_anomaly_detector
+from ml_models.score_calibrator import recalibrate_greenwashing_score
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ class RiskScorer:
         self.industry_baseline_risk = self.config.get('industry_baseline_risk', {})
         self.weights = self.config.get('component_weights', {})
         self.risk_thresholds = self.config.get('risk_thresholds', {})
+        self.materiality_map = self._load_materiality_map()
         
         # Load ML models
         self.ml_model = XGBoostRiskModel()
@@ -278,6 +281,143 @@ class RiskScorer:
             "social": {"is_adequate": bool(social_block.get("is_adequate", False)), **social_block},
             "governance": {"is_adequate": bool(governance_block.get("is_adequate", False)), **governance_block},
             "warnings": warnings,
+        }
+
+    def _load_materiality_map(self) -> Dict[str, Any]:
+        path = os.getenv("MATERIALITY_PROFILE_PATH", "config/materiality_map.json")
+        remote_url = os.getenv("MATERIALITY_PROFILE_URL", "").strip()
+        sasb_dataset_url = os.getenv("SASB_MATERIALITY_DATA_URL", "").strip()
+        try:
+            return load_materiality_profiles(
+                local_path=path,
+                remote_profile_url=remote_url,
+                sasb_dataset_url=sasb_dataset_url,
+                timeout=10,
+            )
+        except Exception as exc:
+            logger.warning("Materiality map load failed: %s", exc)
+            return {
+                "general": {
+                    "weights": {"E": 0.35, "S": 0.30, "G": 0.35},
+                    "rationale": "Balanced fallback materiality profile.",
+                    "material_topics": [],
+                }
+            }
+
+    @staticmethod
+    def _normalize_weight_triplet(weights: Dict[str, Any]) -> Dict[str, float]:
+        e = max(0.05, float(weights.get("E", 0.35)))
+        s = max(0.05, float(weights.get("S", 0.30)))
+        g = max(0.05, float(weights.get("G", 0.35)))
+        total = e + s + g
+        return {
+            "E": round(e / total, 4),
+            "S": round(s / total, 4),
+            "G": round(g / total, 4),
+        }
+
+    def _resolve_materiality_profile(
+        self,
+        industry: str,
+        combined_text: str,
+        all_analyses: Dict[str, Any],
+        reg_gaps: int,
+        contradictions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        base = self.materiality_map.get(industry) or self.materiality_map.get("general", {})
+        weights = dict(base.get("weights", {"E": 0.35, "S": 0.30, "G": 0.35}))
+        notes = [str(base.get("rationale") or "Balanced materiality profile.")]
+
+        ext = all_analyses.get("external_benchmarks", {}) if isinstance(all_analyses.get("external_benchmarks"), dict) else {}
+        ext_scores = ext.get("scores", {}) if isinstance(ext.get("scores"), dict) else {}
+        water_risk = self._normalize_external_score(ext_scores.get("water_risk"))
+
+        governance_hits = sum(
+            1 for c in contradictions
+            if any(term in str(c).lower() for term in ["board", "governance", "audit", "corruption", "ethic", "transparency"])
+        )
+        social_hits = sum(1 for kw in ["labor", "employee", "workers", "community", "human rights", "equity", "inclusion"] if kw in combined_text)
+        environmental_hits = sum(1 for kw in ["water", "carbon", "emission", "biodiversity", "waste", "pollution"] if kw in combined_text)
+
+        if water_risk is not None and water_risk >= 60:
+            weights["E"] = weights.get("E", 0.35) + 0.05
+            notes.append("Elevated water risk increased Environmental weight.")
+
+        if industry == "banking" and any(kw in combined_text for kw in ["financial inclusion", "lending", "access to finance", "customer fairness"]):
+            weights["S"] = weights.get("S", 0.30) + 0.05
+            notes.append("Banking inclusion/conduct signals increased Social weight.")
+
+        if governance_hits > 0 or reg_gaps >= 2:
+            weights["G"] = weights.get("G", 0.35) + 0.05
+            notes.append("Governance/regulatory gaps increased Governance weight.")
+
+        if environmental_hits >= 3 and industry in {"oil_and_gas", "coal", "mining", "food_beverage", "consumer_goods", "aviation"}:
+            weights["E"] = weights.get("E", 0.35) + 0.03
+            notes.append("Environmental topic density increased Environmental weight.")
+
+        if social_hits >= 3 and industry in {"consumer_goods", "food_beverage", "banking"}:
+            weights["S"] = weights.get("S", 0.30) + 0.03
+            notes.append("Social topic density increased Social weight.")
+
+        normalized = self._normalize_weight_triplet(weights)
+        return {
+            "industry": industry,
+            "weights": normalized,
+            "material_topics": base.get("material_topics", []),
+            "rationale": " ".join(notes),
+        }
+
+    def _assess_abstention(
+        self,
+        all_analyses: Dict[str, Any],
+        pillar_scores: Dict[str, Any],
+        confidence: float,
+        report_tier: str,
+        external_payload: Dict[str, Any],
+        archive_summary: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        evidence = all_analyses.get("evidence", [])
+        evidence_count = len(evidence) if isinstance(evidence, list) else 0
+        carbon = all_analyses.get("carbon_extraction") or all_analyses.get("carbon_results") or {}
+        carbon_quality = carbon.get("data_quality", {}) if isinstance(carbon, dict) else {}
+        carbon_status = str(carbon_quality.get("status", "")).lower() if isinstance(carbon_quality, dict) else ""
+        used_baseline = bool(carbon.get("used_baseline_estimate", False)) if isinstance(carbon, dict) else False
+        sg_ready = bool(pillar_scores.get("data_adequacy", {}).get("overall_ready", False)) if isinstance(pillar_scores.get("data_adequacy"), dict) else False
+        external_enabled = bool(external_payload.get("enabled")) if isinstance(external_payload, dict) else False
+        fact_graph = all_analyses.get("fact_graph", {})
+        fact_summary = fact_graph.get("summary", {}) if isinstance(fact_graph, dict) else {}
+        verified_facts = int(fact_summary.get("verified_fact_count", 0) or 0)
+        linked_facts = int(fact_summary.get("claim_linked_fact_count", 0) or 0)
+        archive_summary = archive_summary if isinstance(archive_summary, dict) else {}
+        archive_snapshot_count = int(archive_summary.get("snapshot_count", 0) or 0)
+        archive_confidence = float(archive_summary.get("archive_confidence", 50.0) or 50.0)
+
+        triggers = []
+        if report_tier == "TIER_3":
+            triggers.append("Report tier is preliminary.")
+        if confidence < 0.67:
+            triggers.append("Confidence is below decision-grade threshold.")
+        if evidence_count < 4:
+            triggers.append("Too few evidence sources were retrieved.")
+        if used_baseline or carbon_status in {"insufficient_data", "estimated_baseline"}:
+            triggers.append("Carbon data is estimated or insufficiently verified.")
+        if not sg_ready:
+            triggers.append("Social/governance evidence is not decision-ready.")
+        if not external_enabled and evidence_count < 6:
+            triggers.append("External benchmark enrichment was unavailable for sparse evidence.")
+        if verified_facts < 4:
+            triggers.append("Too few verified facts in the justification graph.")
+        if linked_facts < 1:
+            triggers.append("No claim-linked facts were established in the graph.")
+        if archive_snapshot_count > 0 and archive_confidence < 55:
+            triggers.append("Historical snapshot quality is weak or inconsistent across archives.")
+
+        abstain = len(triggers) >= 2
+        return {
+            "abstain_recommended": abstain,
+            "decision_status": "ABSTAIN_RECOMMENDED" if abstain else "SCORED",
+            "reason": " ".join(triggers[:3]) if triggers else "",
+            "triggers": triggers,
         }
 
     @staticmethod
@@ -542,18 +682,17 @@ class RiskScorer:
         if industry_penalty != 0:
             print(f"   Industry Adjustment ({industry}): {-industry_penalty:+.1f} points")
         
-        # Industry-normalized pillar weights (light-touch calibration, MSCI-like materiality)
-        pillar_weights = {
-            "oil_and_gas": (0.45, 0.25, 0.30),
-            "coal": (0.50, 0.20, 0.30),
-            "mining": (0.45, 0.25, 0.30),
-            "aviation": (0.40, 0.30, 0.30),
-            "banking": (0.25, 0.30, 0.45),
-            "consumer_goods": (0.30, 0.40, 0.30),
-            "food_beverage": (0.32, 0.38, 0.30),
-        }.get(industry, (0.35, 0.30, 0.35))
-        
-        w_e, w_s, w_g = pillar_weights
+        materiality_profile = self._resolve_materiality_profile(
+            industry=industry,
+            combined_text=combined_text,
+            all_analyses=all_analyses,
+            reg_gaps=reg_gaps,
+            contradictions=contradictions,
+        )
+
+        w_e = materiality_profile["weights"]["E"]
+        w_s = materiality_profile["weights"]["S"]
+        w_g = materiality_profile["weights"]["G"]
         overall_esg = (environmental_score * w_e) + (social_score * w_s) + (governance_score * w_g)
         
         print(f"   Overall ESG: {overall_esg:.1f}/100 (E×{w_e:.2f} + S×{w_s:.2f} + G×{w_g:.2f})")
@@ -565,6 +704,7 @@ class RiskScorer:
             "overall_esg_score": round(overall_esg, 1),
             "industry_adjustment": round(industry_penalty, 1),
             "pillar_weighting": {"E": w_e, "S": w_s, "G": w_g},
+            "materiality_profile": materiality_profile,
             "data_adequacy": sg_adequacy,
             "external_benchmark_adjustments": external_adjustments,
             "external_benchmarks_used": bool(external_adjustments),
@@ -591,6 +731,12 @@ class RiskScorer:
         external_scores = external_payload.get("scores", {})
         if not isinstance(external_scores, dict):
             external_scores = {}
+        fact_graph_payload = all_analyses.get("fact_graph", {})
+        if not isinstance(fact_graph_payload, dict):
+            fact_graph_payload = {}
+        fact_graph_summary = fact_graph_payload.get("summary", {})
+        if not isinstance(fact_graph_summary, dict):
+            fact_graph_summary = {}
         
         # Step 0: Calculate ESG pillar scores FIRST (PRIMARY rating source)
         pillar_scores = self.calculate_pillar_scores(all_analyses)
@@ -1097,6 +1243,7 @@ class RiskScorer:
         )
         
         evidence_count = len(evidence_list) if isinstance(evidence_list, list) else 0
+        archive_summary = self._summarize_archive_evidence(all_analyses)
         credibility_metrics = (
             all_analyses.get("credibility_analysis", {}).get("aggregate_metrics", {})
             if isinstance(all_analyses.get("credibility_analysis"), dict)
@@ -1113,6 +1260,8 @@ class RiskScorer:
             source_quality=source_quality,
             pillar_coverage=pillar_coverage,
         )
+        confidence_penalty += float(archive_summary.get("archive_penalty_points", 0.0) or 0.0)
+        confidence_penalty = round(min(25.0, confidence_penalty), 1)
 
         if confidence_penalty >= 15:
             report_tier = "TIER_3"
@@ -1131,7 +1280,22 @@ class RiskScorer:
             f"Treat as {tier_label}."
         ) if confidence_penalty >= 8 else ""
 
-        final_risk_level = self._risk_level_from_greenwashing_score(final_score, company)
+        abstention = self._assess_abstention(
+            all_analyses=all_analyses,
+            pillar_scores=pillar_scores,
+            confidence=confidence,
+            report_tier=report_tier,
+            external_payload=external_payload,
+            archive_summary=archive_summary,
+        )
+        if abstention["abstain_recommended"]:
+            score_disclaimer = (
+                (score_disclaimer + " ") if score_disclaimer else ""
+            ) + "Abstention recommended: evidence is insufficient for a decision-grade conclusion."
+
+        recalibration = recalibrate_greenwashing_score(final_score, sector=industry)
+        final_score_recalibrated = float(recalibration.get("recalibrated_score", final_score))
+        final_risk_level = self._risk_level_from_greenwashing_score(final_score_recalibrated, company)
 
         result = {
             "company": company,
@@ -1143,8 +1307,9 @@ class RiskScorer:
             "base_risk_score": round(base_risk, 1),
             "industry_adjustment": round(industry_adjustment, 1),
             "peer_adjustment": round(peer_modifier, 1),
-            "greenwashing_score": final_score,
-            "greenwashing_risk_score": final_score,
+            "greenwashing_score": final_score_recalibrated,
+            "greenwashing_risk_score": final_score_recalibrated,
+            "greenwashing_risk_score_raw": final_score,
             "esg_score": round(esg_score, 1),
             "risk_level": final_risk_level,
             "rating_grade": rating_grade,
@@ -1159,8 +1324,14 @@ class RiskScorer:
             "social_governance_decision_ready": bool(sg_adequacy.get("overall_ready", False)),
             "report_tier": report_tier,
             "score_disclaimer": score_disclaimer,
+            "abstain_recommended": abstention["abstain_recommended"],
+            "decision_status": abstention["decision_status"],
+            "abstention_reason": abstention["reason"],
+            "abstention_triggers": abstention["triggers"],
             "high_carbon_greenwashing_flag": high_carbon_greenwashing_flag,
             "esg_override_active": override_ml,
+            "recalibration": recalibration,
+            "historical_archive_quality": archive_summary,
             "external_benchmarks": {
                 "enabled": bool(external_payload.get("enabled") or external_sources),
                 "sources": external_sources,
@@ -1169,6 +1340,10 @@ class RiskScorer:
                 "wba_indicator_count": external_payload.get("wba_indicator_count", 0),
                 "hq_coordinates": external_payload.get("hq_coordinates", {}),
                 "error": external_payload.get("error"),
+            },
+            "fact_graph": {
+                "available": bool(fact_graph_summary),
+                "summary": fact_graph_summary,
             },
         }
         if score_disclaimer:
@@ -1218,7 +1393,11 @@ class RiskScorer:
             e = float(result["pillar_scores"].get("environmental_score", 0.0) or 0.0)
             s = float(result["pillar_scores"].get("social_score", 0.0) or 0.0)
             g = float(result["pillar_scores"].get("governance_score", 0.0) or 0.0)
-            overall_esg = round(max(0.0, min(100.0, e * 0.35 + s * 0.30 + g * 0.35)), 1)
+            materiality_weights = result["pillar_scores"].get("pillar_weighting", {"E": 0.35, "S": 0.30, "G": 0.35})
+            w_e_sync = float(materiality_weights.get("E", 0.35) or 0.35)
+            w_s_sync = float(materiality_weights.get("S", 0.30) or 0.30)
+            w_g_sync = float(materiality_weights.get("G", 0.35) or 0.35)
+            overall_esg = round(max(0.0, min(100.0, e * w_e_sync + s * w_s_sync + g * w_g_sync)), 1)
             result["pillar_scores"]["overall_esg_score"] = overall_esg
             result["esg_score"] = overall_esg
 
@@ -1238,12 +1417,16 @@ class RiskScorer:
                 )
 
             greenwashing_risk = final_score
-            risk_level = self._risk_level_from_greenwashing_score(final_score, company)
+            recalibration = recalibrate_greenwashing_score(final_score, sector=industry)
+            final_score_recalibrated = float(recalibration.get("recalibrated_score", final_score))
+            risk_level = self._risk_level_from_greenwashing_score(final_score_recalibrated, company)
 
-            result["greenwashing_score"] = final_score
-            result["greenwashing_risk_score"] = final_score
+            result["greenwashing_score"] = final_score_recalibrated
+            result["greenwashing_risk_score"] = final_score_recalibrated
+            result["greenwashing_risk_score_raw"] = final_score
+            result["recalibration"] = recalibration
             result["rating_grade"], _ = self.esg_score_to_rating(overall_esg)
-            result["risk_level"] = self._risk_level_from_greenwashing_score(final_score, company)
+            result["risk_level"] = self._risk_level_from_greenwashing_score(final_score_recalibrated, company)
             print(f"   ✅ Pillar factors populated with sub-indicator breakdown")
         except Exception as pf_err:
             print(f"   ⚠️ Pillar factors build failed: {pf_err}")
@@ -1297,15 +1480,17 @@ class RiskScorer:
             }
         
         print(f"\n✅ Final Risk Assessment:")
-        print(f"   Greenwashing Risk: {greenwashing_risk:.1f}/100 ({risk_source})")
+        print(f"   Greenwashing Risk: {result.get('greenwashing_risk_score', greenwashing_risk):.1f}/100 ({risk_source})")
+        print(f"   Raw Risk Before Recalibration: {result.get('greenwashing_risk_score_raw', greenwashing_risk):.1f}/100")
         print(f"   ESG Score: {esg_score:.1f}/100 (Grade: {rating_grade})")
         print(f"   Risk Level: {risk_level}")
         print(f"   Methodology: {'ESG Pillar Primary' if not use_ml_prediction else 'Pillar + ML Refinement'}")
         
         print(f"\n📊 ESG Pillar Breakdown:")
-        print(f"   Environmental: {pillar_scores['environmental_score']}/100 (35% weight)")
-        print(f"   Social: {pillar_scores['social_score']}/100 (30% weight)")
-        print(f"   Governance: {pillar_scores['governance_score']}/100 (35% weight)")
+        dynamic_weights = pillar_scores.get("pillar_weighting", {"E": 0.35, "S": 0.30, "G": 0.35})
+        print(f"   Environmental: {pillar_scores['environmental_score']}/100 ({dynamic_weights.get('E', 0.35):.2f} weight)")
+        print(f"   Social: {pillar_scores['social_score']}/100 ({dynamic_weights.get('S', 0.30):.2f} weight)")
+        print(f"   Governance: {pillar_scores['governance_score']}/100 ({dynamic_weights.get('G', 0.35):.2f} weight)")
         print(f"   Overall ESG: {pillar_scores['overall_esg_score']}/100")
         
         if ml_prediction:
@@ -1330,9 +1515,10 @@ class RiskScorer:
             print(f"   Purpose: Flagging for review")
         
         print(f"\n📊 ESG Pillar Breakdown:")
-        print(f"   Environmental: {pillar_scores['environmental_score']}/100 (35% weight)")
-        print(f"   Social: {pillar_scores['social_score']}/100 (30% weight)")
-        print(f"   Governance: {pillar_scores['governance_score']}/100 (35% weight)")
+        dynamic_weights = pillar_scores.get("pillar_weighting", {"E": 0.35, "S": 0.30, "G": 0.35})
+        print(f"   Environmental: {pillar_scores['environmental_score']}/100 ({dynamic_weights.get('E', 0.35):.2f} weight)")
+        print(f"   Social: {pillar_scores['social_score']}/100 ({dynamic_weights.get('S', 0.30):.2f} weight)")
+        print(f"   Governance: {pillar_scores['governance_score']}/100 ({dynamic_weights.get('G', 0.35):.2f} weight)")
         print(f"   Overall ESG: {pillar_scores['overall_esg_score']}/100")
         
         if ml_prediction:
@@ -1379,6 +1565,73 @@ class RiskScorer:
             penalty += 2.0
 
         return round(min(25.0, penalty), 1)
+
+    def _summarize_archive_evidence(self, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
+        """Estimate reliability of historical snapshots used in evidence."""
+        evidence = all_analyses.get("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+
+        archive_entries = []
+        for ev in evidence:
+            if not isinstance(ev, dict):
+                continue
+            api_name = str(ev.get("data_source_api", "") or "").lower()
+            source = str(ev.get("source", "") or "").lower()
+            candidates = ev.get("archive_candidates", {}) if isinstance(ev.get("archive_candidates"), dict) else {}
+
+            is_archive = (
+                "archive" in api_name
+                or "wayback" in api_name
+                or "archive" in source
+                or "wayback" in source
+            )
+            if not is_archive:
+                continue
+
+            primary = str(ev.get("source", "") or "").lower()
+            if "wayback" in primary:
+                source_score = 0.78
+            elif "archive_today" in primary or "archive today" in primary or "archive.is" in primary or "archive.ph" in primary:
+                source_score = 0.72
+            elif "memento" in primary:
+                source_score = 0.66
+            else:
+                source_score = 0.60
+
+            candidates_count = len([v for v in candidates.values() if v]) if candidates else 0
+            if candidates_count >= 2:
+                source_score += 0.08
+            elif candidates_count == 0:
+                source_score -= 0.06
+
+            archive_entries.append(max(0.1, min(0.95, source_score)))
+
+        if not archive_entries:
+            return {
+                "snapshot_count": 0,
+                "archive_confidence": 50.0,
+                "archive_quality_band": "UNKNOWN",
+                "archive_penalty_points": 0.0,
+            }
+
+        mean_conf = (sum(archive_entries) / max(1, len(archive_entries))) * 100.0
+        if mean_conf >= 75:
+            band = "HIGH"
+            penalty = 0.0
+        elif mean_conf >= 60:
+            band = "MEDIUM"
+            penalty = 1.5
+        else:
+            band = "LOW"
+            penalty = 3.5
+
+        return {
+            "snapshot_count": len(archive_entries),
+            "archive_confidence": round(mean_conf, 1),
+            "archive_quality_band": band,
+            "archive_penalty_points": penalty,
+        }
 
     def _risk_level_from_greenwashing_score(self, score: float, company: Optional[str] = None) -> str:
         """Map greenwashing score bands to LOW/MODERATE/HIGH."""
@@ -1538,10 +1791,24 @@ Industry:"""
         # 4. Sentiment Divergence
         sentiment_list = analyses.get('sentiment_analysis', [])
         if sentiment_list:
-            divergences = [s.get('divergence_score', 0) for s in sentiment_list]
-            components['sentiment_divergence'] = int(sum(divergences) / len(divergences))
+            divergences = [
+                float(s.get('divergence_score', 0) or 0)
+                for s in sentiment_list
+                if isinstance(s, dict)
+            ]
+            gsi_scores = [
+                float(s.get('gsi_score', 0) or 0)
+                for s in sentiment_list
+                if isinstance(s, dict)
+            ]
+            base_divergence = (sum(divergences) / max(1, len(divergences))) if divergences else 50.0
+            base_gsi = (sum(gsi_scores) / max(1, len(gsi_scores))) if gsi_scores else 0.0
+            # Blend classic divergence with discrepancy-centric GSI.
+            components['sentiment_divergence'] = int(min(100, (base_divergence * 0.65) + (base_gsi * 0.35)))
+            components['narrative_discrepancy_gsi'] = int(min(100, base_gsi))
         else:
             components['sentiment_divergence'] = 50
+            components['narrative_discrepancy_gsi'] = 40
         
         # 5. Historical Pattern
         historical = analyses.get('historical_analysis', {})
