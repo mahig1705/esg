@@ -618,6 +618,27 @@ class RiskScorer:
             governance_score = round((governance_score * 0.40) + (50.0 * 0.60), 1)
             print("   ⚠️ Governance pillar confidence-limited due to insufficient free-source evidence")
 
+        # SEC Metrics Integration
+        external = all_analyses.get("external_benchmarks", {})
+        sec_metrics = external.get("sec_metrics", {}) if isinstance(external, dict) else {}
+        if sec_metrics:
+            print(f"   🏛️ SEC Governance Metrics detected:")
+            if sec_metrics.get("board_diversity_pct") is not None:
+                div = sec_metrics["board_diversity_pct"]
+                print(f"      - Board Diversity: {div}%")
+                if div > 30: governance_score = min(100, governance_score + 5)
+            if sec_metrics.get("executive_pay_ratio") is not None:
+                ratio = sec_metrics["executive_pay_ratio"]
+                print(f"      - CEO Pay Ratio: {ratio}:1")
+                if ratio > 300: governance_score = max(0, governance_score - 5)
+            if sec_metrics.get("executive_comp_esg_links"):
+                print(f"      - Executive Compensation linked to ESG: YES")
+                governance_score = min(100, governance_score + 3)
+            
+            if sec_metrics.get("conflict_minerals_human_rights"):
+                print(f"      - Conflict Minerals Human Rights Controls: YES")
+                social_score = min(100, social_score + 4)
+
         # Cross-pillar contradiction and regulatory gap penalties.
         high_severity_count = sum(
             1 for c in contradictions
@@ -1354,6 +1375,11 @@ class RiskScorer:
             evidence_list = all_analyses.get("evidence", [])
             if not isinstance(evidence_list, list):
                 evidence_list = []
+            external_payload = all_analyses.get("external_benchmarks", {})
+            if isinstance(external_payload, dict):
+                extra_evidence = external_payload.get("supplemental_evidence", [])
+                if isinstance(extra_evidence, list) and extra_evidence:
+                    evidence_list = evidence_list + extra_evidence
             carbon_data_for_factors = all_analyses.get("carbon_extraction") or all_analyses.get("carbon_results") or {}
             result["pillar_factors"] = build_pillar_factors(
                 company=company,
@@ -2000,6 +2026,16 @@ Industry:"""
             g = float(pillar_scores.get("governance_score", 50) or 50)
             if g >= 70:
                 positives.append("Strong governance signal (board/ethics/disclosure indicators)")
+            
+            # SEC Metrics in Reasons
+            external = analyses.get("external_benchmarks", {})
+            sec = external.get("sec_metrics", {}) if isinstance(external, dict) else {}
+            if sec:
+                if sec.get("board_diversity_pct"):
+                    positives.append(f"Documented board diversity ({sec['board_diversity_pct']}%) via SEC DEF 14A")
+                if sec.get("executive_comp_esg_links"):
+                    positives.append("Executive compensation formally linked to ESG targets")
+
             if s >= 70:
                 positives.append("Strong social signal (labor, safety, DEI, community indicators)")
             if e >= 70:

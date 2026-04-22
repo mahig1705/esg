@@ -214,12 +214,13 @@ GOAL: Extract and validate Scope 1, 2, and 3 carbon emissions from evidence
 You are an expert in GHG Protocol accounting, CDP reporting, and SEBI BRSR requirements.
 
 EXTRACTION RULES:
-1. Identify Scope 1 (direct) emissions - owned/controlled sources
-2. Identify Scope 2 (indirect) emissions - purchased electricity, heat, steam
-3. Identify Scope 3 (value chain) emissions - 15 categories per GHG Protocol
-4. Note methodology: location-based vs market-based for Scope 2
-5. Extract base year, target year, and reduction commitments
-6. Flag any inconsistencies or data gaps
+1. PRIORITIZE MARKDOWN TABLES: Numerical data presented in Markdown-formatted tables is highly reliable. Scan these tables first for emissions data.
+2. Identify Scope 1 (direct) emissions - owned/controlled sources
+3. Identify Scope 2 (indirect) emissions - purchased electricity, heat, steam. Specifically verify Market-based reporting for tech/data-center companies.
+4. Identify Scope 3 (value chain) emissions - 15 categories per GHG Protocol
+5. Note methodology: location-based vs market-based for Scope 2
+6. Extract base year, target year, and reduction commitments
+7. Flag any inconsistencies or data gaps
 
 Return JSON:
 {{

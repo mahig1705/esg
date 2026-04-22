@@ -495,7 +495,8 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
         claim_dict = {
             "claim_id": "C1",
             "claim_text": claim_text,
-            "category": "carbon"
+            "category": "carbon",
+            "industry": industry,
         }
         
         # Extract carbon data from evidence
@@ -1251,6 +1252,7 @@ def _enrich_external_esg_benchmarks(state: ESGState) -> Dict[str, Any]:
                     "water_risk": None,
                 },
                 wba_api_key=os.getenv("WBA_API_KEY"),
+                industry=state.get("industry", ""),
             )
             if isinstance(filled, dict) and filled.get("_sources"):
                 break
@@ -1272,6 +1274,8 @@ def _enrich_external_esg_benchmarks(state: ESGState) -> Dict[str, Any]:
         sources = filled.get("_sources", {}) if isinstance(filled, dict) else {}
         indicators = filled.get("_wba_indicators", {}) if isinstance(filled, dict) else {}
         hq_coords = filled.get("_wba_hq_coordinates", {}) if isinstance(filled, dict) else {}
+        sec_metrics = filled.get("_sec_metrics", {}) if isinstance(filled, dict) else {}
+        supplemental_evidence = filled.get("_supplemental_evidence", []) if isinstance(filled, dict) else []
         enrichment_error = None
         if not sources:
             enrichment_error = (
@@ -1288,6 +1292,8 @@ def _enrich_external_esg_benchmarks(state: ESGState) -> Dict[str, Any]:
             "wba_indicator_count": len(indicators) if isinstance(indicators, dict) else 0,
             "query_company_name": selected_company_name,
             "query_attempts": candidate_names,
+            "sec_metrics": sec_metrics,
+            "supplemental_evidence": supplemental_evidence if isinstance(supplemental_evidence, list) else [],
             "error": enrichment_error,
         }
     except Exception as exc:

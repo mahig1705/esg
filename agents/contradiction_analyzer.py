@@ -1,12 +1,15 @@
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from core.company_knowledge_graph import CompanyKnowledgeGraph
+from core.archive_retriever import get_historical_snapshot
 from core.llm_call import call_llm
 from config.agent_prompts import CONTRADICTION_ANALYSIS_PROMPT
 import asyncio
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,8 @@ class ContradictionAnalyzer:
         graph_context = CompanyKnowledgeGraph().hybrid_retrieve(company=company, claim_text=claim)
         graph_evidence = graph_context.get("graph_evidence", []) if isinstance(graph_context, dict) else []
         reasoning_paths = graph_context.get("reasoning_paths", []) if isinstance(graph_context, dict) else []
+        historical_archive = self._retrieve_historical_claim_evidence(company=company, claim=claim, evidence=evidence)
+        historical_evidence = historical_archive.get("evidence", []) if isinstance(historical_archive, dict) else []
 
         prioritized = list(contradicting_evidence or [])
         if not prioritized:
@@ -60,6 +65,7 @@ class ContradictionAnalyzer:
                 e for e in (evidence or [])
                 if str(e.get("stance", e.get("relationship_to_claim", ""))).lower() == "contradicts"
             ]
+        prioritized.extend(historical_evidence)
         prioritized.extend(
             ev for ev in graph_evidence
             if str(ev.get("relationship_to_claim", "")).lower() == "contradicts"
@@ -67,8 +73,11 @@ class ContradictionAnalyzer:
 
         evidence_contradictions = self._extract_contradictions_from_evidence(prioritized)
 
+        # Combine standard and historical evidence for LLM scan to detect temporal violations
+        combined_evidence = list(evidence or []) + historical_evidence
+        
         try:
-            llm_found = self._run_llm_contradiction_scan(claim=claim, evidence=evidence, temperature=0)
+            llm_found = self._run_llm_contradiction_scan(claim=claim, evidence=combined_evidence, temperature=0)
         except Exception as exc:
             logger.warning("LLM contradiction scan failed: %s", exc)
             llm_found = []
@@ -94,8 +103,147 @@ class ContradictionAnalyzer:
             "confidence": 0.5 if not merged else 0.8,
             "graph_reasoning_paths": reasoning_paths,
             "graph_evidence_count": len(graph_evidence),
+            "historical_archive_lookup": historical_archive,
             "abstain_recommended": abstain,
             "abstention_reason": "ABSTAIN: Insufficient verifiable evidence in Knowledge Graph" if abstain else None,
+        }
+
+    def _extract_target_claim_year(self, claim: str, evidence: List[Dict[str, Any]]) -> int:
+        years = [int(y) for y in re.findall(r"\b(20[0-2]\d)\b", str(claim or ""))]
+        if years:
+            return min(years)
+
+        for item in evidence or []:
+            date_text = str(item.get("date") or item.get("publishedAt") or item.get("published_at") or "")
+            match = re.search(r"\b(20[0-2]\d)\b", date_text)
+            if match:
+                return int(match.group(1))
+
+        return max(2000, datetime.now().year - 2)
+
+    def _candidate_archive_urls(self, company: str, evidence: List[Dict[str, Any]]) -> List[str]:
+        urls: List[str] = []
+
+        def _add(url: str):
+            candidate = str(url or "").strip()
+            if candidate and candidate not in urls and candidate.startswith("http"):
+                urls.append(candidate)
+
+        for item in evidence or []:
+            url = item.get("url") if isinstance(item, dict) else ""
+            source_type = str(item.get("source_type", "")) if isinstance(item, dict) else ""
+            if "Company-Controlled" in source_type or company.lower() in str(url).lower():
+                _add(str(url))
+
+        slug = re.sub(r"[^a-z0-9]+", "", company.lower())
+        if slug:
+            _add(f"https://www.{slug}.com")
+            _add(f"https://www.{slug}.com/sustainability")
+            _add(f"https://www.{slug}.com/environment")
+
+        known_urls = {
+            "microsoft": [
+                "https://www.microsoft.com/en-us/corporate-responsibility/sustainability",
+                "https://blogs.microsoft.com/blog/tag/sustainability/",
+            ],
+            "apple": [
+                "https://www.apple.com/environment/",
+                "https://www.apple.com/newsroom/",
+            ],
+        }
+        for key, candidates in known_urls.items():
+            if key in company.lower():
+                for url in candidates:
+                    _add(url)
+
+        return urls[:6]
+
+    def _choose_archive_candidate(self, archive_result: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        if not isinstance(archive_result, dict):
+            return None, None
+
+        all_results = archive_result.get("all_results", {})
+        if not isinstance(all_results, dict):
+            return archive_result.get("snapshot_url"), archive_result.get("source")
+
+        for source_name in ("memento", "archive_today", "wayback"):
+            candidate = all_results.get(source_name)
+            if candidate:
+                return candidate, source_name
+
+        return archive_result.get("snapshot_url"), archive_result.get("source")
+
+    def _fetch_snapshot_text(self, snapshot_url: str) -> str:
+        try:
+            resp = requests.get(snapshot_url, timeout=15, headers={"User-Agent": "ESGLens historical retrieval"})
+            resp.raise_for_status()
+            text = re.sub(r"\s+", " ", resp.text)
+            return text
+        except Exception:
+            return ""
+
+    def _retrieve_historical_claim_evidence(self, company: str, claim: str, evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
+        target_year = self._extract_target_claim_year(claim, evidence)
+        urls = self._candidate_archive_urls(company, evidence)
+        snapshots: List[Dict[str, Any]] = []
+        historical_evidence: List[Dict[str, Any]] = []
+
+        claim_keywords = [
+            kw for kw in ["carbon", "net zero", "emission", "renewable", "climate", "pledge", "target"]
+            if kw in str(claim or "").lower()
+        ] or ["carbon", "net zero", "emission", "climate"]
+
+        for url in urls:
+            archive_result = get_historical_snapshot(url=url, target_year=target_year, strategy="all")
+            snapshot_url, source_name = self._choose_archive_candidate(archive_result)
+            snapshots.append({
+                "url": url,
+                "target_year": target_year,
+                "snapshot_url": snapshot_url,
+                "source": source_name,
+                "all_results": archive_result.get("all_results", {}) if isinstance(archive_result, dict) else {},
+            })
+            if not snapshot_url:
+                continue
+
+            snapshot_text = self._fetch_snapshot_text(snapshot_url)
+            if not snapshot_text:
+                continue
+
+            lower = snapshot_text.lower()
+            if not any(keyword in lower for keyword in claim_keywords):
+                continue
+
+            snippet = ""
+            for keyword in claim_keywords:
+                idx = lower.find(keyword)
+                if idx != -1:
+                    start = max(0, idx - 180)
+                    end = min(len(snapshot_text), idx + 320)
+                    snippet = clean_snippet_text(snapshot_text[start:end])
+                    break
+
+            if snippet:
+                historical_evidence.append({
+                    "title": f"{company} historical archive snapshot ({target_year})",
+                    "snippet": snippet,
+                    "relevant_text": snippet,
+                    "url": snapshot_url,
+                    "source": source_name or "memento",
+                    "source_name": f"{(source_name or 'archive').title()} snapshot",
+                    "source_type": "Historical Archive",
+                    "date": f"{target_year}-01-01",
+                    "origin": "historical_archive",
+                    "relationship_to_claim": "supports",
+                })
+
+        return {
+            "claim_year": target_year,
+            "candidate_urls": urls,
+            "snapshots": snapshots,
+            "evidence": historical_evidence,
+            "snapshot_count": sum(1 for item in snapshots if item.get("snapshot_url")),
+            "memento_available": any(item.get("source") == "memento" for item in snapshots),
         }
 
     def analyze_claim(self, claim: Dict[str, Any], evidence: List[Dict[str, Any]]) -> Dict[str, Any]:

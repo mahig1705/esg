@@ -36,11 +36,12 @@ _DEFAULT_SOCIAL = [
 ]
 
 _DEFAULT_GOVERNANCE = [
-    {"name": "Board Independence",                 "weight": 0.25, "keywords": ["board independence", "independent director", "non-executive"]},
-    {"name": "Executive Pay Ratio",                "weight": 0.20, "keywords": ["executive pay", "ceo pay", "compensation ratio", "remuneration"]},
+    {"name": "Board Independence",                 "weight": 0.20, "keywords": ["board independence", "independent director", "non-executive"]},
+    {"name": "Board Diversity",                    "weight": 0.20, "keywords": ["board diversity", "women directors", "female directors", "diverse directors"]},
+    {"name": "Executive Pay Ratio",                "weight": 0.20, "keywords": ["executive pay", "ceo pay", "pay ratio", "compensation ratio", "remuneration"]},
     {"name": "Anti-Corruption Policies",           "weight": 0.20, "keywords": ["anti-corruption", "bribery", "corruption", "ethics", "compliance"]},
-    {"name": "Whistleblower Mechanisms",           "weight": 0.15, "keywords": ["whistleblower", "grievance", "reporting mechanism", "speak up"]},
-    {"name": "ESG Disclosure Quality",             "weight": 0.20, "keywords": ["disclosure", "transparency", "reporting", "brsr", "gri", "tcfd"]},
+    {"name": "Whistleblower Mechanisms",           "weight": 0.10, "keywords": ["whistleblower", "grievance", "reporting mechanism", "speak up"]},
+    {"name": "ESG Disclosure Quality",             "weight": 0.10, "keywords": ["disclosure", "transparency", "reporting", "brsr", "gri", "tcfd"]},
 ]
 
 # Industry-specific ADDITIONAL sub-indicators
@@ -134,6 +135,49 @@ _INDUSTRY_EXTRA = {
 
 # Structured scoring rules to replace keyword-only scoring for selected indicators.
 _STRUCTURED_SCORING_RULES: Dict[str, Dict[str, Any]] = {
+    "Board Diversity": {
+        "primary_metric": "Board gender/diversity representation (%)",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 45.0,
+            "above_average": 35.0,
+            "average": 25.0,
+            "below_average": 15.0,
+        },
+        "metric_patterns": [
+            r"board diversity[^.\n]{0,50}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,60}board diversity",
+            r"(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,60}(?:women|female|diverse)[^.\n]{0,40}board",
+            r"(\d{1,2})\s+of\s+(\d{1,2})\s+(?:directors|board members)[^.\n]{0,40}(?:women|female|diverse)",
+        ],
+        "claim_keywords": ["board diversity", "women directors", "female directors", "diverse directors"],
+        "policy_keywords": ["nominating committee", "board composition", "director nominee", "proxy statement"],
+        "source_hint": "Proxy statement / annual report board composition disclosure",
+        "gri_alignment": ["GRI 405-1"],
+        "sasb_alignment": ["SASB CG-AA-330a.1"],
+    },
+    "Executive Pay Ratio": {
+        "primary_metric": "CEO pay ratio",
+        "metric_unit": "ratio",
+        "direction": "lower_better",
+        "thresholds": {
+            "top_decile": 100.0,
+            "above_average": 150.0,
+            "average": 250.0,
+            "below_average": 400.0,
+        },
+        "metric_patterns": [
+            r"pay ratio[^0-9]{0,30}(\d{1,4})\s*(?::|to)\s*1",
+            r"ceo pay ratio[^0-9]{0,30}(\d{1,4})\s*(?::|to)\s*1",
+            r"ratio of the annual total compensation[^0-9]{0,60}(\d{1,4})\s*(?::|to)\s*1",
+        ],
+        "claim_keywords": ["executive pay", "ceo pay", "pay ratio", "compensation ratio", "remuneration"],
+        "policy_keywords": ["proxy statement", "compensation discussion", "def 14a", "executive compensation"],
+        "source_hint": "SEC proxy statement / remuneration report",
+        "gri_alignment": ["GRI 2-21"],
+        "sasb_alignment": ["SASB CG-AA-330a.2"],
+    },
     "Renewable Energy Transition": {
         "primary_metric": "Renewable energy share (% of total energy consumption)",
         "metric_unit": "%",
@@ -277,8 +321,15 @@ def _extract_best_metric_value(
         for pattern in metric_patterns:
             for match in re.finditer(pattern, ev_text, flags=re.IGNORECASE):
                 try:
-                    value = float(match.group(1))
-                except (TypeError, ValueError, IndexError):
+                    if match.lastindex and match.lastindex >= 2 and "of" in match.group(0).lower():
+                        numerator = float(match.group(1))
+                        denominator = float(match.group(2))
+                        if denominator == 0:
+                            continue
+                        value = (numerator / denominator) * 100.0
+                    else:
+                        value = float(match.group(1))
+                except (TypeError, ValueError, IndexError, ZeroDivisionError):
                     continue
 
                 if metric_unit == "%" and (value < 0 or value > 100):

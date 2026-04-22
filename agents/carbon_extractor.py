@@ -481,8 +481,10 @@ class CarbonExtractor:
         industry_hint = self._derive_industry_hint(company, extraction_text, claim)
         chunk_texts = []
         for chunk in report_chunks or []:
-            if isinstance(chunk, dict) and chunk.get("text"):
-                chunk_texts.append(str(chunk.get("text")))
+            if isinstance(chunk, dict):
+                chunk_text = chunk.get("page_content") or chunk.get("text")
+                if chunk_text:
+                    chunk_texts.append(str(chunk_text))
         for ev in evidence or []:
             if isinstance(ev, dict):
                 snippet = ev.get("snippet") or ev.get("relevant_text") or ev.get("content")
@@ -886,6 +888,22 @@ class CarbonExtractor:
     def _extract_scope_emissions_from_chunks(self, chunks: List[str], scope_number: int, industry_hint: str) -> Dict[str, Any]:
         """Extract Scope 1/2/3 emissions from chunk corpus with unit-aware parsing."""
         number_pattern = r"([\d,]+\.?\d*|\d*\.\d+)"
+        high_precision_patterns = {
+            1: [
+                r"total\s+scope\s+1\s+emissions[^0-9]{0,20}([\d,]+(?:\.\d+)?)",
+                r"\|\s*total\s+scope\s+1\s+emissions\s*\|[^|]*\|\s*([\d,]+(?:\.\d+)?)",
+            ],
+            2: [
+                r"\|\s*market\s+based\s*\|[^|]*\|\s*([\d,]+(?:\.\d+)?)",
+                r"\|\s*location\s+based\s*\|[^|]*\|\s*([\d,]+(?:\.\d+)?)",
+                r"scope\s+2[\s\S]{0,120}?market\s+based[^0-9]{0,20}([\d,]+(?:\.\d+)?)",
+                r"scope\s+2[\s\S]{0,160}?location\s+based[^0-9]{0,20}([\d,]+(?:\.\d+)?)",
+            ],
+            3: [
+                r"total\s+scope\s+3\s+emission[s]?[^0-9]{0,20}([\d,]+(?:\.\d+)?)",
+                r"\|\s*total\s+scope\s+3\s+emission[s]?\s*\|[^|]*\|\s*([\d,]+(?:\.\d+)?)",
+            ],
+        }
         scope_patterns = {
             1: [
                 rf"scope\s*1\s*(?:direct\s*)?(?:emissions?\s*)?[:\-]?\s*{number_pattern}",
@@ -932,8 +950,29 @@ class CarbonExtractor:
         }
 
         candidates: List[Dict[str, Any]] = []
+        precision_candidates: List[Dict[str, Any]] = []
         for chunk in chunks or []:
             chunk_lower = (chunk or "").lower()
+
+            for pattern in high_precision_patterns.get(scope_number, []):
+                for match in re.finditer(pattern, chunk_lower):
+                    try:
+                        value = float(match.group(1).replace(",", ""))
+                    except ValueError:
+                        continue
+
+                    year_match = re.search(r"20(1[5-9]|2[0-9])", chunk_lower)
+                    year = int(year_match.group(0)) if year_match else None
+                    precision_candidates.append(
+                        {
+                            "value": value,
+                            "year": year,
+                            "source_text": match.group(0),
+                            "context": chunk_lower[max(0, match.start() - 60):min(len(chunk_lower), match.end() + 120)],
+                            "confidence": "high",
+                        }
+                    )
+
             for pattern in scope_patterns.get(scope_number, []):
                 for match in re.finditer(pattern, chunk_lower):
                     start = max(0, match.start() - 80)
@@ -954,6 +993,9 @@ class CarbonExtractor:
                             "confidence": "high" if year else "medium",
                         }
                     )
+
+        if precision_candidates:
+            candidates = precision_candidates + candidates
 
         if not candidates:
             return {"value": None, "year": None, "source": None, "confidence": "none", "candidates_found": 0}
@@ -1320,7 +1362,7 @@ class CarbonExtractor:
         """Combine parsed report chunks with year hints."""
         texts = []
         for chunk in report_chunks[:60]:
-            chunk_text = str(chunk.get("text", ""))
+            chunk_text = str(chunk.get("page_content") or chunk.get("text", ""))
             if not chunk_text:
                 continue
             year = chunk.get("year", "unknown")

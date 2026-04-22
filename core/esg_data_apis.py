@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
+from datetime import datetime
 from typing import Any
 
 import httpx
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +28,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 USER_AGENT = (
-    "ESGLens/1.0 (greenwashing-verification-platform; "
-    "https://github.com/mahig1705/esg; research-use)"
+    "ESGLens/1.0 AdminContact@esglens.com"
 )
 _TIMEOUT = 20  # seconds
 _WBA_RATE_LIMIT_SECONDS = 1.05
@@ -183,6 +185,31 @@ def _pick_best_company_match(rows: list[dict[str, Any]], company_name: str) -> d
     return sorted(rows, key=_rank)[0]
 
 
+def _is_sdg2000_company(row: dict[str, Any]) -> bool:
+    """Best-effort flag for WBA SDG2000 coverage."""
+    if not isinstance(row, dict):
+        return False
+
+    for key, value in row.items():
+        key_l = str(key).lower()
+        value_l = str(value or "").lower()
+        if "sdg2000" in key_l or "sdg2000" in value_l:
+            return True
+        if "list" in key_l or "universe" in key_l or "benchmark" in key_l:
+            if "sdg" in value_l and "2000" in value_l:
+                return True
+    return False
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_row_score(row: dict[str, Any]) -> float | None:
     preferred_keys = [
         "benchmark_score_numerical",
@@ -317,6 +344,7 @@ def get_wba_company_assessment(
         "hq_coordinates": {"lat": None, "lon": None},
         "raw": None,
         "error": None,
+        "sdg2000": False,
     }
 
     api_key = (api_key or os.environ.get("WBA_API_KEY") or "").strip()
@@ -350,9 +378,12 @@ def get_wba_company_assessment(
                 logger.info("WBA: no company rows found for '%s'", company_name)
                 return result
 
-            company = _pick_best_company_match(companies, company_name) or companies[0]
+            sdg2000_companies = [row for row in companies if _is_sdg2000_company(row)]
+            company_pool = sdg2000_companies or companies
+            company = _pick_best_company_match(company_pool, company_name) or company_pool[0]
             company_id = company.get("company_id") or company.get("id")
             result["company_name"] = str(company.get("company_name") or company.get("name") or company_name)
+            result["sdg2000"] = _is_sdg2000_company(company)
             lat, lon = _extract_company_coordinates(company)
             result["hq_coordinates"] = {"lat": lat, "lon": lon}
 
@@ -427,6 +458,355 @@ def get_wba_company_assessment(
     except (ValueError, KeyError, TypeError) as exc:
         result["error"] = f"WBA parse error: {exc}"
         logger.warning("WBA: failed to parse response for '%s' — %s", company_name, exc)
+
+    return result
+
+
+def _score_governance_from_sec_metrics(metrics: dict[str, Any]) -> float | None:
+    score = 0.0
+    signals = 0
+
+    if metrics.get("executive_comp_esg_links") is True:
+        score += 35.0
+        signals += 1
+    elif metrics.get("executive_comp_esg_links") is False:
+        score += 10.0
+        signals += 1
+
+    if metrics.get("board_diversity_pct") is not None:
+        diversity = float(metrics["board_diversity_pct"])
+        score += min(30.0, max(10.0, diversity * 0.75))
+        signals += 1
+
+    if metrics.get("executive_pay_ratio") is not None:
+        ratio = float(metrics["executive_pay_ratio"])
+        if ratio <= 100:
+            score += 25.0
+        elif ratio <= 200:
+            score += 18.0
+        else:
+            score += 10.0
+        signals += 1
+
+    if signals == 0:
+        return None
+    return round(max(0.0, min(100.0, score)), 3)
+
+
+def _score_social_from_form_sd(metrics: dict[str, Any]) -> float | None:
+    if not metrics.get("conflict_minerals_human_rights"):
+        return None
+
+    score = 55.0
+    if metrics.get("supplier_due_diligence"):
+        score += 15.0
+    if metrics.get("smelter_refiner_disclosure"):
+        score += 10.0
+    return round(min(100.0, score), 3)
+
+
+def _find_filing_document_url(client: httpx.Client, filing_index_url: str, headers: dict[str, str]) -> str | None:
+    try:
+        resp = client.get(filing_index_url, headers=headers)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        table = soup.find("table", class_="tableFile")
+        if not table:
+            return None
+
+        for row in table.find_all("tr")[1:]:
+            cols = row.find_all("td")
+            if len(cols) < 4:
+                continue
+            href = cols[2].find("a")
+            doc_type = cols[3].get_text(" ", strip=True).upper()
+            if not href:
+                continue
+            link = href.get("href", "")
+            if not link:
+                continue
+            if doc_type in {"DEF 14A", "DEFA14A", "SD", "EX-1.01", "10-K"} or link.endswith((".htm", ".html", ".txt")):
+                return f"https://www.sec.gov{link}" if link.startswith("/") else link
+    except Exception:
+        return None
+    return None
+
+
+def _lookup_sec_company_record(client: httpx.Client, company_name: str) -> dict[str, Any] | None:
+    try:
+        resp = client.get("https://www.sec.gov/files/company_tickers.json")
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        rows = [value for value in payload.values() if isinstance(value, dict)]
+    elif isinstance(payload, list):
+        rows = [value for value in payload if isinstance(value, dict)]
+
+    target = _normalize_name(company_name)
+    if not rows:
+        return None
+
+    def _rank(row: dict[str, Any]) -> tuple[int, int]:
+        title = _normalize_name(row.get("title"))
+        exact = 0 if title == target else 1
+        contains = 0 if target and target in title else 1
+        return (exact, contains)
+
+    ranked = sorted(rows, key=_rank)
+    best = ranked[0]
+    if _rank(best) == (1, 1):
+        return None
+    return best
+
+
+def _get_sec_submission_filing(
+    client: httpx.Client,
+    company_name: str,
+    form_type: str,
+) -> dict[str, Any] | None:
+    company_record = _lookup_sec_company_record(client, company_name)
+    if not company_record:
+        return None
+
+    cik = str(company_record.get("cik_str") or "").strip()
+    if not cik:
+        return None
+
+    cik_padded = cik.zfill(10)
+    try:
+        resp = client.get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+
+    recent = payload.get("filings", {}).get("recent", {})
+    forms = recent.get("form", []) or []
+    accession_numbers = recent.get("accessionNumber", []) or []
+    filing_dates = recent.get("filingDate", []) or []
+    primary_docs = recent.get("primaryDocument", []) or []
+
+    for idx, form in enumerate(forms):
+        if str(form).upper() != form_type.upper():
+            continue
+        accession = str(accession_numbers[idx]).replace("-", "")
+        primary_doc = str(primary_docs[idx])
+        filing_date = str(filing_dates[idx])
+        filing_url = (
+            f"https://www.sec.gov/Archives/edgar/data/"
+            f"{int(cik)}/{accession}/{primary_doc}"
+        )
+        return {
+            "filing_url": filing_url,
+            "filing_date": filing_date,
+            "company_title": company_record.get("title"),
+            "ticker": company_record.get("ticker"),
+            "cik": cik,
+        }
+
+    return None
+
+
+def _extract_def14a_metrics(text: str) -> dict[str, Any]:
+    text_norm = re.sub(r"\s+", " ", text or " ")
+    lower = text_norm.lower()
+
+    executive_comp_esg_links = None
+    comp_match = re.search(
+        r"(executive compensation|annual incentive|cash incentive|bonus|compensation committee)[^.]{0,220}"
+        r"(esg|environmental|sustainability|climate|human capital|diversity)",
+        lower,
+        flags=re.IGNORECASE,
+    )
+    if comp_match:
+        executive_comp_esg_links = True
+
+    pay_ratio = None
+    for pattern in [
+        r"pay ratio[^0-9]{0,30}(\d{1,4})\s*(?::|to)\s*1",
+        r"ratio of the annual total compensation[^0-9]{0,60}(\d{1,4})\s*(?::|to)\s*1",
+        r"ceo pay ratio[^0-9]{0,30}(\d{1,4})\s*(?::|to)\s*1",
+        r"ceo to median employee pay ratio[^0-9]{0,30}(\d{1,4})\s*(?::|to)\s*1",
+        r"pay ratio(?:.*?is)?\s*(\d{1,4})\s*(?::|to)\s*1",
+    ]:
+        match = re.search(pattern, lower, flags=re.IGNORECASE)
+        if match:
+            pay_ratio = _safe_int(match.group(1))
+            break
+
+    board_diversity_pct = None
+    for pattern in [
+        r"(\d{1,3}(?:\.\d+)?)\s*%\s+(?:of\s+)?(?:our\s+)?board[^.]{0,60}(?:women|female|diverse)",
+        r"(?:women|female|diverse)[^.]{0,60}board[^.]{0,40}(\d{1,3}(?:\.\d+)?)\s*%",
+        r"board diversity.*?(?:is|of|at)\s*(\d{1,3}(?:\.\d+)?)\s*%",
+        r"(\d{1,3}(?:\.\d+)?)\s*%\s+board diversity",
+    ]:
+        match = re.search(pattern, lower, flags=re.IGNORECASE)
+        if match:
+            try:
+                board_diversity_pct = float(match.group(1))
+                break
+            except ValueError:
+                continue
+
+    if board_diversity_pct is None:
+        diversity_count_match = re.search(
+            r"(\d{1,2})\s+of\s+(\d{1,2})\s+(?:director|board member)[^.]{0,40}(?:women|female|diverse)",
+            lower,
+            flags=re.IGNORECASE,
+        )
+        if diversity_count_match:
+            numerator = _safe_int(diversity_count_match.group(1))
+            denominator = _safe_int(diversity_count_match.group(2))
+            if numerator is not None and denominator:
+                board_diversity_pct = round((numerator / denominator) * 100.0, 1)
+
+    metrics = {
+        "executive_comp_esg_links": executive_comp_esg_links,
+        "executive_pay_ratio": pay_ratio,
+        "board_diversity_pct": board_diversity_pct,
+    }
+    return metrics
+
+
+def _extract_form_sd_metrics(text: str) -> dict[str, Any]:
+    lower = re.sub(r"\s+", " ", text or " ").lower()
+    return {
+        "conflict_minerals_human_rights": (
+            "conflict minerals" in lower and
+            any(term in lower for term in ["human rights", "responsible sourcing", "due diligence", "drc", "cobalt", "tin", "tantalum", "tungsten", "gold"])
+        ),
+        "supplier_due_diligence": any(term in lower for term in ["due diligence", "supplier survey", "supplier engagement", "rmi", "oecd"]),
+        "smelter_refiner_disclosure": any(term in lower for term in ["smelter", "refiner", "cmrt"]),
+    }
+
+
+def get_sec_governance_social_signals(company_name: str, industry: str | None = None) -> dict[str, Any]:
+    """Pull governance/social disclosures from SEC DEF 14A and Form SD."""
+    result: dict[str, Any] = {
+        "found": False,
+        "governance_score": None,
+        "social_score": None,
+        "evidence": [],
+        "metrics": {},
+        "filings": [],
+        "error": None,
+    }
+
+    headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+    encoded_company = company_name.strip()
+    is_tech = "tech" in str(industry or "").lower() or any(
+        token in company_name.lower() for token in ["apple", "microsoft", "google", "alphabet", "meta", "intel", "nvidia", "adobe", "cisco", "oracle"]
+    )
+
+    try:
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, headers=headers) as client:
+            filing_types = ["DEF 14A"] + (["SD"] if is_tech else [])
+            for filing_type in filing_types:
+                submission_filing = _get_sec_submission_filing(client, encoded_company, filing_type)
+                filing_date = None
+                document_url = None
+
+                if submission_filing:
+                    filing_date = submission_filing.get("filing_date")
+                    document_url = submission_filing.get("filing_url")
+
+                if not document_url:
+                    search_resp = client.get(
+                        "https://www.sec.gov/cgi-bin/browse-edgar",
+                        params={
+                            "action": "getcompany",
+                            "company": encoded_company,
+                            "type": filing_type,
+                            "owner": "exclude",
+                            "count": 5,
+                        },
+                    )
+                    search_resp.raise_for_status()
+                    soup = BeautifulSoup(search_resp.text, "html.parser")
+                    table = soup.find("table", class_="tableFile2")
+                    if not table:
+                        continue
+
+                    first_row = table.find_all("tr")[1] if len(table.find_all("tr")) > 1 else None
+                    if first_row is None:
+                        continue
+
+                    cols = first_row.find_all("td")
+                    if len(cols) < 4:
+                        continue
+
+                    filing_date = cols[3].get_text(" ", strip=True)
+                    filing_link = cols[1].find("a")
+                    if not filing_link:
+                        continue
+
+                    filing_index_url = filing_link.get("href", "")
+                    if filing_index_url.startswith("/"):
+                        filing_index_url = f"https://www.sec.gov{filing_index_url}"
+
+                    document_url = _find_filing_document_url(client, filing_index_url, headers) or filing_index_url
+
+                if not document_url:
+                    continue
+
+                doc_resp = client.get(document_url)
+                doc_resp.raise_for_status()
+                filing_text = BeautifulSoup(doc_resp.text, "html.parser").get_text(" ", strip=True)
+
+                filing_payload = {
+                    "filing_type": filing_type,
+                    "filing_date": filing_date,
+                    "filing_url": document_url,
+                }
+                result["filings"].append(filing_payload)
+
+                if filing_type == "DEF 14A":
+                    metrics = _extract_def14a_metrics(filing_text)
+                    result["metrics"].update(metrics)
+                    governance_score = _score_governance_from_sec_metrics(metrics)
+                    if governance_score is not None:
+                        result["governance_score"] = governance_score
+
+                    if metrics.get("executive_comp_esg_links") is not None:
+                        snippet = "Proxy statement reviewed for executive compensation ESG links."
+                        if metrics.get("executive_pay_ratio") is not None:
+                            snippet += f" CEO pay ratio disclosed at approximately {metrics['executive_pay_ratio']}:1."
+                        if metrics.get("board_diversity_pct") is not None:
+                            snippet += f" Board diversity disclosed at {metrics['board_diversity_pct']}%."
+                        result["evidence"].append({
+                            "title": f"{company_name} DEF 14A governance disclosure",
+                            "snippet": snippet,
+                            "url": document_url,
+                            "source": "SEC EDGAR",
+                            "source_name": "SEC DEF 14A",
+                            "source_type": "Government/Regulatory",
+                            "date": filing_date or datetime.utcnow().date().isoformat(),
+                        })
+
+                if filing_type == "SD":
+                    metrics = _extract_form_sd_metrics(filing_text)
+                    result["metrics"].update(metrics)
+                    social_score = _score_social_from_form_sd(metrics)
+                    if social_score is not None:
+                        result["social_score"] = social_score
+                        result["evidence"].append({
+                            "title": f"{company_name} Form SD supply-chain human rights disclosure",
+                            "snippet": "Form SD indicates conflict minerals due diligence / responsible sourcing controls relevant to supply-chain human rights.",
+                            "url": document_url,
+                            "source": "SEC EDGAR",
+                            "source_name": "SEC Form SD",
+                            "source_type": "Government/Regulatory",
+                            "date": filing_date or datetime.utcnow().date().isoformat(),
+                        })
+
+        result["found"] = bool(result["evidence"] or result["governance_score"] is not None or result["social_score"] is not None)
+    except Exception as exc:
+        result["error"] = f"SEC filing lookup failed: {exc}"
 
     return result
 
@@ -659,6 +1039,7 @@ def fill_missing_pillars(
     lon: float | None = None,
     existing_scores: dict[str, Any] | None = None,
     wba_api_key: str | None = None,
+    industry: str | None = None,
 ) -> dict[str, Any]:
     """Fill missing Social, Governance, and Water-Risk pillar scores.
 
@@ -725,6 +1106,23 @@ def fill_missing_pillars(
                 "WBA lookup failed for '%s': %s",
                 company_name, wba.get("error"),
             )
+
+    # --- SEC: fill governance/social from DEF 14A / Form SD when WBA is absent or incomplete ---
+    if social_missing or governance_missing:
+        sec = get_sec_governance_social_signals(company_name, industry=industry)
+        if sec.get("found"):
+            if governance_missing and sec.get("governance_score") is not None:
+                scores["governance"] = sec["governance_score"]
+                sources["governance"] = "SEC_DEF_14A"
+            if social_missing and sec.get("social_score") is not None:
+                scores["social"] = sec["social_score"]
+                sources["social"] = "SEC_Form_SD"
+
+            scores["_sec_metrics"] = sec.get("metrics", {})
+            scores["_sec_filings"] = sec.get("filings", [])
+            scores["_supplemental_evidence"] = sec.get("evidence", [])
+        elif sec.get("error"):
+            logger.warning("SEC governance/social lookup failed for '%s': %s", company_name, sec.get("error"))
 
     # --- WRI: fill water risk ---
     # Auto-derive HQ coordinates from WBA company data when caller doesn't provide them.

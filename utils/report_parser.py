@@ -7,7 +7,7 @@ Designed for PHASE 4 of enterprise-grade ESG analysis pipeline
 import uuid
 import json
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from pathlib import Path
 import logging
@@ -46,7 +46,8 @@ class ReportParserCache:
     def _generate_cache_key(self, local_path: str) -> str:
         """Generate cache key from file path"""
         import hashlib
-        path_hash = hashlib.md5(local_path.encode()).hexdigest()[:12]
+        cache_version = "v5_dual_channel_header_fix"
+        path_hash = hashlib.md5(f"{cache_version}:{local_path}".encode()).hexdigest()[:12]
         return f"parsed_{path_hash}"
     
     def _get_cache_path(self, cache_key: str) -> Path:
@@ -140,6 +141,11 @@ class ReportParserService:
     # Chunking parameters
     CHUNK_SIZE = 2000
     CHUNK_OVERLAP = 200
+    TABLE_TRIGGER_KEYWORDS = [
+        "tco2e", "co2e", "emissions", "scope 1", "scope 2", "scope 3",
+        "ghg", "greenhouse gas", "mwh", "metric tons", "metric tonnes",
+        "fleet efficiency", "energy consumption", "fuel burn"
+    ]
     
     # ========================================
     # OPTIMIZATION: ESG SECTION DETECTION
@@ -219,6 +225,7 @@ class ReportParserService:
         """Initialize PDF extraction libraries"""
         self.pdfplumber_available = False
         self.pypdf_available = False
+        self.camelot_available = False
         
         try:
             import pdfplumber
@@ -246,7 +253,37 @@ class ReportParserService:
         except ImportError:
             print("⚠️ LangChain text splitter not available")
             self.text_splitter = None
+            
+        # Initialize Camelot for table extraction
+        try:
+            import camelot
+            import pandas as pd
+            self.camelot_available = True
+            print("✅ camelot-py loaded")
+        except ImportError:
+            print("⚠️ camelot-py not available")
+            self.camelot_available = False
     
+    def _has_table_trigger_keywords(self, text: str) -> bool:
+        """Return True when a page likely contains extractable ESG metrics tables."""
+        text_lower = (text or "").lower()
+        return any(keyword in text_lower for keyword in self.TABLE_TRIGGER_KEYWORDS)
+
+    def _is_esg_relevant_page(self, text: str, page_number: int) -> bool:
+        """Lightweight page-level ESG relevance filter for PDF chunking."""
+        text_lower = (text or "").lower()
+        if not text_lower.strip():
+            return False
+
+        if any(keyword in text_lower for keyword in self.CARBON_MANDATORY_KEYWORDS):
+            return True
+
+        esg_hits = sum(1 for keyword in self.ESG_SECTION_KEYWORDS if keyword in text_lower)
+        if esg_hits >= 1:
+            return True
+
+        return page_number <= 3
+
     # [FIX 4] FINANCIAL METRIC VALIDATION
     # Revenue pattern matching and validation rules
     REVENUE_PATTERNS = {
@@ -614,6 +651,11 @@ class ReportParserService:
                             continue
                 
                 combined_text = "\n\n".join(text_parts)
+                
+                # Extract and append structured tables via Camelot
+                table_text = self._extract_tables_with_camelot(local_path)
+                if table_text:
+                    combined_text += table_text
                 return combined_text
                 
             except Exception as e:
@@ -653,6 +695,11 @@ class ReportParserService:
                             continue
                 
                 combined_text = "\n\n".join(text_parts)
+                
+                # Extract and append structured tables via Camelot
+                table_text = self._extract_tables_with_camelot(local_path)
+                if table_text:
+                    combined_text += table_text
                 return combined_text
                 
             except Exception as e:
@@ -660,6 +707,39 @@ class ReportParserService:
                 return ""
         
         print(f"         ❌ No PDF library available")
+        return ""
+        
+    def _extract_tables_with_camelot(self, local_path: str) -> str:
+        """
+        Extract tables using Camelot-py (Computer Vision) and convert to Markdown.
+        """
+        if not getattr(self, 'camelot_available', False):
+            return ""
+
+        markdown_tables = []
+        try:
+            import camelot
+            print(f"         📊 Extracting tables with Camelot (this may take a moment)...")
+            
+            # First pass: 'lattice' flavor for grid tables (lines separating cells)
+            lattice_tables = camelot.read_pdf(local_path, pages='all', flavor='lattice', suppress_stdout=True)
+            for i, table in enumerate(lattice_tables):
+                if not table.df.empty:
+                    md_table = table.df.to_markdown(index=False)
+                    markdown_tables.append(f"### Grid Table {i+1}\n{md_table}\n")
+                    
+            # Second pass: 'stream' flavor for whitespace-separated tables
+            stream_tables = camelot.read_pdf(local_path, pages='all', flavor='stream', suppress_stdout=True)
+            for i, table in enumerate(stream_tables):
+                if not table.df.empty:
+                    md_table = table.df.to_markdown(index=False)
+                    markdown_tables.append(f"### Whitespace Table {i+1}\n{md_table}\n")
+                    
+        except Exception as e:
+            print(f"         ⚠️ Camelot table extraction failed: {e}")
+
+        if markdown_tables:
+            return "\n\n--- EXTRACTED TABLES (CAMELOT) ---\n\n" + "\n".join(markdown_tables)
         return ""
     
     def _extract_text_from_html(self, local_path: str) -> str:
@@ -975,6 +1055,468 @@ class ReportParserService:
         
         print(f"         [Parser] Created {len(chunks_list)} chunks")
         
+        return chunks_list
+
+    def parse_reports(self, company_name: str,
+                     downloaded_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Dual-channel parser override.
+
+        Pass 1 keeps the narrative extraction flow.
+        Pass 2 uses Camelot selectively on ESG-numeric pages and appends markdown
+        tables into the relevant chunk content so downstream agents can reason over
+        both prose and quantitative disclosures.
+        """
+
+        print(f"\n{'='*70}")
+        print(f"REPORT PARSER SERVICE")
+        print(f"{'='*70}")
+        print(f"Company: {company_name}")
+        print(f"Reports to parse: {len(downloaded_reports)}")
+
+        all_chunks: List[Dict[str, Any]] = []
+
+        for i, report in enumerate(downloaded_reports, 1):
+            print(f"\n   [{i}/{len(downloaded_reports)}] Parsing report...")
+
+            local_path = report.get("local_path", "")
+            year = report.get("year")
+            report_type = report.get("report_type", "unknown")
+            content_type = report.get("content_type", "pdf")
+            report_title = report.get("title", "")
+            filename = Path(local_path).name if local_path else ""
+
+            if not local_path or not Path(local_path).exists():
+                print(f"      File not found: {local_path}")
+                continue
+
+            cached_chunks = report_parser_cache.get_chunks(local_path)
+            if cached_chunks:
+                all_chunks.extend(cached_chunks)
+                print(f"      Added {len(cached_chunks)} chunks from cache")
+                continue
+
+            if content_type == "html":
+                print(f"      Parsing HTML page...")
+                text = self._extract_text_from_html(local_path)
+
+                if not text or not text.strip():
+                    print(f"      No text extracted, skipping")
+                    continue
+
+                cleaned_text = self._clean_text(text)
+                esg_text = self._detect_esg_sections(cleaned_text)
+                chunks = self._chunk_text(
+                    esg_text,
+                    company_name=company_name,
+                    year=year,
+                    report_type=report_type,
+                    source="html_esg_page",
+                    filename=filename,
+                    report_title=report_title,
+                )
+            else:
+                print(f"      Running dual-channel PDF ingestion...")
+                text, chunks = self._extract_pdf_chunks_dual_channel(
+                    local_path=local_path,
+                    company_name=company_name,
+                    year=year,
+                    report_type=report_type,
+                    source="esg_report",
+                    filename=filename,
+                    report_title=report_title,
+                )
+                if not text or not text.strip():
+                    print(f"      No text extracted, skipping")
+                    continue
+
+            print(f"      Extracted {len(text)} characters")
+            print(f"      Created {len(chunks)} chunks")
+
+            report_parser_cache.store_chunks(local_path, chunks)
+            all_chunks.extend(chunks)
+
+        print(f"\n{'='*70}")
+        print(f"PARSING SUMMARY")
+        print(f"{'='*70}")
+        print(f"Total reports processed: {len(downloaded_reports)}")
+        print(f"Total chunks generated: {len(all_chunks)}")
+
+        if all_chunks:
+            chunks_by_year: Dict[Any, int] = {}
+            table_chunks = 0
+            for chunk in all_chunks:
+                chunk_year = chunk.get("year", "unknown")
+                chunks_by_year[chunk_year] = chunks_by_year.get(chunk_year, 0) + 1
+                if chunk.get("contains_table"):
+                    table_chunks += 1
+
+            print(f"\nChunks by year:")
+            for chunk_year in sorted([y for y in chunks_by_year.keys() if y != 'unknown'] +
+                                     [y for y in chunks_by_year.keys() if y == 'unknown']):
+                print(f"   {chunk_year}: {chunks_by_year[chunk_year]} chunks")
+            print(f"Chunks with attached tables: {table_chunks}")
+
+        print(f"{'='*70}\n")
+        return all_chunks
+
+    def _extract_pdf_chunks_dual_channel(self,
+                                         local_path: str,
+                                         company_name: str,
+                                         year: Optional[int],
+                                         report_type: str,
+                                         source: str,
+                                         filename: str = "",
+                                         report_title: str = "") -> Tuple[str, List[Dict[str, Any]]]:
+        """Page-aware narrative extraction plus targeted Camelot table ingestion."""
+        page_records = self._extract_pdf_pages(local_path)
+        if not page_records:
+            return "", []
+
+        combined_pages: List[str] = []
+        all_chunks: List[Dict[str, Any]] = []
+
+        for page_record in page_records:
+            page_number = int(page_record.get("page_number", 0) or 0)
+            raw_text = page_record.get("text", "") or ""
+            if not raw_text.strip():
+                continue
+
+            cleaned_text = self._clean_text(raw_text)
+            if not cleaned_text:
+                continue
+
+            if not self._is_esg_relevant_page(cleaned_text, page_number):
+                continue
+
+            table_markdown = ""
+            if self._has_table_trigger_keywords(cleaned_text):
+                table_markdown = self._extract_tables_with_camelot(local_path, page_number)
+
+            contains_table = bool(table_markdown.strip())
+            page_content = cleaned_text
+            if contains_table:
+                page_content = (
+                    f"{cleaned_text}\n\n"
+                    f"### Extracted Table Data (Page {page_number})\n"
+                    f"{table_markdown}"
+                )
+
+            combined_pages.append(page_content)
+
+            page_chunks = self._chunk_text(
+                page_content,
+                company_name=company_name,
+                year=year,
+                report_type=report_type,
+                source=source,
+                filename=filename,
+                report_title=report_title,
+                extra_metadata={
+                    "page_number": page_number,
+                    "contains_table": contains_table,
+                    "table_markdown": table_markdown,
+                    "page_content": page_content,
+                },
+            )
+            all_chunks.extend(page_chunks)
+
+        return "\n\n".join(combined_pages), all_chunks
+
+    def _extract_pdf_pages(self, local_path: str) -> List[Dict[str, Any]]:
+        """Extract page-wise text from the PDF with pdfplumber first and pypdf fallback."""
+        if self.pdfplumber_available:
+            try:
+                import pdfplumber
+
+                page_records = []
+                with pdfplumber.open(local_path) as pdf:
+                    total_pages = len(pdf.pages)
+                    pages_to_process = min(total_pages, self.MAX_PAGES)
+
+                    for page_num, page in enumerate(pdf.pages[:pages_to_process], 1):
+                        if page_num % self.PAGE_LOG_INTERVAL == 0 or page_num == 1:
+                            print(f"         Processing page {page_num}/{pages_to_process}...")
+                        try:
+                            page_records.append({
+                                "page_number": page_num,
+                                "text": page.extract_text() or "",
+                            })
+                        except Exception as e:
+                            print(f"         Error on page {page_num}: {e}")
+                return page_records
+            except Exception as e:
+                print(f"         pdfplumber extraction failed: {e}, trying pypdf...")
+
+        if self.pypdf_available:
+            try:
+                from pypdf import PdfReader
+
+                page_records = []
+                with open(local_path, 'rb') as f:
+                    reader = PdfReader(f)
+                    total_pages = len(reader.pages)
+                    pages_to_process = min(total_pages, self.MAX_PAGES)
+
+                    for page_num in range(pages_to_process):
+                        display_page = page_num + 1
+                        if display_page % self.PAGE_LOG_INTERVAL == 0 or display_page == 1:
+                            print(f"         Processing page {display_page}/{pages_to_process}...")
+                        try:
+                            page_records.append({
+                                "page_number": display_page,
+                                "text": reader.pages[page_num].extract_text() or "",
+                            })
+                        except Exception as e:
+                            print(f"         Error on page {display_page}: {e}")
+                return page_records
+            except Exception as e:
+                print(f"         pypdf extraction failed: {e}")
+
+        return []
+
+    def _extract_text_from_pdf(self, local_path: str) -> str:
+        """Compatibility helper returning concatenated page text only."""
+        page_records = self._extract_pdf_pages(local_path)
+        return "\n\n".join(
+            record.get("text", "")
+            for record in page_records
+            if (record.get("text", "") or "").strip()
+        )
+
+    def _extract_tables_with_camelot(self, local_path: str, page_number: Optional[int] = None) -> str:
+        """Extract lattice tables from selected pages and convert them into markdown."""
+        if not getattr(self, 'camelot_available', False):
+            return self._extract_tables_with_pymupdf(local_path, page_number)
+
+        import os
+
+        pages = str(page_number) if page_number else "all"
+        markdown_tables: List[str] = []
+        temp_root = Path("cache/camelot_temp")
+        temp_root.mkdir(parents=True, exist_ok=True)
+
+        previous_temp = os.environ.get("TEMP")
+        previous_tmp = os.environ.get("TMP")
+        os.environ["TEMP"] = str(temp_root.resolve())
+        os.environ["TMP"] = str(temp_root.resolve())
+
+        try:
+            import camelot
+
+            print(f"         Camelot extraction on page(s) {pages}...")
+            tables = camelot.read_pdf(local_path, pages=pages, flavor='lattice', suppress_stdout=True)
+            for i, table in enumerate(tables):
+                markdown = self._camelot_table_to_markdown(table)
+                if markdown:
+                    table_page = getattr(table, "page", pages)
+                    markdown_tables.append(f"#### Table {i + 1} (Page {table_page})\n{markdown}\n")
+        except Exception as e:
+            print(f"         Camelot table extraction failed: {e}")
+        finally:
+            if previous_temp is None:
+                os.environ.pop("TEMP", None)
+            else:
+                os.environ["TEMP"] = previous_temp
+
+            if previous_tmp is None:
+                os.environ.pop("TMP", None)
+            else:
+                os.environ["TMP"] = previous_tmp
+
+        if markdown_tables:
+            return "\n".join(markdown_tables)
+
+        return self._extract_tables_with_pymupdf(local_path, page_number)
+
+    def _extract_tables_with_pymupdf(self, local_path: str, page_number: Optional[int] = None) -> str:
+        """Fallback table extraction when Camelot cannot complete on Windows temp files."""
+        try:
+            import fitz
+        except ImportError:
+            return ""
+
+        target_pages = [page_number] if page_number else []
+        markdown_tables: List[str] = []
+
+        try:
+            document = fitz.open(local_path)
+            if not target_pages:
+                target_pages = list(range(1, min(len(document), self.MAX_PAGES) + 1))
+
+            for target_page in target_pages:
+                page = document[target_page - 1]
+                tables = page.find_tables()
+                for idx, table in enumerate(tables.tables if tables else []):
+                    try:
+                        dataframe = table.to_pandas()
+                    except Exception:
+                        continue
+
+                    dataframe = dataframe.fillna("")
+                    header_blob = " ".join(str(column) for column in dataframe.columns.tolist())
+                    value_blob = " ".join(
+                        str(value)
+                        for row in dataframe.values.tolist()
+                        for value in row
+                    )
+                    text_blob = f"{header_blob} {value_blob}".lower()
+                    if not self._has_table_trigger_keywords(text_blob):
+                        continue
+
+                    dataframe = dataframe.astype(str).apply(
+                        lambda column: column.map(lambda value: re.sub(r"\s+", " ", value).strip())
+                    )
+                    markdown_tables.append(
+                        f"#### Table {idx + 1} (Page {target_page})\n{dataframe.to_markdown(index=False)}\n"
+                    )
+            document.close()
+        except Exception as e:
+            print(f"         PyMuPDF table fallback failed: {e}")
+            return ""
+
+        return "\n".join(markdown_tables)
+
+    def _camelot_table_to_markdown(self, table: Any) -> str:
+        """Normalize Camelot output into compact markdown tables."""
+        try:
+            dataframe = table.df.copy()
+        except Exception:
+            return ""
+
+        if dataframe.empty:
+            return ""
+
+        dataframe = dataframe.replace(r"^\s*$", "", regex=True)
+        dataframe = dataframe.dropna(how="all")
+        dataframe = dataframe.loc[~(dataframe.eq("").all(axis=1))]
+        dataframe = dataframe.loc[:, ~(dataframe.eq("").all(axis=0))]
+        if dataframe.empty:
+            return ""
+
+        header = [str(value).strip() for value in dataframe.iloc[0].tolist()]
+        if any(header):
+            dataframe.columns = header
+            dataframe = dataframe.iloc[1:].reset_index(drop=True)
+
+        dataframe = dataframe.fillna("")
+        dataframe = dataframe.astype(str).apply(
+            lambda column: column.map(lambda value: re.sub(r"\s+", " ", value).strip())
+        )
+        dataframe = dataframe.loc[~(dataframe.eq("").all(axis=1))]
+
+        if dataframe.empty:
+            return ""
+
+        try:
+            return dataframe.to_markdown(index=False)
+        except Exception:
+            return ""
+
+    def _chunk_text(self, text: str, company_name: str, year: Optional[int],
+                    report_type: str, source: str = "esg_report",
+                    filename: str = "", report_title: str = "",
+                    extra_metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Override chunking to preserve page-aware metadata and page_content."""
+        chunks_list = []
+
+        detected_year = self._detect_year_for_chunk(text, year, filename=filename, report_title=report_title)
+        if detected_year != year and detected_year != datetime.now().year:
+            print(f"      [Fix] Year detected from text: {detected_year}")
+
+        if self.text_splitter:
+            try:
+                chunk_texts = self.text_splitter.split_text(text)
+                for chunk_text in chunk_texts:
+                    if not chunk_text.strip():
+                        continue
+
+                    chunk_year = self._detect_year_for_chunk(
+                        chunk_text,
+                        detected_year,
+                        filename=filename,
+                        report_title=report_title
+                    )
+                    chunk = {
+                        "text": chunk_text,
+                        "page_content": chunk_text,
+                        "year": chunk_year,
+                        "report_year": detected_year,
+                        "company": company_name.lower(),
+                        "source": source,
+                        "report_type": report_type.lower(),
+                        "chunk_id": str(uuid.uuid4())
+                    }
+                    if extra_metadata:
+                        chunk.update(extra_metadata)
+                    chunks_list.append(chunk)
+
+                return chunks_list
+            except Exception as e:
+                print(f"         LangChain splitter failed: {e}, using fallback...")
+
+        return self._fallback_chunking(
+            text,
+            company_name,
+            detected_year,
+            report_type,
+            source,
+            filename=filename,
+            report_title=report_title,
+            extra_metadata=extra_metadata,
+        )
+
+    def _fallback_chunking(self, text: str, company_name: str, year: Optional[int],
+                          report_type: str, source: str = "esg_report",
+                          filename: str = "", report_title: str = "",
+                          extra_metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Override fallback chunking so metadata stays attached per chunk."""
+        if not text:
+            print(f"         No text to chunk (empty or None)")
+            return []
+
+        chunks_list = []
+        text_len = len(text)
+        max_chunks = 10000
+        start = 0
+        chunk_num = 0
+
+        while start < text_len and chunk_num < max_chunks:
+            end = min(start + self.CHUNK_SIZE, text_len)
+            if end < text_len:
+                last_punct = max(
+                    text.rfind('. ', start, end),
+                    text.rfind('\n', start, end),
+                    text.rfind('. \n', start, end)
+                )
+                if last_punct > start + self.CHUNK_SIZE * 0.5:
+                    end = last_punct + 1
+
+            chunk_text = text[start:end].strip()
+            if chunk_text:
+                chunk_year = self._detect_year_for_chunk(
+                    chunk_text,
+                    year,
+                    filename=filename,
+                    report_title=report_title
+                )
+                chunk = {
+                    "text": chunk_text,
+                    "page_content": chunk_text,
+                    "year": chunk_year,
+                    "report_year": year,
+                    "company": company_name.lower(),
+                    "source": source,
+                    "report_type": report_type.lower(),
+                    "chunk_id": str(uuid.uuid4())
+                }
+                if extra_metadata:
+                    chunk.update(extra_metadata)
+                chunks_list.append(chunk)
+                chunk_num += 1
+
+            start += self.CHUNK_SIZE - self.CHUNK_OVERLAP
+
         return chunks_list
 
 

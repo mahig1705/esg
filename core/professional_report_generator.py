@@ -878,6 +878,8 @@ class ProfessionalReportGenerator:
         e_score = self._safe_float(safe_get(v["scores"], "pillar_scores", "environmental_score"), 0.0)
         s_score = self._safe_float(safe_get(v["scores"], "pillar_scores", "social_score"), 0.0)
         g_score = self._safe_float(safe_get(v["scores"], "pillar_scores", "governance_score"), 0.0)
+        raw_gw_score = self._safe_float(v["scores"].get("greenwashing_risk_score_raw"), v["gw_score"])
+        calibrated_delta = v["gw_score"] - raw_gw_score
 
         score_header = [
             major,
@@ -886,8 +888,9 @@ class ProfessionalReportGenerator:
             f"Overall greenwashing risk score: {v['gw_score']:.1f}/100  ->  Rating: {v['rating']}  ->  Band: {v['band']}",
             "",
             "Composite formula:",
-            "  ESG score = (Environmental x 0.35) + (Social x 0.30) + (Governance x 0.35)",
-            "  Greenwashing risk score = 100 - ESG score",
+            "  Pillar ESG score = (Environmental x 0.35) + (Social x 0.30) + (Governance x 0.35)",
+            f"  Raw risk score (pre-calibration) = {raw_gw_score:.1f}/100",
+            f"  Final risk score (post-calibration) = {v['gw_score']:.1f}/100  (delta: {calibrated_delta:+.1f})",
             "",
             f"ENVIRONMENTAL PILLAR - {e_score:.1f}/100",
             "─" * 34,
@@ -4011,8 +4014,13 @@ Industry Baseline Adjustment: {industry_adj:+.1f} points
             if isinstance(value, (int, float)):
                 total_evidence_sources += int(value)
 
-        independent_sources = int(quality_metrics.get("independent_sources", 0) or 0)
-        premium_sources = int(quality_metrics.get("premium_sources", 0) or 0)
+        independent_sources_raw = int(quality_metrics.get("independent_sources", 0) or 0)
+        premium_sources_raw = int(quality_metrics.get("premium_sources", 0) or 0)
+        if total_evidence_sources <= 0:
+            total_evidence_sources = max(independent_sources_raw, premium_sources_raw, 0)
+
+        independent_sources = min(independent_sources_raw, total_evidence_sources)
+        premium_sources = min(premium_sources_raw, total_evidence_sources)
         source_diversity = int(quality_metrics.get("source_diversity", len(source_breakdown)) or 0)
         evidence_gap = bool(quality_metrics.get("evidence_gap", False))
 

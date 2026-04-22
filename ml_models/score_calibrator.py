@@ -133,7 +133,11 @@ def recalibrate_greenwashing_score(
     dataset_path: str | None = None,
     threshold: float = 50.0,
 ) -> Dict[str, Any]:
-    """Apply weighted logistic recalibration and return recalibrated score metadata."""
+    """Apply weighted logistic recalibration and return recalibrated score metadata.
+
+    Guardrails are applied so calibration remains an adjustment layer rather than
+    a full score replacement when the calibration dataset is still small.
+    """
     clipped_score = float(max(0.0, min(100.0, raw_score)))
     fit = fit_weighted_logistic_recalibration(sector=sector, dataset_path=dataset_path, threshold=threshold)
 
@@ -143,14 +147,25 @@ def recalibrate_greenwashing_score(
     )[0]
     recalibrated_score = float(max(0.0, min(100.0, recalibrated_prob * 100.0)))
 
+    # Guardrail 1: blend toward raw score, especially when calibration data is small.
+    dataset_size = int(fit.get("dataset_size", 0) or 0)
+    sample_scale = max(0.0, min(1.0, dataset_size / 100.0))
+    blend_weight = 0.20 + (0.30 * sample_scale)  # 0.20..0.50
+    blended_score = clipped_score + ((recalibrated_score - clipped_score) * blend_weight)
+
+    # Guardrail 2: cap the absolute calibration delta.
+    max_shift = 12.0 if dataset_size < 100 else 20.0
+    bounded_delta = max(-max_shift, min(max_shift, blended_score - clipped_score))
+    calibrated_score_final = float(max(0.0, min(100.0, clipped_score + bounded_delta)))
+
     return {
         "raw_score": round(clipped_score, 2),
-        "recalibrated_score": round(recalibrated_score, 2),
-        "delta": round(recalibrated_score - clipped_score, 2),
+        "recalibrated_score": round(calibrated_score_final, 2),
+        "delta": round(calibrated_score_final - clipped_score, 2),
         "alpha": round(fit["alpha"], 6),
         "beta": round(fit["beta"], 6),
         "threshold": fit["threshold"],
-        "dataset_size": fit["dataset_size"],
+        "dataset_size": dataset_size,
         "sector": fit["sector"],
         "method": "weighted_logistic_recalibration",
     }
