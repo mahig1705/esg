@@ -53,7 +53,12 @@ class ContradictionAnalyzer:
     ) -> Dict[str, Any]:
         """Deterministic contradiction analysis merging known DB + evidence + LLM signals."""
         known = self._check_known_contradictions(company=company, claim_text=claim)
-        graph_context = CompanyKnowledgeGraph().hybrid_retrieve(company=company, claim_text=claim)
+        try:
+            graph_context = CompanyKnowledgeGraph().hybrid_retrieve(company=company, claim_text=claim)
+        except Exception as exc:
+            logger.error("Neo4j / Knowledge Graph unavailable (%s). Falling back to local offline DB.", exc)
+            graph_context = {}
+
         graph_evidence = graph_context.get("graph_evidence", []) if isinstance(graph_context, dict) else []
         reasoning_paths = graph_context.get("reasoning_paths", []) if isinstance(graph_context, dict) else []
         historical_archive = self._retrieve_historical_claim_evidence(company=company, claim=claim, evidence=evidence)

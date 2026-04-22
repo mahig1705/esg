@@ -57,15 +57,15 @@ ROUTING_TABLE: dict[str, list[ModelConfig]] = {
     ],
 
     "claim_extraction": [
-        Cerebras("llama3.1-8b",          json_mode=True, max_tokens=800),
-        Groq("llama-3.1-8b-instant",     json_mode=True, max_tokens=800),
-        OR("mistralai/mistral-small-3.1-24b-instruct:free", json_mode=True, max_tokens=800),
+        Cerebras("llama3.1-8b",          json_mode=True, max_tokens=4096),
+        Groq("llama-3.1-8b-instant",     json_mode=True, max_tokens=4096),
+        OR("mistralai/mistral-small-3.1-24b-instruct:free", json_mode=True, max_tokens=4096),
     ],
 
     "claim_extractor": [
-        Cerebras("llama3.1-8b",          json_mode=True, max_tokens=1000),
-        Groq("llama-3.1-8b-instant",     json_mode=True, max_tokens=1000),
-        OR("mistralai/mistral-small-3.1-24b-instruct:free", json_mode=True, max_tokens=1000),
+        Cerebras("llama3.1-8b",          json_mode=True, max_tokens=4096),
+        Groq("llama-3.1-8b-instant",     json_mode=True, max_tokens=4096),
+        OR("mistralai/mistral-small-3.1-24b-instruct:free", json_mode=True, max_tokens=4096),
     ],
 
     # ── STAGE 4: ANALYSIS ────────────────────────────────────────

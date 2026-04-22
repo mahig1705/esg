@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Clock3 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -15,17 +15,17 @@ type HistoryItem = {
 };
 
 export default function HistoryPage() {
-    const [items, setItems] = useState<HistoryItem[]>([]);
-
-    useEffect(() => {
+    const [items] = useState<HistoryItem[]>(() => {
+        if (typeof window === "undefined") return [];
         const raw = window.localStorage.getItem("esg-analysis-history");
-        if (!raw) return;
+        if (!raw) return [];
         try {
-            setItems(JSON.parse(raw) as HistoryItem[]);
+            const parsed = JSON.parse(raw) as HistoryItem[];
+            return Array.isArray(parsed) ? parsed : [];
         } catch {
-            setItems([]);
+            return [];
         }
-    }, []);
+    });
 
     return (
         <div className="space-y-6">

@@ -35,6 +35,30 @@ export type AnalysisResult = {
     confidence: string;
     keyDetails: Array<{ key: string; value: string }>;
     narrative: string[];
+    // Pillar scores
+    environmentalScore: string | null;
+    socialScore: string | null;
+    governanceScore: string | null;
+    // Evidence
+    evidenceCount: string | null;
+    contradictionsFound: string | null;
+    // Deception
+    deceptionRisk: string | null;
+    greenwishingScore: string | null;
+    greenhushingScore: string | null;
+    // Regulatory
+    complianceScore: string | null;
+    complianceGaps: string | null;
+    // Carbon
+    scope1: string | null;
+    scope2: string | null;
+    scope3: string | null;
+    netZeroTarget: string | null;
+    renewableEnergy: string | null;
+    // Sections
+    executiveSummary: string;
+    keyRiskDrivers: string[];
+    contradictions: string[];
   };
   json_report?: Record<string, unknown> | null;
   json_file_name?: string;
@@ -238,10 +262,17 @@ export function AnalysisRunProvider({ children }: { children: React.ReactNode })
         results?: AnalysisResult | null;
         runningCompany?: string;
       };
-      if (parsed.appState) setAppState(parsed.appState);
-      if (Array.isArray(parsed.logs)) setLogs(parsed.logs.slice(-MAX_LOGS));
-      if (parsed.results) setResults(parsed.results);
-      if (parsed.runningCompany) setRunningCompany(parsed.runningCompany);
+
+      // Only recover state if it was actively processing,
+      // otherwise start completely fresh so we don't show truncated old results.
+      if (parsed.appState === "processing") {
+        setAppState(parsed.appState);
+        if (Array.isArray(parsed.logs)) setLogs(parsed.logs.slice(-MAX_LOGS));
+        if (parsed.results) setResults(parsed.results);
+        if (parsed.runningCompany) setRunningCompany(parsed.runningCompany);
+      } else {
+        window.localStorage.removeItem(STORAGE_KEY);
+      }
     } catch {
       window.localStorage.removeItem(STORAGE_KEY);
     }

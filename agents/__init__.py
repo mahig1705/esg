@@ -20,6 +20,8 @@ New Agents (2026):
 - CarbonExtractor: Scope 1, 2, 3 emissions extraction
 - GreenwishingDetector: Greenwishing/Greenhushing detection
 - RegulatoryScanner: Regulatory compliance verification
+- SocialAgent: Social pillar forensic analysis
+- GovernanceAgent: Governance pillar forensic analysis
 """
 
 from .claim_extractor import ClaimExtractor
@@ -42,6 +44,8 @@ except Exception:
 from .carbon_extractor import CarbonExtractor, get_carbon_extractor
 from .greenwishing_detector import GreenwishingDetector, get_greenwishing_detector
 from .regulatory_scanner import RegulatoryHorizonScanner, get_regulatory_scanner
+from .social_agent import SocialAgent
+from .governance_agent import GovernanceAgent
 
 __all__ = [
     # Core Agents
@@ -64,5 +68,7 @@ __all__ = [
     'GreenwishingDetector',
     'get_greenwishing_detector',
     'RegulatoryHorizonScanner',
-    'get_regulatory_scanner'
+    'get_regulatory_scanner',
+    'SocialAgent',
+    'GovernanceAgent'
 ]

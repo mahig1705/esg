@@ -188,6 +188,61 @@ KNOWN_GREENWASHING_CASES: Dict[str, List[Dict]] = {
             "severity": "high",
             "regulatory_body": "NGO investigation"
         }
+    ],
+    "coca-cola": [
+        {
+            "claim_pattern": r"100% recyclable|circular|sustainable packaging|plastic pollution",
+            "contradiction_text": "Named world's top plastic polluter for 5 consecutive years. Lawsuit in US argued '100% recyclable' claims are misleading as most plastic ends up in landfill or ocean.",
+            "source": "Break Free From Plastic / Earth Island Institute Lawsuit 2022",
+            "source_url": "https://www.earthisland.org/index.php/news/entry/earth-island-institute-files-lawsuit-against-the-coca-cola-company",
+            "year": 2022,
+            "severity": "high",
+            "regulatory_body": "Break Free From Plastic / US Courts"
+        }
+    ],
+    "delta air lines": [
+        {
+            "claim_pattern": r"carbon neutral|greenest airline|sustainable|climate",
+            "contradiction_text": "Class-action lawsuit filed in California in 2023 alleging 'carbon neutral' claims are false and misleading, predicated on low-quality offsets that do not actually remove carbon.",
+            "source": "Delta Air Lines Carbon Neutral Class Action, 2023",
+            "source_url": "https://www.theguardian.com/business/2023/may/30/delta-air-lines-lawsuit-carbon-neutral-claims",
+            "year": 2023,
+            "severity": "high",
+            "regulatory_body": "US Federal Court"
+        }
+    ],
+    "google": [
+        {
+            "claim_pattern": r"carbon neutral|sustainability|water stewardship|zero waste",
+            "contradiction_text": "Google's 2024 Environment Report showed greenhouse gas emissions rose 48% over 5 years due to AI data center energy demand, contradicting their 2030 net-zero ambition.",
+            "source": "Google Environmental Report 2024 / Bloomberg",
+            "source_url": "https://www.bloomberg.com/news/articles/2024-07-02/google-s-emissions-shot-up-48-since-2019-during-ai-building-boom",
+            "year": 2024,
+            "severity": "medium",
+            "regulatory_body": "Bloomberg / Public Reports"
+        }
+    ],
+    "goldman sachs": [
+        {
+            "claim_pattern": r"esg fund|sustainable investment|ethical|green",
+            "contradiction_text": "SEC fined Goldman Sachs $4 million in 2022 for failing to follow its own ESG investment policies and procedures in some of its mutual funds.",
+            "source": "SEC Press Release 2022-209",
+            "source_url": "https://www.sec.gov/news/press-release/2022-209",
+            "year": 2022,
+            "severity": "medium",
+            "regulatory_body": "US Securities and Exchange Commission"
+        }
+    ],
+    "dws": [
+        {
+            "claim_pattern": r"esg integration|sustainable investing|green assets",
+            "contradiction_text": "DWS (Deutsche Bank) raided by German police and fined $25 million by SEC for greenwashing—specifically misleading investors about how it used ESG factors in research.",
+            "source": "SEC / BaFin Investigation 2023",
+            "source_url": "https://www.sec.gov/news/press-release/2023-194",
+            "year": 2023,
+            "severity": "high",
+            "regulatory_body": "US SEC / German BaFin"
+        }
     ]
 }
 

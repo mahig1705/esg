@@ -26,6 +26,7 @@ import camelot
 import fitz  # PyMuPDF
 
 logger = logging.getLogger(__name__)
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 # ---------------------------------------------------------------------------
 # Carbon / emissions keywords used for page & table filtering
@@ -185,7 +186,7 @@ def extract_carbon_tables(pdf_path: str) -> list[dict]:
                     })
                     tables_found = True
             if tables_found:
-                logger.info(
+                logger.debug(
                     "Page %d: %d carbon table(s) via lattice",
                     page_num, sum(1 for r in results if r["page"] == page_num),
                 )
@@ -196,11 +197,14 @@ def extract_carbon_tables(pdf_path: str) -> list[dict]:
                 "Camelot temp-file write failed on page %d of %s; aborting further table extraction for this PDF",
                 page_num, pdf_path_str,
             )
-        except Exception:
-            logger.exception(
-                "Lattice extraction failed on page %d of %s",
-                page_num, pdf_path_str,
-            )
+        except Exception as e:
+            if "Ghostscript" in str(e):
+                logger.debug("Skipping lattice extraction because Ghostscript is not installed.")
+            else:
+                logger.warning(
+                    "Lattice extraction failed on page %d of %s: %s",
+                    page_num, pdf_path_str, str(e),
+                )
 
         if temp_write_blocked:
             break
@@ -224,6 +228,11 @@ def extract_carbon_tables(pdf_path: str) -> list[dict]:
                         "dataframe": tbl.df,
                         "raw_text": raw,
                     })
+            if any(r["page"] == page_num and r["flavor"] == "stream" for r in results):
+                logger.debug(
+                    "Page %d: carbon table(s) found via stream",
+                    page_num
+                )
             logger.info(
                 "Page %d: %d carbon table(s) via stream",
                 page_num,
@@ -235,11 +244,14 @@ def extract_carbon_tables(pdf_path: str) -> list[dict]:
                 page_num, pdf_path_str,
             )
             break
-        except Exception:
-            logger.exception(
-                "Stream extraction failed on page %d of %s",
-                page_num, pdf_path_str,
-            )
+        except Exception as e:
+            if "Ghostscript" in str(e):
+                logger.debug("Skipping stream extraction because Ghostscript is not installed.")
+            else:
+                logger.warning(
+                    "Stream extraction failed on page %d of %s: %s",
+                    page_num, pdf_path_str, str(e),
+                )
 
     logger.info(
         "Total carbon tables extracted from %s: %d", pdf_path_str, len(results),

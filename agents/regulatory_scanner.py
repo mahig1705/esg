@@ -92,35 +92,73 @@ FRAMEWORK_NAME_ALIASES = {
 
 def calculate_compliance_score(compliance_results: list[dict]) -> dict:
     """
-    Proportional compliance score with materiality-weighted gap penalties.
+    Backward-compatible compliance score with per-regulation status details.
 
-    Each item in compliance_results must have:
-      status:      "COMPLIANT" | "GAP" | "PARTIAL" | "UNKNOWN"
-      materiality: "HIGH" | "MEDIUM" | "LOW"
-
-    Returns dict with score (0-100), risk_level, counts, breakdown string.
+    Accepts both legacy detector rows (gap_count/gaps_found) and scanner rows
+    (status/gap_details/requirements_unverified). The legacy score is:
+    compliant-framework percentage minus 8 points per concrete gap.
     """
     if not compliance_results:
         return {
             "score": 0,
             "risk_level": "High",
+            "per_regulation_status": [],
+            "gaps": 0,
             "compliant_count": 0,
             "gap_count": 0,
             "total_count": 0,
+            "total_regulations": 0,
+            "compliant_regulations": 0,
             "score_breakdown": "No frameworks checked",
         }
 
     total = len(compliance_results)
-    compliant = sum(1 for r in compliance_results if r.get("status") == "COMPLIANT")
-    partial = sum(1 for r in compliance_results if r.get("status") == "PARTIAL")
-    gaps = [r for r in compliance_results if r.get("status") == "GAP"]
-    gap_count = len(gaps)
+    per_regulation_status = []
+    compliant = 0
+    concrete_gap_count = 0
+    regulations_with_gaps = 0
 
-    base_score = ((compliant + (partial * 0.5)) / total) * 100
+    for idx, row in enumerate(compliance_results):
+        if not isinstance(row, dict):
+            row = {}
 
-    penalty_map = {"HIGH": 15, "MEDIUM": 8, "LOW": 3}
-    penalty = sum(penalty_map.get(g.get("materiality", "MEDIUM"), 8) for g in gaps)
+        gap_details = row.get("gap_details")
+        if gap_details is None:
+            gap_details = row.get("gaps_found")
+        if gap_details is None and row.get("requirements_unverified"):
+            gap_details = [
+                req.get("requirement", str(req)) if isinstance(req, dict) else str(req)
+                for req in row.get("requirements_unverified", [])
+            ]
+        if gap_details is None:
+            gap_details = []
+        if not isinstance(gap_details, list):
+            gap_details = [str(gap_details)] if gap_details else []
 
+        explicit_gap_count = row.get("gap_count")
+        if isinstance(explicit_gap_count, int) and explicit_gap_count > len(gap_details):
+            gap_details.extend(["Unspecified compliance gap"] * (explicit_gap_count - len(gap_details)))
+
+        status_raw = str(row.get("status") or row.get("compliance_status") or "").upper()
+        has_gap = bool(gap_details) or status_raw in {"GAP", "GAP FOUND", "NON-COMPLIANT", "PARTIALLY COMPLIANT"}
+        is_compliant = not has_gap and status_raw in {"", "COMPLIANT", "NOT APPLICABLE"}
+
+        if is_compliant:
+            compliant += 1
+        if has_gap:
+            regulations_with_gaps += 1
+            concrete_gap_count += max(1, len(gap_details))
+
+        per_regulation_status.append({
+            "regulation": row.get("regulation_name") or row.get("regulation") or f"Regulation {idx + 1}",
+            "status": "GAP FOUND" if has_gap else "COMPLIANT",
+            "gap_count": len(gap_details),
+            "gap_details": gap_details,
+            "gaps": gap_details,
+        })
+
+    base_score = (compliant / total) * 100
+    penalty = concrete_gap_count * 8
     final_score = max(0, round(base_score - penalty))
 
     if final_score >= 75:
@@ -133,16 +171,21 @@ def calculate_compliance_score(compliance_results: list[dict]) -> dict:
     breakdown = (
         f"{compliant}/{total} frameworks compliant "
         f"(+{round(base_score)}pts base) "
-        f"minus {gap_count} gap penalties (-{penalty}pts) "
+        f"minus {concrete_gap_count} gap penalties (-{penalty}pts) "
         f"= {final_score}/100"
     )
 
     return {
         "score": final_score,
         "risk_level": risk_level,
+        "per_regulation_status": per_regulation_status,
+        "gaps": concrete_gap_count,
         "compliant_count": compliant,
-        "gap_count": gap_count,
+        "gap_count": concrete_gap_count,
         "total_count": total,
+        "total_regulations": total,
+        "compliant_regulations": compliant,
+        "regulations_with_gaps": regulations_with_gaps,
         "score_breakdown": breakdown,
     }
 
@@ -845,8 +888,31 @@ Analyze regulatory compliance risks. Return JSON."""
         return risks
 
     def _calculate_compliance_score(self, compliance_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Backward-compatible class method wrapper for module-level score function."""
-        return calculate_compliance_score(compliance_results)
+        """Research-grade gap score: starts at 100 and subtracts per-gap penalties."""
+        gaps = 0
+        for row in compliance_results:
+            if not isinstance(row, dict):
+                continue
+            unverified = row.get("requirements_unverified") or []
+            gap_details = row.get("gap_details") or row.get("gaps_found") or []
+            if isinstance(unverified, list):
+                gaps += len(unverified)
+            if isinstance(gap_details, list):
+                gaps += len(gap_details)
+            elif gap_details:
+                gaps += 1
+
+        score = max(0, round(100 - (gaps * 8)))
+        risk_level = "Low" if score >= 75 else "Medium" if score >= 45 else "High"
+        return {
+            "score": score,
+            "risk_level": risk_level,
+            "gaps": gaps,
+            "gap_count": gaps,
+            "total_count": len(compliance_results),
+            "total_regulations": len(compliance_results),
+            "score_breakdown": f"100pts baseline minus {gaps} gap penalties (-{gaps * 8}pts) = {score}/100",
+        }
 
     def _generate_compliance_recommendations(self, compliance_results: List[Dict]) -> List[str]:
         """Generate actionable compliance recommendations"""

@@ -39,6 +39,7 @@ COMPANIES_HOUSE_FETCH_CAP = 2
 INFLUENCEMAP_FETCH_CAP = 2
 GRI_FETCH_CAP = 2
 OPENSANCTIONS_FETCH_CAP = 1
+ADVERSARIAL_FETCH_CAP = 3
 
 # -- Stage 2: survivors after filter -------------------------------------------
 MAX_FULL_TEXT_FETCH = 15
@@ -576,6 +577,69 @@ async def fetch_opensanctions_evidence(company: str) -> list[dict]:
         "data_source_api": "OpenSanctions",
         "source_type": "Compliance/Sanctions Database",
     }][:OPENSANCTIONS_FETCH_CAP]
+
+
+def _adversarial_source_type(url: str) -> str:
+    lower = (url or "").lower()
+    if any(domain in lower for domain in ["clientearth.org", "reclaimfinance.org", "influencemap.org", "greenpeace.org", "amnesty.org"]):
+        return "Climate NGO"
+    if any(domain in lower for domain in ["eur-lex.europa.eu", "ec.europa.eu", "gov.uk", "sec.gov", "ftc.gov", "afm.nl", "rechtspraak.nl"]):
+        return "Government/Regulatory"
+    if any(term in lower for term in ["court", "judgment", "judgement", "ruling", "lawsuit", "enforcement"]):
+        return "Legal/Court Documents"
+    return "Tier-1 Financial Media"
+
+
+async def fetch_adversarial_evidence(company: str, claim_text: str) -> list[dict]:
+    """Deliberately retrieve support and contradiction evidence from countervailing sources."""
+    claim_lower = (claim_text or "").lower()
+    adversarial_queries = [
+        f'{company} climate lawsuit greenwashing ClientEarth Reclaim Finance',
+        f'site:clientearth.org {company} climate',
+        f'site:reclaimfinance.org {company} climate',
+        f'site:influencemap.org {company} climate lobbying',
+        f'site:afm.nl {company} greenwashing OR sustainability claim',
+        f'site:rechtspraak.nl {company} climate ruling OR judgment',
+        f'site:eur-lex.europa.eu {company} sustainability disclosure',
+        f'site:sec.gov {company} climate disclosure lawsuit',
+    ]
+    if any(term in claim_lower for term in ["1.5", "net zero", "scope 3", "production growth"]):
+        adversarial_queries.append(f'{company} production growth scope 3 contradiction')
+
+    async def _run_query(query: str) -> list[dict]:
+        try:
+            return await asyncio.to_thread(fetch_duckduckgo, query, ADVERSARIAL_FETCH_CAP)
+        except Exception:
+            return []
+
+    batches = await asyncio.gather(*[_run_query(q) for q in adversarial_queries], return_exceptions=True)
+    results: list[dict] = []
+    seen = set()
+    for batch in batches:
+        if isinstance(batch, Exception):
+            continue
+        for item in batch or []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "")
+            title = str(item.get("title") or "")
+            snippet = str(item.get("snippet") or item.get("body") or "")
+            key = (url, title, snippet[:120])
+            if key in seen or is_blocked(url):
+                continue
+            seen.add(key)
+            results.append({
+                "source_name": item.get("source_name") or item.get("source") or "Adversarial Search",
+                "source": item.get("source") or item.get("source_name") or "Adversarial Search",
+                "url": url,
+                "title": title,
+                "snippet": snippet[:300],
+                "reliability_tier": "Countervailing Evidence",
+                "stance": "Contradicts" if any(term in (title + " " + snippet).lower() for term in ["lawsuit", "greenwashing", "misleading", "court", "ruling", "enforcement", "violation", "investigation"]) else "Neutral",
+                "data_source_api": "DuckDuckGo Adversarial Search",
+                "source_type": _adversarial_source_type(url),
+            })
+    return results[: max(ADVERSARIAL_FETCH_CAP * 6, 12)]
 
 
 async def fetch_company_ir(company: str, ticker: str, country: str, session: httpx.AsyncClient) -> list[dict]:
@@ -1119,6 +1183,7 @@ class EvidenceRetriever:
 
             raw += await fetch_influencemap_evidence(company)
             raw += await fetch_gri_database_evidence(company)
+            raw += await fetch_adversarial_evidence(company, claim_text)
 
             # Ensure minimum evidence coverage even when news APIs or Reuters feeds fail.
             if len(raw) < 10:
@@ -1473,6 +1538,35 @@ class EvidenceRetriever:
             str(title or "").lower(),
         ])
         return any(blocked in haystack for blocked in DOMAIN_BLOCKLIST)
+
+    def _get_source_weight(self, evidence: Dict[str, Any], source_type: str = "") -> float:
+        """Return source credibility weight, prioritizing independent assurance."""
+        weights = getattr(self, "source_weights", {}) or {}
+        default = float(weights.get("default", 0.5))
+
+        url = str(evidence.get("url", "") if isinstance(evidence, dict) else "").lower()
+        source = str(evidence.get("source", "") if isinstance(evidence, dict) else "").lower()
+        source_name = str(evidence.get("source_name", "") if isinstance(evidence, dict) else "").lower()
+        title = str(evidence.get("title", "") if isinstance(evidence, dict) else "").lower()
+        source_type_lower = str(source_type or "").lower()
+        haystack = " ".join([url, source, source_name, title, source_type_lower])
+
+        if any(term in haystack for term in ["assurance", "audit", "auditor", "verified statement", "limited assurance"]):
+            return float(weights.get("third_party_audit", default))
+        if any(term in haystack for term in ["sec.gov", "10-k", "annualreports.com"]):
+            return float(weights.get("sec_filing", default))
+        if any(term in haystack for term in ["cdp.net", "carbon disclosure project", "cdp disclosure"]):
+            return float(weights.get("cdp_disclosure", default))
+        if any(term in haystack for term in ["ngo", "greenpeace", "clientearth", "reclaim finance"]):
+            return float(weights.get("ngo_report", default))
+        if any(term in haystack for term in ["reuters", "financial times", "bloomberg", "major news"]):
+            return float(weights.get("major_news", default))
+        if any(term in haystack for term in ["company/corporate", "sustainability-report", "esg report", "annual report"]):
+            return float(weights.get("company_esg_report", default))
+        if any(term in haystack for term in ["aggregator", "google news", "yahoo"]):
+            return float(weights.get("aggregator", default))
+
+        return default
     
     def _structure_evidence(self, raw_evidence: List[Dict], claim: str) -> List[Dict]:
         """Structure and classify evidence with AI relationship determination"""
@@ -1556,6 +1650,32 @@ class EvidenceRetriever:
             return max(0, (now - date).days)
         except:
             return 999
+
+    def _infer_pillar_metadata(self, text: str) -> Dict[str, Any]:
+        lower = str(text or "").lower()
+        e_terms = ["carbon", "emission", "renewable", "water", "waste", "climate", "biodiversity"]
+        s_terms = ["labor", "worker", "safety", "diversity", "community", "human rights", "pay gap"]
+        g_terms = ["board", "audit", "compliance", "ethics", "whistleblower", "pay ratio", "governance"]
+
+        e_hits = sum(1 for t in e_terms if t in lower)
+        s_hits = sum(1 for t in s_terms if t in lower)
+        g_hits = sum(1 for t in g_terms if t in lower)
+
+        if max(e_hits, s_hits, g_hits) == 0:
+            pillar = "MIXED"
+        elif e_hits >= s_hits and e_hits >= g_hits:
+            pillar = "E"
+        elif s_hits >= e_hits and s_hits >= g_hits:
+            pillar = "S"
+        else:
+            pillar = "G"
+
+        return {
+            "pillar": pillar,
+            "pillar_environmental": bool(e_hits > 0),
+            "pillar_social": bool(s_hits > 0),
+            "pillar_governance": bool(g_hits > 0),
+        }
     
     def _process_vector_results(self, results: Dict) -> List[Dict]:
         """Process Chroma vector store results"""
@@ -1571,7 +1691,11 @@ class EvidenceRetriever:
                 "snippet": doc[:300],
                 "date": meta.get("date", ""),
                 "data_source_api": "Vector Database (Historical)",
-                "source_type": meta.get("type", "Database")
+                "source_type": meta.get("type", "Database"),
+                "pillar": meta.get("pillar", "MIXED"),
+                "pillar_environmental": bool(meta.get("pillar_environmental", False)),
+                "pillar_social": bool(meta.get("pillar_social", False)),
+                "pillar_governance": bool(meta.get("pillar_governance", False)),
             })
         
         return evidence
@@ -1586,15 +1710,21 @@ class EvidenceRetriever:
             
             for i, ev in enumerate(evidence[:20]):  # Store top 20
                 doc_id = f"{company}_{claim_id}_{i}_{int(time.time())}"
-                
-                documents.append(ev.get("relevant_text", ""))
+                chunk_text = ev.get("relevant_text", "")
+                pillar_meta = self._infer_pillar_metadata(chunk_text)
+
+                documents.append(chunk_text)
                 metadatas.append({
                     "company": company,
                     "claim_id": claim_id,
                     "source": ev.get("source_name", ""),
                     "url": ev.get("url", ""),
                     "date": ev.get("date", ""),
-                    "type": ev.get("source_type", "")
+                    "type": ev.get("source_type", ""),
+                    "pillar": pillar_meta.get("pillar", "MIXED"),
+                    "pillar_environmental": pillar_meta.get("pillar_environmental", False),
+                    "pillar_social": pillar_meta.get("pillar_social", False),
+                    "pillar_governance": pillar_meta.get("pillar_governance", False),
                 })
                 ids.append(doc_id)
             

@@ -12,25 +12,39 @@ import {
   Settings,
   LogOut,
   ShieldCheck,
-  Menu,
-  X,
-  Bell
+  X
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+
+type SidebarUser = {
+  name: string;
+  email: string;
+};
+
+function loadStoredUser(): SidebarUser | null {
+  if (typeof window === "undefined") return null;
+  const userData = window.localStorage.getItem("user");
+  if (!userData) return null;
+  try {
+    const parsed = JSON.parse(userData) as Partial<SidebarUser>;
+    if (typeof parsed.name === "string" && typeof parsed.email === "string") {
+      return { name: parsed.name, email: parsed.email };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 export default function Sidebar({ mobileOpen, setMobileOpen }: { mobileOpen: boolean, setMobileOpen: (open: boolean) => void }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [user, setUser] = useState<{ name: string, email: string } | null>(null);
+  const [user] = useState<SidebarUser | null>(() => loadStoredUser());
 
   useEffect(() => {
-    const userData = localStorage.getItem("user");
-    if (userData) {
-      setUser(JSON.parse(userData));
-    } else {
+    if (!user) {
       router.push("/login");
     }
-  }, [router]);
+  }, [router, user]);
 
   const navItems = [
     { name: "Dashboard", href: "/dashboard", icon: <LayoutDashboard className="w-5 h-5" /> },

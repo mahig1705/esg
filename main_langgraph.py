@@ -112,6 +112,12 @@ class ESGGreenwashingDetectorLangGraph:
             "greenwishing_analysis": None,  # NEW: Greenwishing/greenhushing detection
             "regulatory_compliance": None,  # NEW: Regulatory horizon scanning
             "climatebert_analysis": None,  # NEW: ClimateBERT NLP analysis
+            "claim_decomposition": None,  # NEW: Compound claim decomposition + tensions
+            "adversarial_triangulation": None,  # NEW: Evidence triangulation output
+            "carbon_pathway_analysis": None,  # NEW: 1.5C/Net-zero pathway modelling
+            "commitment_ledger": None,  # NEW: Longitudinal commitments and revisions
+            "social_analysis": None,  # NEW: dedicated social pillar analysis
+            "governance_analysis": None,  # NEW: dedicated governance pillar analysis
             "explainability_report": None,  # NEW: SHAP/LIME explanations
             "final_verdict": {},
             "report": ""

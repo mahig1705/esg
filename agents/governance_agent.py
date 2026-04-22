@@ -1,0 +1,363 @@
+"""
+Governance Pillar Agent
+Focused retrieval and scoring for board quality, pay alignment, and legal signals.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+import re
+
+import requests
+from bs4 import BeautifulSoup
+
+from utils.free_data_sources import search_duckduckgo
+from utils.web_search import RealTimeDataFetcher
+
+
+class GovernanceAgent:
+    def __init__(self) -> None:
+        self.name = "Governance Pillar Forensic Agent"
+        self.fetcher = RealTimeDataFetcher()
+        self.user_agent = "ESGLens/1.0 (research@esglens.local)"
+
+    def analyze(
+        self,
+        company: str,
+        claim_text: str,
+        industry: str,
+        evidence: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        claim_text = str(claim_text or "")
+        evidence_text = self._collect_text(evidence)
+        combined_text = f"{claim_text}\n{evidence_text}".lower()
+
+        sec_proxy = self._parse_sec_proxy_filings(company)
+        board = self._extract_board_signals(combined_text, sec_proxy)
+        comp = self._extract_compensation_signals(combined_text, sec_proxy)
+        audit = self._extract_audit_signals(combined_text)
+        legal = self._extract_regulatory_legal_signals(company, combined_text)
+        rights = self._extract_shareholder_rights(combined_text)
+        tax = self._extract_tax_transparency(combined_text)
+        whistleblower = self._extract_whistleblower_signals(combined_text)
+
+        score = 58.0
+        findings: List[str] = []
+        red_flags: List[str] = []
+
+        if board.get("board_independence_pct") is not None and board["board_independence_pct"] < 40:
+            score = min(score, 45.0)
+            red_flags.append("Board independence below 40%: automatic governance weakness flag.")
+
+        if board.get("board_gender_pct") is not None and board["board_gender_pct"] < 30:
+            score -= 8
+            findings.append("Board gender diversity below 30% threshold.")
+
+        if board.get("max_director_tenure_years") is not None and board["max_director_tenure_years"] > 12:
+            score -= 6
+            findings.append("Director tenure above 12 years may weaken independence.")
+
+        if board.get("max_interlocks") is not None and board["max_interlocks"] > 4:
+            score -= 6
+            findings.append("Director interlock count above 4 boards flagged.")
+
+        if comp.get("ceo_worker_pay_ratio") is not None and comp["ceo_worker_pay_ratio"] > 300:
+            score -= 8
+            findings.append("CEO/worker pay ratio exceeds 300x industry alert threshold.")
+
+        esg_claim = any(term in claim_text.lower() for term in ["esg", "sustainab", "ethical", "responsible"])
+        if esg_claim and comp.get("lti_esg_pct") == 0:
+            score = min(score, 35.0)
+            red_flags.append("ESG claim + 0% LTI tied to ESG: contradiction.")
+
+        if "ethical culture" in claim_text.lower() and legal.get("regulatory_fine_signals", 0) > 0:
+            score = min(score, 35.0)
+            red_flags.append("Ethical culture claim conflicts with regulatory fine signals.")
+
+        if rights.get("dual_class_structure"):
+            score -= 6
+        if rights.get("poison_pill"):
+            score -= 5
+        if rights.get("staggered_board"):
+            score -= 5
+
+        if tax.get("effective_tax_rate_delta_pct") is not None and tax["effective_tax_rate_delta_pct"] > 10:
+            score -= 6
+            findings.append("Effective tax rate delta above 10% raises tax transparency concern.")
+
+        if not whistleblower.get("independent_hotline_disclosed"):
+            score -= 5
+            findings.append("Independent whistleblower hotline not clearly disclosed.")
+
+        if audit.get("all_audit_committee_independent") is True:
+            score += 4
+
+        score = round(max(0.0, min(100.0, score)), 1)
+        risk_level = self._risk_level(score)
+        confidence = 0.66 + min(0.24, len(sec_proxy.get("filings", [])) * 0.04)
+
+        coverage_indicators = sum([
+            1 if (board.get("board_independence_pct") is not None or board.get("board_gender_pct") is not None) else 0,
+            1 if (comp.get("ceo_worker_pay_ratio") is not None or comp.get("lti_esg_pct") is not None) else 0,
+            1 if (audit.get("big4_auditor_mentioned") or audit.get("all_audit_committee_independent")) else 0,
+            1 if (tax.get("statutory_tax_rate_pct") is not None or tax.get("effective_tax_rate_pct") is not None) else 0,
+            1 if whistleblower.get("independent_hotline_disclosed") else 0,
+            1 if any(rights.values()) else 0,
+        ])
+
+        if coverage_indicators < 3:
+            score = None
+            risk_level = "UNKNOWN"
+            status = "insufficient_data"
+            findings.insert(0, f"Insufficient data: only {coverage_indicators}/6 governance themes detected. Pillar excluded from composite scoring.")
+        else:
+            status = "success"
+
+        sources = []
+        sources.extend(sec_proxy.get("sources", []))
+        sources.extend(legal.get("sources", []))
+
+        if status == "insufficient_data":
+            confidence = 0.1
+
+        return {
+            "company": company,
+            "industry": industry,
+            "governance_score": score,
+            "status": status,
+            "risk_level": risk_level,
+            "confidence": round(min(0.9, confidence), 2),
+            "signals": {
+                "sec_proxy_parser": sec_proxy,
+                "board": board,
+                "executive_compensation": comp,
+                "audit_quality": audit,
+                "regulatory_legal": legal,
+                "shareholder_rights": rights,
+                "tax_transparency": tax,
+                "whistleblower": whistleblower,
+            },
+            "rule_flags": {
+                "board_independence_below_40": bool(board.get("board_independence_pct") is not None and board.get("board_independence_pct") < 40),
+                "esg_claim_with_zero_lti": bool(esg_claim and comp.get("lti_esg_pct") == 0),
+                "ethical_claim_with_fines": bool("ethical culture" in claim_text.lower() and legal.get("regulatory_fine_signals", 0) > 0),
+            },
+            "red_flags": red_flags,
+            "key_findings": findings,
+            "evidence_sources": sources[:15],
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def _collect_text(self, evidence: List[Dict[str, Any]]) -> str:
+        parts: List[str] = []
+        for ev in evidence or []:
+            if not isinstance(ev, dict):
+                continue
+            parts.append(str(ev.get("title", "")))
+            parts.append(str(ev.get("snippet", "")))
+            parts.append(str(ev.get("relevant_text", "")))
+            parts.append(str(ev.get("source", "")))
+            parts.append(str(ev.get("source_type", "")))
+        return " ".join(parts)
+
+    def _parse_sec_proxy_filings(self, company: str) -> Dict[str, Any]:
+        filings = self.fetcher.get_sec_filings_realtime(company)
+        proxy_filings = []
+        sources: List[Dict[str, Any]] = []
+
+        for row in filings[:12]:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title", ""))
+            form_type = str(row.get("form_type", ""))
+            snippet = str(row.get("snippet", ""))
+            hay = f"{title} {form_type} {snippet}".upper()
+            if "DEF 14A" not in hay and "DEFA14A" not in hay and "PROXY" not in hay:
+                continue
+
+            parsed = self._extract_proxy_metrics_from_url(row.get("url", ""))
+            proxy_filings.append({
+                "title": title,
+                "url": row.get("url", ""),
+                "form_type": form_type,
+                "parsed_metrics": parsed,
+            })
+            sources.append(
+                {
+                    "title": title,
+                    "url": row.get("url", ""),
+                    "source": "SEC EDGAR proxy parser",
+                }
+            )
+
+            if len(proxy_filings) >= 3:
+                break
+
+        return {
+            "filings": proxy_filings,
+            "filings_count": len(proxy_filings),
+            "sources": sources,
+        }
+
+    def _extract_proxy_metrics_from_url(self, url: str) -> Dict[str, Optional[float]]:
+        if not url:
+            return {}
+
+        try:
+            resp = requests.get(
+                url,
+                timeout=12,
+                headers={"User-Agent": self.user_agent},
+            )
+            if resp.status_code != 200:
+                return {}
+
+            soup = BeautifulSoup(resp.text[:600000], "html.parser")
+            text = soup.get_text(" ", strip=True).lower()
+
+            return {
+                "board_independence_pct": self._first_percent(text, r"(?:board independence|independent directors|independent non-executive directors)[^\d]{0,40}(\d{1,3}(?:\.\d+)?)\s*%"),
+                "board_gender_pct": self._first_percent(text, r"(?:board gender|women on board|female directors|women in the board)[^\d]{0,40}(\d{1,3}(?:\.\d+)?)\s*%"),
+                "ceo_worker_pay_ratio": self._first_number(text, r"(?:ceo(?:-to-worker)? pay ratio|pay ratio|ceo-to-median worker)[^\d]{0,45}(\d{1,4}(?:\.\d+)?)"),
+                "lti_esg_pct": self._first_percent(text, r"(?:long[- ]term incentive|lti|incentive plan)[^\d]{0,40}(\d{1,3}(?:\.\d+)?)\s*%[^\n\r]{0,60}esg"),
+                "board_size": self._first_number(text, r"board (?:consists|comprises) of (\d{1,2}) (?:directors|members)"),
+                "audit_committee_independence": "audit committee" in text and "100%" in text and "independent" in text,
+            }
+        except Exception:
+            return {}
+
+    def _extract_board_signals(self, combined_text: str, sec_proxy: Dict[str, Any]) -> Dict[str, Any]:
+        board_ind = self._first_percent(combined_text, r"(?:board independence|independent directors|independent non-executive directors|non-executive directors)[^\d]{0,40}(\d{1,3}(?:\.\d+)?)\s*%")
+        board_gender = self._first_percent(combined_text, r"(?:board gender|women on board|female directors)[^\d]{0,40}(\d{1,3}(?:\.\d+)?)\s*%")
+        tenure = self._first_number(combined_text, r"(?:director tenure|average tenure)[^\d]{0,30}(\d{1,2}(?:\.\d+)?)")
+        interlocks = self._first_number(combined_text, r"serves on[^\d]{0,30}(\d{1,2}) boards")
+
+        for filing in sec_proxy.get("filings", []):
+            parsed = filing.get("parsed_metrics", {})
+            if board_ind is None and parsed.get("board_independence_pct") is not None:
+                board_ind = parsed.get("board_independence_pct")
+            if board_gender is None and parsed.get("board_gender_pct") is not None:
+                board_gender = parsed.get("board_gender_pct")
+
+        return {
+            "board_independence_pct": board_ind,
+            "board_gender_pct": board_gender,
+            "max_director_tenure_years": tenure,
+            "max_interlocks": interlocks,
+        }
+
+    def _extract_compensation_signals(self, combined_text: str, sec_proxy: Dict[str, Any]) -> Dict[str, Any]:
+        pay_ratio = self._first_number(combined_text, r"(?:ceo(?:-to-worker)? pay ratio|pay ratio)[^\d]{0,30}(\d{1,4}(?:\.\d+)?)")
+        lti_esg = self._first_percent(combined_text, r"(?:lti|long[- ]term incentive)[^\d]{0,35}(\d{1,3}(?:\.\d+)?)\s*%[^\n\r]{0,40}esg")
+
+        for filing in sec_proxy.get("filings", []):
+            parsed = filing.get("parsed_metrics", {})
+            if pay_ratio is None and parsed.get("ceo_worker_pay_ratio") is not None:
+                pay_ratio = parsed.get("ceo_worker_pay_ratio")
+            if lti_esg is None and parsed.get("lti_esg_pct") is not None:
+                lti_esg = parsed.get("lti_esg_pct")
+
+        return {
+            "ceo_worker_pay_ratio": pay_ratio,
+            "lti_esg_pct": lti_esg,
+        }
+
+    def _extract_audit_signals(self, combined_text: str) -> Dict[str, Any]:
+        non_audit_pct = self._first_percent(combined_text, r"(?:non[- ]audit fees|fees paid to auditor)[^\d]{0,30}(\d{1,3}(?:\.\d+)?)\s*%")
+        all_independent = any(term in combined_text for term in ["audit committee is entirely independent", "all independent", "100% independent audit", "audit committee consists solely of independent"])
+        big4 = any(name in combined_text for name in ["deloitte", "pwc", "pricewaterhousecoopers", "kpmg", "ernst & young", "ey"])
+
+        return {
+            "big4_auditor_mentioned": big4,
+            "all_audit_committee_independent": all_independent if "audit committee" in combined_text else None,
+            "non_audit_fee_pct": non_audit_pct,
+        }
+
+    def _extract_regulatory_legal_signals(self, company: str, combined_text: str) -> Dict[str, Any]:
+        sources: List[Dict[str, Any]] = []
+        fine_signals = 0
+
+        queries = [
+            f'"{company}" SEC enforcement action',
+            f'"{company}" DOJ investigation FCPA',
+            f'"{company}" competition authority fine',
+        ]
+        for q in queries:
+            for item in search_duckduckgo(q, max_results=2):
+                sources.append(
+                    {
+                        "title": item.get("title", ""),
+                        "url": item.get("url", ""),
+                        "source": "Regulatory/legal search",
+                    }
+                )
+                hay = f"{item.get('title', '')} {item.get('snippet', '')}".lower()
+                if any(term in hay for term in ["fine", "enforcement", "violation", "settlement", "investigation"]):
+                    fine_signals += 1
+
+        if any(token in combined_text for token in ["sec enforcement", "doj", "fcpa", "antitrust fine", "competition fine"]):
+            fine_signals += 1
+
+        return {
+            "regulatory_fine_signals": fine_signals,
+            "sources": sources,
+        }
+
+    def _extract_shareholder_rights(self, combined_text: str) -> Dict[str, Any]:
+        return {
+            "dual_class_structure": "dual-class" in combined_text or "dual class" in combined_text,
+            "poison_pill": "poison pill" in combined_text,
+            "staggered_board": "staggered board" in combined_text,
+        }
+
+    def _extract_tax_transparency(self, combined_text: str) -> Dict[str, Any]:
+        stat = self._first_percent(combined_text, r"statutory tax rate[^\d]{0,20}(\d{1,2}(?:\.\d+)?)\s*%")
+        eff = self._first_percent(combined_text, r"effective tax rate[^\d]{0,20}(\d{1,2}(?:\.\d+)?)\s*%")
+        delta = None
+        if stat is not None and eff is not None:
+            delta = abs(stat - eff)
+
+        tax_haven = any(tok in combined_text for tok in ["cayman", "bvi", "luxembourg"])
+
+        return {
+            "country_by_country_reporting_disclosed": "country-by-country" in combined_text or "country by country" in combined_text,
+            "statutory_tax_rate_pct": stat,
+            "effective_tax_rate_pct": eff,
+            "effective_tax_rate_delta_pct": delta,
+            "tax_haven_subsidiary_signal": tax_haven,
+        }
+
+    def _extract_whistleblower_signals(self, combined_text: str) -> Dict[str, Any]:
+        hotline = any(term in combined_text for term in ["whistleblower", "speak up", "independent hotline", "grievance mechanism", "confidential reporting"])
+        complaints = self._first_number(combined_text, r"(?:esg[- ]related complaints|whistleblower reports|speak up cases)[^\d]{0,40}(\d{1,5})")
+
+        return {
+            "independent_hotline_disclosed": hotline,
+            "esg_related_complaints": complaints,
+        }
+
+    def _first_percent(self, text: str, pattern: str) -> Optional[float]:
+        match = re.search(pattern, text)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    def _first_number(self, text: str, pattern: str) -> Optional[float]:
+        match = re.search(pattern, text)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    def _risk_level(self, score: float) -> str:
+        if score >= 70:
+            return "LOW"
+        if score >= 45:
+            return "MODERATE"
+        return "HIGH"
