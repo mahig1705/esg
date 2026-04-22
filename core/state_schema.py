@@ -79,8 +79,14 @@ class ESGState(TypedDict):
     regulatory_compliance: Optional[Dict[str, Any]]  # Regulatory horizon scanning
     climatebert_analysis: Optional[Dict[str, Any]]  # ClimateBERT NLP analysis  
     esg_mismatch_analysis: Optional[Dict[str, Any]]  # Promise vs Actual gap detection
+    social_analysis: Optional[Dict[str, Any]]  # Dedicated social pillar analysis
+    governance_analysis: Optional[Dict[str, Any]]  # Dedicated governance pillar analysis
     explainability_report: Optional[Dict[str, Any]]  # SHAP/LIME explanations
     adversarial_audit: Optional[Dict[str, Any]]  # Multi-agent coordination risk diagnostics
+    claim_decomposition: Optional[Dict[str, Any]]  # Decomposed sub-claims and internal tensions
+    adversarial_triangulation: Optional[Dict[str, Any]]  # Supporting vs contradicting evidence balance
+    carbon_pathway_analysis: Optional[Dict[str, Any]]  # Pathway alignment and feasibility output
+    commitment_ledger: Optional[Dict[str, Any]]  # Longitudinal commitment/revision tracker summary
     additional_evidence: Optional[List[Dict[str, Any]]]
     research_telemetry: Optional[Dict[str, Any]]
     research_telemetry_path: Optional[str]

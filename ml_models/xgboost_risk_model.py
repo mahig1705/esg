@@ -261,6 +261,14 @@ class XGBoostRiskModel:
             print(f"      Social Pillar: {social_score*100:.1f}/100")
             print(f"      Governance Pillar: {governance_score*100:.1f}/100")
             print(f"      Overall ESG Pillar: {overall_esg_from_pillars*100:.1f}/100")
+
+            claim_decomposition = all_analyses.get('claim_decomposition', {})
+            commitment_ledger = all_analyses.get('commitment_ledger', {})
+            pathway = all_analyses.get('carbon_pathway_analysis', {})
+
+            internal_contradiction_score = float(claim_decomposition.get('internal_contradiction_score', 0.0) or 0.0)
+            promise_degradation_score = float(commitment_ledger.get('promise_degradation_score', 0.0) or 0.0)
+            pathway_gap_pct = float(pathway.get('pathway_gap_pct', 0.0) or 0.0)
             
             # Create feature dict matching actual model (23 features from Colab + 4 pillar features = 27)
             # This matches the original dataset columns
@@ -292,7 +300,11 @@ class XGBoostRiskModel:
                 'Environmental_Score_Pillar': environmental_score * 100,
                 'Social_Score_Pillar': social_score * 100,
                 'Governance_Score_Pillar': governance_score * 100,
-                'Overall_ESG_Pillar': overall_esg_from_pillars * 100
+                'Overall_ESG_Pillar': overall_esg_from_pillars * 100,
+                # Optional new features for retrained models.
+                'Internal_Contradiction_Score': internal_contradiction_score,
+                'Promise_Degradation_Score': promise_degradation_score,
+                'Pathway_Gap_Pct': pathway_gap_pct,
             }
             
             # If we have the actual feature names from the model, use those in order

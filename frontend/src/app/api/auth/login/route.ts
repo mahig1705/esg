@@ -4,6 +4,27 @@ import path from 'path';
 
 const dataFilePath = path.join(process.cwd(), 'src', 'data.json');
 
+type UserRecord = {
+  id: string;
+  name: string;
+  email: string;
+  password: string;
+  role?: string;
+};
+
+type UserData = {
+  users: UserRecord[];
+};
+
+function withoutPassword(user: UserRecord) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+  };
+}
+
 export async function POST(req: Request) {
   try {
     const { email, password } = await req.json();
@@ -13,14 +34,12 @@ export async function POST(req: Request) {
     }
 
     const fileContents = await fs.readFile(dataFilePath, 'utf8');
-    const data = JSON.parse(fileContents);
+    const data = JSON.parse(fileContents) as UserData;
 
-    const user = data.users.find((u: any) => u.email === email && u.password === password);
+    const user = data.users.find((u) => u.email === email && u.password === password);
 
     if (user) {
-      // Return success without password
-      const { password: _, ...userWithoutPassword } = user;
-      return NextResponse.json({ message: 'Login successful', user: userWithoutPassword }, { status: 200 });
+      return NextResponse.json({ message: 'Login successful', user: withoutPassword(user) }, { status: 200 });
     } else {
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
     }

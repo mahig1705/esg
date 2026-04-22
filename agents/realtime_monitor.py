@@ -263,6 +263,28 @@ class RealTimeMonitor:
             return article_date >= cutoff
         except:
             return False
+
+    def _infer_pillar(self, text: str) -> Dict[str, Any]:
+        lower = str(text or "").lower()
+        e_hits = sum(1 for t in ["carbon", "emission", "renewable", "climate", "water", "waste"] if t in lower)
+        s_hits = sum(1 for t in ["labor", "worker", "safety", "diversity", "community", "human rights"] if t in lower)
+        g_hits = sum(1 for t in ["board", "audit", "compliance", "ethics", "governance", "whistleblower"] if t in lower)
+
+        if max(e_hits, s_hits, g_hits) == 0:
+            pillar = "MIXED"
+        elif e_hits >= s_hits and e_hits >= g_hits:
+            pillar = "E"
+        elif s_hits >= e_hits and s_hits >= g_hits:
+            pillar = "S"
+        else:
+            pillar = "G"
+
+        return {
+            "pillar": pillar,
+            "pillar_environmental": bool(e_hits > 0),
+            "pillar_social": bool(s_hits > 0),
+            "pillar_governance": bool(g_hits > 0),
+        }
     
     def _store_in_chroma(self, articles: List[Dict], company: str):
         """Store articles in Chroma vector DB"""
@@ -278,6 +300,7 @@ class RealTimeMonitor:
             
             # Create document text
             text = f"{article.get('title', '')} {article.get('snippet', '')} {article.get('full_text', '')}"
+            pillar_meta = self._infer_pillar(text)
             
             documents.append(text[:1000])  # Limit size
             metadatas.append({
@@ -286,7 +309,11 @@ class RealTimeMonitor:
                 'source': article.get('source', ''),
                 'date': article.get('date', ''),
                 'type': 'realtime_news',
-                'scraped_at': datetime.now().isoformat()
+                'scraped_at': datetime.now().isoformat(),
+                'pillar': pillar_meta.get('pillar', 'MIXED'),
+                'pillar_environmental': pillar_meta.get('pillar_environmental', False),
+                'pillar_social': pillar_meta.get('pillar_social', False),
+                'pillar_governance': pillar_meta.get('pillar_governance', False),
             })
             ids.append(doc_id)
         

@@ -150,6 +150,14 @@ class TemporalConsistencyAgent:
 
         # Recent-report fallback mode: if claims are single-year, still produce temporal snapshot
         if not has_multi_year_claims:
+            return self._recent_report_temporal_snapshot(
+                company_name=company_name,
+                report_claims_by_year=report_claims_by_year,
+                agent_outputs=agent_outputs,
+                emissions_trend=emissions_trend,
+                esg_score_trend=esg_score_trend,
+                temporal_quality=temporal_quality,
+            )
             # Calibration: With <2 years, temporal should be neutral and low-impact.
             # We still return a structured output for explainability, but do not penalize the final ESG.
             years = years_for_trend

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Save } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,17 +8,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export default function SettingsPage() {
-    const [defaultIndustry, setDefaultIndustry] = useState("Consumer Goods");
-    const [workflowTimeout, setWorkflowTimeout] = useState("600");
+    const [defaultIndustry, setDefaultIndustry] = useState(() => {
+        if (typeof window === "undefined") return "Consumer Goods";
+        return window.localStorage.getItem("esg-default-industry") || "Consumer Goods";
+    });
+    const [workflowTimeout, setWorkflowTimeout] = useState(() => {
+        if (typeof window === "undefined") return "600";
+        return window.localStorage.getItem("esg-workflow-timeout") || "600";
+    });
     const [saved, setSaved] = useState(false);
-
-    useEffect(() => {
-        const existingIndustry = window.localStorage.getItem("esg-default-industry");
-        const existingTimeout = window.localStorage.getItem("esg-workflow-timeout");
-
-        if (existingIndustry) setDefaultIndustry(existingIndustry);
-        if (existingTimeout) setWorkflowTimeout(existingTimeout);
-    }, []);
 
     const save = () => {
         window.localStorage.setItem("esg-default-industry", defaultIndustry);

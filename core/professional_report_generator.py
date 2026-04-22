@@ -688,6 +688,13 @@ class ProfessionalReportGenerator:
         external_used = bool(safe_get(scores, "pillar_scores", "external_benchmarks_used", default=False))
         external_enabled = bool(external_data.get("enabled") or external_sources)
 
+        # 2026 Engine High-Fidelity Diagnostics
+        claim_decomposition = state.get("claim_decomposition") or agents.get("claim_decomposition", {}).get("output", {})
+        commitment_ledger = state.get("commitment_ledger") or agents.get("commitment_ledger", {}).get("output", {})
+        carbon_pathway = state.get("carbon_pathway_analysis") or agents.get("carbon_pathway", {}).get("output", {})
+        adversarial_triangulation = state.get("adversarial_triangulation") or agents.get("adversarial_triangulation", {}).get("output", {})
+        regulatory_scanning = state.get("regulatory_scanning") or agents.get("regulatory_scanning", {}).get("output", {})
+
         return {
             "metadata": metadata,
             "scores": scores,
@@ -731,6 +738,14 @@ class ProfessionalReportGenerator:
                 "wba_indicator_count": external_data.get("wba_indicator_count", 0),
                 "error": external_data.get("error"),
             },
+            # 2026 Engine High-Fidelity Diagnostics
+            "feature_signals": {
+                "claim_decomposition": claim_decomposition,
+                "commitment_ledger": commitment_ledger,
+                "carbon_pathway": carbon_pathway,
+                "adversarial_triangulation": adversarial_triangulation,
+                "regulatory_scanning": regulatory_scanning,
+            }
         }
 
     def _render_v4_report(self, state: Dict[str, Any], structured: Dict[str, Any], quality: Dict[str, Any]) -> str:
@@ -769,6 +784,41 @@ class ProfessionalReportGenerator:
             f"Overall confidence for this run is {v['report_confidence']} ({v['confidence_pct']:.1f}%)."
         )
 
+        decomposition = state.get("claim_decomposition") if isinstance(state.get("claim_decomposition"), dict) else {}
+        sub_claims = decomposition.get("sub_claims") if isinstance(decomposition.get("sub_claims"), list) else []
+        tensions = decomposition.get("logical_tension_pairs") if isinstance(decomposition.get("logical_tension_pairs"), list) else []
+        contradiction_score = decomposition.get("internal_contradiction_score", 0)
+
+        section_anatomy = [major, "SECTION 3B: CLAIM ANATOMY", major]
+        if not sub_claims:
+            section_anatomy.append("Claim decomposition was not available for this run.")
+        else:
+            section_anatomy.append(f"Original claim decomposed into {len(sub_claims)} sub-claim(s).")
+            section_anatomy.append("")
+            for sc in sub_claims[:8]:
+                if not isinstance(sc, dict):
+                    continue
+                sid = str(sc.get("id") or "SC")
+                txt = str(sc.get("text") or "")
+                ctype = str(sc.get("type") or "policy_claim")
+                related = [t for t in tensions if isinstance(t, dict) and (t.get("claim_a") == sid or t.get("claim_b") == sid)]
+                icon = "✅"
+                if related:
+                    high = any(str(t.get("severity", "")).lower() == "high" for t in related)
+                    icon = "🔴" if high else "⚠️"
+                section_anatomy.append(f"  {sid} {icon} {txt}")
+                section_anatomy.append(f"      Type: {ctype} | Tensions: {len(related)}")
+            if tensions:
+                section_anatomy.append("")
+                section_anatomy.append(f"Internal contradiction score: {self._fmt_score1(contradiction_score, '/100')}")
+                for t in tensions[:4]:
+                    if not isinstance(t, dict):
+                        continue
+                    section_anatomy.append(
+                        f"  - {t.get('claim_a')} + {t.get('claim_b')}: {t.get('tension_type')} ({t.get('severity')})"
+                    )
+        section_anatomy.append(major)
+
         sec2_lines = [
             major,
             "SECTION 4: EVIDENCE CITATIONS TABLE",
@@ -778,6 +828,12 @@ class ProfessionalReportGenerator:
             f"{'#':<4} {'Source Name':<32} {'Tier':<28} {'Verifiable':<11} {'Stance':<12}",
             "-" * 92,
         ]
+        triangulation = state.get("adversarial_triangulation") if isinstance(state.get("adversarial_triangulation"), dict) else {}
+        if triangulation:
+            sec2_lines.insert(4, f"Triangulation Score: {triangulation.get('triangulation_score', 'N/A')}/100")
+            sec2_lines.insert(5, f"Adversarial Ratio: {triangulation.get('adversarial_ratio', 'N/A')} | Balance: {triangulation.get('evidence_balance', 'MIXED')}")
+            sec2_lines.insert(6, f"Supporting: {triangulation.get('corroborating_sources', 0)} | Contradicting: {triangulation.get('contradicting_sources', 0)} | First-party: {triangulation.get('first_party_source_count', 0)}")
+            sec2_lines.insert(7, "")
         source_tier_counts = {
             "t1": 0,
             "t2": 0,
@@ -1092,6 +1148,13 @@ class ProfessionalReportGenerator:
             reg_score = compliance_score
             reg_risk = v["regulatory"].get("risk_level", "Unknown")
         section4.append(f"Jurisdiction: {v['regulatory'].get('jurisdiction', 'N/A')}    Compliance Score: {reg_score}/100    Risk: {reg_risk}")
+        multi_reg = safe_get(v["regulatory"], "multi_jurisdiction", default={})
+        if isinstance(multi_reg, dict) and multi_reg:
+            section4.append(
+                f"Multi-jurisdiction score: {multi_reg.get('total_compliance_score', 'N/A')}/100 | "
+                f"Active litigation: {multi_reg.get('active_litigation_count', 0)} | "
+                f"Highest-risk jurisdiction: {multi_reg.get('highest_risk_jurisdiction', 'N/A')}"
+            )
         section4.append("")
         section4.append(f"  {'Framework':<32} {'Status':<12} {'Gaps':<40}")
         section4.append("  " + "-" * 88)
@@ -1103,6 +1166,14 @@ class ProfessionalReportGenerator:
             status = "[GAP]" if gaps else "[COMPLIANT]"
             gap_txt = " - " if not gaps else str(gaps[0])
             section4.append(f"  {name[:32]:<32} {status:<12} {gap_txt[:40]:<40}")
+        mj_rows = multi_reg.get("jurisdiction_results", []) if isinstance(multi_reg, dict) else []
+        for row in mj_rows[:8]:
+            if not isinstance(row, dict):
+                continue
+            name = f"{row.get('jurisdiction', 'Global')} | {row.get('framework', 'Framework')}"
+            status = str(row.get("status", "cannot_determine")).upper()
+            gap_txt = str(row.get("specific_violation") or row.get("remediation_required") or "-")
+            section4.append(f"  {name[:32]:<32} {status[:12]:<12} {gap_txt[:40]:<40}")
         section4.append("  " + "-" * 88)
         section4.append(major)
 
@@ -1248,6 +1319,25 @@ class ProfessionalReportGenerator:
             section5.append(f"\n  CRITICAL - No emissions data found across {chunks} report chunks.")
             section5.append("  The PDF ESG section filter may be over-aggressive. Manual review required.")
         section5.append("\n" + major)
+
+        pathway = state.get("carbon_pathway_analysis") if isinstance(state.get("carbon_pathway_analysis"), dict) else {}
+        section5b = [major, "SECTION 8B: CARBON PATHWAY ALIGNMENT ANALYSIS", major]
+        if not pathway:
+            section5b.append("Pathway modelling output was not available for this run.")
+        else:
+            section5b.append(f"  Claimed Alignment:     {pathway.get('claimed_pathway', 'N/A')}")
+            section5b.append(f"  Alignment Status:      {str(pathway.get('alignment_status', 'unknown')).upper()}")
+            section5b.append(f"  Pathway Gap:           {pathway.get('pathway_gap_pct', 'N/A')}%")
+            section5b.append(f"  Required Annual Rate:  {pathway.get('implied_cagr_required', 'N/A')}%")
+            section5b.append(f"  Company Implied Rate:  {pathway.get('company_implied_cagr', 'N/A')}%")
+            section5b.append("")
+            section5b.append("  Scope 3 Physical Feasibility:")
+            section5b.append(f"    Scope 3 Share:       {pathway.get('scope3_share_pct', 'N/A')}%")
+            section5b.append(f"    Production Plan:     {pathway.get('production_plan', 'N/A')}")
+            section5b.append(f"    Assessment:          {pathway.get('scope3_feasibility', 'N/A')}")
+            section5b.append("")
+            section5b.append(f"  Carbon Budget Remaining (yrs): {pathway.get('carbon_budget_remaining_yrs', 'N/A')}")
+        section5b.append(major)
 
         green = state.get("greenwishing_analysis") or {}
         climate = state.get("climatebert_analysis") or v["agents"].get("climatebert_analysis", {}).get("output", {})
@@ -1407,11 +1497,45 @@ class ProfessionalReportGenerator:
             section10.append(f"  - {self._wrap_paragraph(str(lim), width=74)}")
         section10.append("\n" + major)
 
+        commitment = state.get("commitment_ledger") if isinstance(state.get("commitment_ledger"), dict) else {}
+        section10b = [major, "SECTION 11B: COMMITMENT TIMELINE", major]
+        if not commitment:
+            section10b.append("No commitment ledger output was available for this run.")
+        else:
+            section10b.append(f"Promise Degradation Score: {commitment.get('promise_degradation_score', 'N/A')}/100")
+            section10b.append(f"Commitments Recorded This Run: {commitment.get('inserted_commitments', 0)}")
+            revisions = commitment.get("revision_events", []) if isinstance(commitment.get("revision_events"), list) else []
+            if revisions:
+                section10b.append("")
+                section10b.append("Revision events detected:")
+                for idx, rev in enumerate(revisions[:5], start=1):
+                    if not isinstance(rev, dict):
+                        continue
+                    section10b.append(
+                        f"  {idx}. {rev.get('revision_type', 'reframed')} | Severity {rev.get('severity', 0)}/100"
+                    )
+                    section10b.append(f"     {rev.get('explanation', '')}")
+            else:
+                section10b.append("No substantive commitment weakening events were detected in this run.")
+        section10b.append(major)
+
         section11 = self._render_esg_mismatch_section(state, major)
 
         appendix_a = [major, "APPENDIX A: VALIDATION & CALIBRATION STATUS", major, self._plain_textify(self._generate_validation_metadata_section(v.get("calibration", {}), company_industry=v.get("industry", "Unknown"))), "", major]
         appendix_b = [major, "APPENDIX B: TEMPORAL ESG CONSISTENCY", major, self._plain_textify(self._generate_temporal_consistency_section(state)), "", major]
         appendix_c = [major, "APPENDIX C: EVIDENCE & OFFSET INTEGRITY", major, self._plain_textify(self._generate_realism_diagnostics_section(state)), "", major]
+
+        n_size = cal.get("dataset_size")
+        if n_size is None or n_size < 30:
+            gw_score_disp = "[SUPPRESSED]"
+            esg_score_disp = "[SUPPRESSED]"
+            band_disp = f"{v['band']} (Score numeric suppressed — calibration sample too small for this sector)"
+            cal_status_disp = f"PROVISIONAL [{cal.get('calibration_status', 'N/A')} - n={n_size or 0}]"
+        else:
+            gw_score_disp = f"{v['gw_score']:.1f} / 100"
+            esg_score_disp = f"{v.get('esg_score', 0):.1f} / 100"
+            band_disp = str(v['band'])
+            cal_status_disp = f"{v['calibration_status']}  [{cal.get('calibration_status', 'N/A')}]"
 
         blocks = {
             "cover": "\n".join([
@@ -1436,11 +1560,12 @@ class ProfessionalReportGenerator:
                 "VERDICT",
                 major,
                 "",
-                f"  Greenwashing Risk Score:  {v['gw_score']:.1f} / 100",
+                f"  Greenwashing Risk Score:  {gw_score_disp}",
+                f"  ESG Score:                {esg_score_disp}",
                 f"  ESG Rating:               {v['rating']}",
-                f"  Risk Band:                {v['band']}",
+                f"  Risk Band:                {band_disp}",
                 f"  Confidence:               {v['confidence_pct']:.1f}%",
-                f"  Calibration Status:       {v['calibration_status']}  [{cal.get('calibration_status', 'N/A')}]",
+                f"  Calibration Status:       {cal_status_disp}",
                 "",
                 "  One-sentence plain-English summary:",
                 self._wrap_paragraph(summary_sentence, width=80),
@@ -1451,14 +1576,17 @@ class ProfessionalReportGenerator:
                 major,
             ]),
             "section1": "\n".join([major, "SECTION 3: EXECUTIVE SUMMARY", major, self._wrap_paragraph(section1_text, width=80), "", major]),
+            "section_anatomy": "\n".join(section_anatomy),
             "section2": "\n".join(sec2_lines),
             "section3": "\n".join(score_header),
             "section6": "\n".join(section6),
             "section4": "\n".join(section4),
             "section5": "\n".join(section5),
+            "section5b": "\n".join(section5b),
             "section7": "\n".join(section7),
             "section9": "\n".join(section9),
             "section10": "\n".join(section10),
+            "section10b": "\n".join(section10b),
             "section11": "\n".join(section11),
             "appendix_a": "\n".join(appendix_a),
             "appendix_b": "\n".join(appendix_b),
@@ -1467,8 +1595,8 @@ class ProfessionalReportGenerator:
         }
 
         ordered_keys = [
-            "cover", "verdict", "section1", "section2", "section3", "section6", "section4", "section5",
-            "section7", "section9", "section10", "section11", "appendix_a", "appendix_b", "appendix_c", "end",
+            "cover", "verdict", "section1", "section_anatomy", "section2", "section3", "section6", "section4", "section5", "section5b",
+            "section7", "section9", "section10", "section10b", "section11", "appendix_a", "appendix_b", "appendix_c", "end",
         ]
         report = "\n\n".join(blocks[k] for k in ordered_keys)
 
@@ -4608,6 +4736,20 @@ KEY PERFORMANCE METRICS
                     "date_retrieved": e.get("date"),
                 }
                 for e in (evidence_struct.get("citations", []) or [])
+                if isinstance(e, dict)
+            ],
+            "evidence_records": [
+                {
+                    "source_name": parse_source_name(e.get("url", "")) if e.get("source_name") in (None, "Unknown", "") else e.get("source_name"),
+                    "source": e.get("source"),
+                    "url": e.get("url"),
+                    "title": e.get("title"),
+                    "snippet": e.get("snippet") or e.get("relevant_text"),
+                    "relationship_to_claim": e.get("relationship_to_claim") or e.get("claim_support") or e.get("stance"),
+                    "reliability_tier": e.get("reliability_tier"),
+                    "date": e.get("date") or e.get("date_retrieved"),
+                }
+                for e in (analysis_state.get("evidence", []) or [])[:1000]
                 if isinstance(e, dict)
             ],
             "agent_results": agent_results,

@@ -38,27 +38,27 @@ from core.company_knowledge_graph import CompanyKnowledgeGraph
 
 class LiveDataFetcher:
     """Fetches live content for claim extraction"""
-    
+
     def __init__(self):
         self.news_api_key = os.getenv("NEWS_API_KEY") or os.getenv("NEWSAPI_KEY")
         self.newsdata_api_key = os.getenv("NEWSDATA_API_KEY") or os.getenv("NEWSDATA_KEY")
-    
+
     def fetch_company_content(self, company_name: str, claim: str = None) -> str:
         """
         Fetch live content about company for claim extraction
         Uses News API to get recent articles
         """
         print(f"\n🔴 LIVE FETCH: Getting fresh content for {company_name}")
-        
+
         try:
             import requests
-            
+
             # Build search query
             if claim:
                 query = f'"{company_name}" AND ({claim}) AND (ESG OR sustainability OR environment)'
             else:
                 query = f'"{company_name}" AND (ESG OR sustainability OR environment OR emissions OR renewable)'
-            
+
             # Try News API first
             if self.news_api_key:
                 print(f"📡 Calling News API (live)...")
@@ -70,35 +70,35 @@ class LiveDataFetcher:
                     "sortBy": "publishedAt",
                     "pageSize": 5
                 }
-                
+
                 response = requests.get(url, params=params, timeout=10)
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     articles = data.get("articles", [])
-                    
+
                     if articles:
                         print(f"✅ Found {len(articles)} recent articles")
-                        
+
                         # Combine article content
                         content = f"Company: {company_name}\n\n"
                         if claim:
                             content += f"Claim to verify: {claim}\n\n"
                         content += "Recent Articles:\n\n"
-                        
+
                         for i, article in enumerate(articles[:3], 1):
                             content += f"Article {i}:\n"
                             content += f"Title: {article.get('title', 'N/A')}\n"
                             content += f"Description: {article.get('description', 'N/A')}\n"
                             content += f"Content: {article.get('content', 'N/A')[:500]}\n"
                             content += f"Published: {article.get('publishedAt', 'N/A')}\n\n"
-                        
+
                         return content
-            
+
             # Fallback: Use the claim itself as content
             print("⚠️ No live articles found, using claim as content")
             return f"Company: {company_name}\nClaim: {claim or 'General ESG analysis'}"
-            
+
         except Exception as e:
             print(f"❌ Live fetch error: {e}")
             # Fallback content
@@ -224,6 +224,22 @@ except ImportError as e:
     REGULATORY_SCANNER_AVAILABLE = False
 
 try:
+    from social_agent import SocialAgent
+    print("✅ SocialAgent loaded")
+    SOCIAL_AGENT_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  SocialAgent import failed: {e}")
+    SOCIAL_AGENT_AVAILABLE = False
+
+try:
+    from governance_agent import GovernanceAgent
+    print("✅ GovernanceAgent loaded")
+    GOVERNANCE_AGENT_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  GovernanceAgent import failed: {e}")
+    GOVERNANCE_AGENT_AVAILABLE = False
+
+try:
     import sys
     ml_models_path = Path(__file__).parent.parent / "ml_models"
     sys.path.insert(0, str(ml_models_path))
@@ -241,6 +257,46 @@ try:
 except ImportError as e:
     print(f"⚠️  ESGExplainabilityEngine import failed: {e}")
     EXPLAINABILITY_AVAILABLE = False
+
+try:
+    from claim_decomposer import ClaimDecomposer
+    print("✅ ClaimDecomposer loaded")
+    CLAIM_DECOMPOSER_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  ClaimDecomposer import failed: {e}")
+    CLAIM_DECOMPOSER_AVAILABLE = False
+
+try:
+    from adversarial_validator import AdversarialEvidenceValidator
+    print("✅ AdversarialEvidenceValidator loaded")
+    ADVERSARIAL_VALIDATOR_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  AdversarialEvidenceValidator import failed: {e}")
+    ADVERSARIAL_VALIDATOR_AVAILABLE = False
+
+try:
+    from carbon_pathway_modeller import CarbonPathwayModeller
+    print("✅ CarbonPathwayModeller loaded")
+    CARBON_PATHWAY_MODELLER_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  CarbonPathwayModeller import failed: {e}")
+    CARBON_PATHWAY_MODELLER_AVAILABLE = False
+
+try:
+    from multi_jurisdiction_regulatory_scanner import MultiJurisdictionRegulatoryScanner
+    print("✅ MultiJurisdictionRegulatoryScanner loaded")
+    MULTI_JURISDICTION_SCANNER_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  MultiJurisdictionRegulatoryScanner import failed: {e}")
+    MULTI_JURISDICTION_SCANNER_AVAILABLE = False
+
+try:
+    from commitment_tracker import CommitmentLedger
+    print("✅ CommitmentLedger loaded")
+    COMMITMENT_LEDGER_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  CommitmentLedger import failed: {e}")
+    COMMITMENT_LEDGER_AVAILABLE = False
 
 # NEW PHASE 7: ESG Report Pipeline
 try:
@@ -290,39 +346,39 @@ def claim_extraction_node(state: ESGState) -> ESGState:
     print(f"Node: claim_extraction")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     # Clear session cache for new analysis (keeps disk cache for reuse)
     if state.get("iteration_count", 0) == 0:
         evidence_cache.clear_session_cache()
-    
+
     if not CLAIM_EXTRACTOR_AVAILABLE:
         from core.minimal_agents import claim_extraction_node as minimal_claim
         return minimal_claim(state)
-    
+
     try:
         extractor = ClaimExtractor()
-        
+
         # LIVE: Fetch fresh content
         live_content = live_fetcher.fetch_company_content(
             company_name=state["company"],
             claim=state["claim"]
         )
-        
+
         print(f"📄 Content size: {len(live_content)} characters")
         print(f"🤖 Calling LLM for claim extraction...")
-        
+
         # Call with both required parameters
         result = extractor.extract_claims(
             company_name=state["company"],
             content=live_content
         )
-        
+
         confidence = 0.8
         if isinstance(result, dict):
             confidence = result.get("confidence", 0.8)
             claims = result.get("claims", [])
             print(f"✅ Extracted {len(claims)} claims")
-        
+
         state["agent_outputs"].append({
             "agent": "claim_extraction",
             "output": result,
@@ -332,9 +388,9 @@ def claim_extraction_node(state: ESGState) -> ESGState:
         })
         state["claim_results"] = result
         state.setdefault("node_execution_order", []).append("Claim Extraction")
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ ClaimExtractor error: {e}")
         import traceback
@@ -344,7 +400,112 @@ def claim_extraction_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.5
         })
-    
+
+    return state
+
+
+def claim_decomposition_node(state: ESGState) -> ESGState:
+    """Decompose compound claims into atomic sub-claims and detect internal tensions."""
+    print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
+    print("Node: claim_decomposition")
+    print("=" * 70)
+
+    claim_text = state.get("claim", "")
+    company = state.get("company", "")
+    industry = state.get("industry", "")
+
+    if not CLAIM_DECOMPOSER_AVAILABLE:
+        decomposition = {
+            "original_claim": claim_text,
+            "sub_claims": [{
+                "id": "SC1",
+                "text": claim_text,
+                "type": "policy_claim",
+                "pillar": "cross-pillar",
+                "measurable": False,
+                "verification_requirements": ["Independent primary-source evidence"],
+                "greenwashing_signal": "unverifiable",
+            }],
+            "logical_tension_pairs": [],
+            "overall_internal_consistency": "consistent",
+            "decomposition_confidence": 0.5,
+            "internal_contradiction_score": 0.0,
+        }
+    else:
+        try:
+            decomposer = ClaimDecomposer()
+            decomposition = decomposer.decompose_claim(company=company, industry=industry, claim_text=claim_text)
+            score = decomposer.compute_internal_contradiction_score(
+                decomposition.get("logical_tension_pairs", [])
+            )
+            decomposition["internal_contradiction_score"] = score
+        except Exception as e:
+            print(f"❌ ClaimDecomposer error: {e}")
+            decomposition = {
+                "original_claim": claim_text,
+                "sub_claims": [{"id": "SC1", "text": claim_text, "type": "policy_claim", "pillar": "cross-pillar", "measurable": False}],
+                "logical_tension_pairs": [],
+                "overall_internal_consistency": "consistent",
+                "decomposition_confidence": 0.4,
+                "internal_contradiction_score": 0.0,
+            }
+
+    state["claim_decomposition"] = decomposition
+    state.setdefault("node_execution_order", []).append("Claim Decomposition")
+    state["agent_outputs"].append({
+        "agent": "claim_decomposition",
+        "output": decomposition,
+        "confidence": decomposition.get("decomposition_confidence", 0.6),
+        "timestamp": datetime.now().isoformat(),
+    })
+    print(f"✅ Decomposed into {len(decomposition.get('sub_claims', []))} sub-claim(s)")
+    return state
+
+
+def adversarial_triangulation_node(state: ESGState) -> ESGState:
+    """Stress-test evidence by balancing supporting vs contradicting sources."""
+    print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
+    print("Node: adversarial_triangulation")
+    print("=" * 70)
+
+    if not ADVERSARIAL_VALIDATOR_AVAILABLE:
+        result = {
+            "triangulation_score": 50.0,
+            "adversarial_ratio": 0.0,
+            "evidence_balance": "MIXED",
+            "source_stances": [],
+            "first_party_bias_warning": False,
+        }
+    else:
+        try:
+            validator = AdversarialEvidenceValidator()
+            result = validator.triangulate(
+                company=state.get("company", ""),
+                claim_text=state.get("claim", ""),
+                evidence=state.get("evidence", []),
+            )
+        except Exception as e:
+            print(f"❌ AdversarialEvidenceValidator error: {e}")
+            result = {
+                "triangulation_score": 50.0,
+                "adversarial_ratio": 0.0,
+                "evidence_balance": "MIXED",
+                "source_stances": [],
+                "first_party_bias_warning": False,
+            }
+
+    state["adversarial_triangulation"] = result
+    state.setdefault("node_execution_order", []).append("Adversarial Triangulation")
+    state["agent_outputs"].append({
+        "agent": "adversarial_triangulation",
+        "output": result,
+        "confidence": 0.72,
+        "timestamp": datetime.now().isoformat(),
+    })
+    print(
+        f"✅ Triangulation score: {result.get('triangulation_score', 'N/A')} | "
+        f"Adversarial ratio: {result.get('adversarial_ratio', 'N/A')}"
+    )
     return state
 
 
@@ -357,34 +518,65 @@ def evidence_retrieval_node(state: ESGState) -> ESGState:
     print(f"Node: evidence_retrieval (with Financial Analyst)")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not EVIDENCE_RETRIEVER_AVAILABLE:
         from core.minimal_agents import evidence_retrieval_node as minimal_evidence
         return minimal_evidence(state)
-    
+
     try:
         retriever = EvidenceRetriever()
-        
+
         print(f"🔍 Live evidence search for: {state['company']}")
         print(f"📡 Calling 15 external APIs + Financial Analyst...")
-        
-        # Create claim dict for evidence retriever
-        claim_dict = {
-            "claim_id": "C1",
-            "claim_text": state["claim"],
-            "category": "sustainability"
-        }
-        
-        # Call retrieve_evidence with proper parameters
-        result = retriever.retrieve_evidence(claim_dict, state["company"])
-        
+
+        decomposition = state.get("claim_decomposition") if isinstance(state.get("claim_decomposition"), dict) else {}
+        sub_claims = decomposition.get("sub_claims") if isinstance(decomposition.get("sub_claims"), list) else []
+
+        if sub_claims:
+            merged_evidence = []
+            sub_results = []
+            confidence_values = []
+            for sc in sub_claims[:6]:
+                if not isinstance(sc, dict):
+                    continue
+                claim_dict = {
+                    "claim_id": sc.get("id") or "C1",
+                    "claim_text": sc.get("text") or state["claim"],
+                    "category": sc.get("type") or "sustainability",
+                    "sub_claim_id": sc.get("id"),
+                }
+                partial = retriever.retrieve_evidence(claim_dict, state["company"])
+                if isinstance(partial, dict):
+                    for ev in partial.get("evidence", []) or []:
+                        if isinstance(ev, dict):
+                            ev["sub_claim_id"] = sc.get("id")
+                    sub_results.append({"sub_claim_id": sc.get("id"), "result": partial})
+                    merged_evidence.extend(partial.get("evidence", []) or [])
+                    confidence_values.append(float(partial.get("confidence", 0.7) or 0.7))
+            result = {
+                "sub_claim_mode": True,
+                "sub_claim_results": sub_results,
+                "evidence": merged_evidence,
+                "evidence_count": len(merged_evidence),
+                "confidence": (sum(confidence_values) / len(confidence_values)) if confidence_values else 0.7,
+            }
+        else:
+            # Create claim dict for evidence retriever
+            claim_dict = {
+                "claim_id": "C1",
+                "claim_text": state["claim"],
+                "category": "sustainability"
+            }
+            # Call retrieve_evidence with proper parameters
+            result = retriever.retrieve_evidence(claim_dict, state["company"])
+
         if isinstance(result, dict):
             evidence_list = result.get("evidence", [])
             confidence = result.get("confidence", 0.7)
             financial_context = result.get("financial_context")  # NEW: From Financial Analyst
-            
+
             print(f"✅ Retrieved {len(evidence_list)} evidence items")
-            
+
             if financial_context:
                 print(f"💰 Financial Analysis (Agent #14):")
                 if "financial_data" in financial_context:
@@ -405,16 +597,16 @@ def evidence_retrieval_node(state: ESGState) -> ESGState:
             evidence_list = result if isinstance(result, list) else []
             confidence = 0.7
             financial_context = None
-        
+
         state["evidence"].extend(evidence_list)
-        
+
         # NEW: Store enrichment data at state level for report access
         if isinstance(result, dict):
             if result.get("indian_financials"):
                 state["indian_financials"] = result["indian_financials"]
             if result.get("company_reports"):
                 state["company_reports"] = result["company_reports"]
-        
+
         state["agent_outputs"].append({
             "agent": "evidence_retrieval",
             "output": result,
@@ -426,9 +618,9 @@ def evidence_retrieval_node(state: ESGState) -> ESGState:
         })
         state["evidence_results"] = result
         state.setdefault("node_execution_order", []).append("Evidence Retrieval")
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ EvidenceRetriever error: {e}")
         import traceback
@@ -438,7 +630,7 @@ def evidence_retrieval_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.3
         })
-    
+
     return state
 
 
@@ -451,7 +643,7 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
     print(f"Node: carbon_extraction (Scope 1/2/3 Analysis)")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not CARBON_EXTRACTOR_AVAILABLE:
         print("⚠️ CarbonExtractor not available - skipping")
         state["agent_outputs"].append({
@@ -460,10 +652,10 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         extractor = CarbonExtractor()
-        
+
         company = state.get("company", "")
         claim_text = state.get("claim", "")
         industry = state.get("industry", "")
@@ -486,18 +678,18 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
             claim_extractor_outputs[-1].get("output", {}).get("report_claims_by_year", {})
             if claim_extractor_outputs else {}
         )
-        
+
         print(f"🌍 Extracting carbon metrics for: {company}")
         print(f"🏭 Industry: {industry}")
         print(f"📊 Evidence items to analyze: {len(evidence)}")
-        
+
         # Create claim dict for carbon extractor
         claim_dict = {
             "claim_id": "C1",
             "claim_text": claim_text,
             "category": "carbon"
         }
-        
+
         # Extract carbon data from evidence
         result = extractor.extract_carbon_data(
             company=company,
@@ -507,18 +699,18 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
             report_claims_by_year=report_claims_by_year,
             report_files=parsed_report_files,
         )
-        
+
         if isinstance(result, dict):
             # Store carbon extraction results in state
             state["carbon_extraction"] = result
             state["carbon_results"] = result
-            
+
             # Display results
             emissions = result.get("emissions", {})
             scope1 = emissions.get("scope1", {})
             scope2 = emissions.get("scope2", {})
             scope3 = emissions.get("scope3", {})
-            
+
             print(f"\n📊 CARBON EXTRACTION RESULTS:")
             print(f"   Scope 1 (Direct): {scope1.get('value', 'N/A')} tCO2e")
             print(f"   Scope 2 (Energy): {scope2.get('value', 'N/A')} tCO2e")
@@ -527,11 +719,11 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
             print(f"   Carbon Intensity: {result.get('intensity_metrics', {}).get('total_emissions_tco2e', 'N/A')}")
             print(f"   Net Zero Target: {result.get('net_zero_target', 'N/A')}")
             print(f"   Data Quality: {result.get('data_quality', 'N/A')}")
-            
+
             confidence = result.get("confidence", 0.7)
         else:
             confidence = 0.5
-        
+
         state["agent_outputs"].append({
             "agent": "carbon_extraction",
             "output": result,
@@ -539,9 +731,9 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
             "timestamp": datetime.now().isoformat()
         })
         state.setdefault("node_execution_order", []).append("Carbon Extraction")
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ CarbonExtractor error: {e}")
         import traceback
@@ -551,7 +743,92 @@ def carbon_extraction_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.3
         })
-    
+
+    return state
+
+
+def carbon_pathway_analysis_node(state: ESGState) -> ESGState:
+    """Model whether current and claimed trajectory aligns with 1.5C-style pathway constraints."""
+    print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
+    print("Node: carbon_pathway_analysis")
+    print("=" * 70)
+
+    carbon = state.get("carbon_extraction") if isinstance(state.get("carbon_extraction"), dict) else {}
+    emissions = carbon.get("emissions") if isinstance(carbon.get("emissions"), dict) else {}
+    scope1 = emissions.get("scope1", {}) if isinstance(emissions.get("scope1"), dict) else {}
+    scope2 = emissions.get("scope2", {}) if isinstance(emissions.get("scope2"), dict) else {}
+    scope3 = emissions.get("scope3", {}) if isinstance(emissions.get("scope3"), dict) else {}
+
+    def _n(x):
+        return float(x) if isinstance(x, (int, float)) else 0.0
+
+    scope1_val = _n(scope1.get("value"))
+    scope2_val = _n(scope2.get("value"))
+    scope3_val = _n(scope3.get("total") if isinstance(scope3.get("total"), (int, float)) else scope3.get("value"))
+
+    target_year = 2030
+    try:
+        import re
+        m = re.search(r"\b(20\d{2})\b", str(state.get("claim", "")))
+        if m:
+            target_year = int(m.group(1))
+    except Exception:
+        pass
+
+    production_plan = "growth" if any(
+        k in str(state.get("claim", "")).lower() for k in ["growth", "increase production", "maintain production"]
+    ) else "stable"
+
+    decomposition = state.get("claim_decomposition") if isinstance(state.get("claim_decomposition"), dict) else {}
+    for sc in decomposition.get("sub_claims", []) if isinstance(decomposition.get("sub_claims"), list) else []:
+        txt = str(sc.get("text", "")).lower()
+        if "decline" in txt or "phase down" in txt:
+            production_plan = "decline"
+
+    if not CARBON_PATHWAY_MODELLER_AVAILABLE:
+        result = {
+            "alignment_status": "misaligned",
+            "pathway_gap_pct": 35.0,
+            "scope3_feasibility": "UNKNOWN",
+            "production_plan": production_plan,
+        }
+    else:
+        try:
+            modeller = CarbonPathwayModeller()
+            result = modeller.model_pathway(
+                company=state.get("company", ""),
+                industry=state.get("industry", ""),
+                claim_text=state.get("claim", ""),
+                scope1=scope1_val,
+                scope2=scope2_val,
+                scope3=scope3_val,
+                base_year=int(carbon.get("reporting_year") or 2023),
+                target_year=target_year,
+                target_reduction_pct=30.0,
+                production_plan=production_plan,
+                claimed_pathway="1.5C" if "1.5" in str(state.get("claim", "")).lower() else "net-zero-2050",
+            )
+        except Exception as e:
+            print(f"❌ CarbonPathwayModeller error: {e}")
+            result = {
+                "alignment_status": "misaligned",
+                "pathway_gap_pct": 35.0,
+                "scope3_feasibility": "UNKNOWN",
+                "production_plan": production_plan,
+            }
+
+    state["carbon_pathway_analysis"] = result
+    state.setdefault("node_execution_order", []).append("Carbon Pathway Analysis")
+    state["agent_outputs"].append({
+        "agent": "carbon_pathway_analysis",
+        "output": result,
+        "confidence": 0.74,
+        "timestamp": datetime.now().isoformat(),
+    })
+    print(
+        f"✅ Alignment: {result.get('alignment_status', 'N/A')} | "
+        f"Gap: {result.get('pathway_gap_pct', 'N/A')}%"
+    )
     return state
 
 
@@ -563,7 +840,7 @@ def greenwishing_detection_node(state: ESGState) -> ESGState:
     print(f"Node: greenwishing_detection")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not GREENWISHING_DETECTOR_AVAILABLE:
         print("⚠️ GreenwishingDetector not available - skipping")
         state["agent_outputs"].append({
@@ -572,22 +849,22 @@ def greenwishing_detection_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         detector = GreenwishingDetector()
-        
+
         company = state.get("company", "")
         claim_text = state.get("claim", "")
         evidence = state.get("evidence", [])
-        
+
         print(f"🎯 Detecting greenwishing/greenhushing for: {company}")
-        
+
         claim_dict = {
             "claim_id": "C1",
             "claim_text": claim_text,
             "category": "sustainability"
         }
-        
+
         parser_outputs = [
             o for o in state.get("agent_outputs", [])
             if o.get("agent") == "report_parser"
@@ -607,30 +884,30 @@ def greenwishing_detection_node(state: ESGState) -> ESGState:
                 "carbon_extraction": state.get("carbon_extraction", {})
             }
         )
-        
+
         if isinstance(result, dict):
             state["greenwishing_analysis"] = result
-            
+
             deception_risk = result.get("overall_deception_risk", {})
             print(f"\n🎭 DECEPTION DETECTION RESULTS:")
             print(f"   Greenwishing Risk: {result.get('greenwishing', {}).get('risk_level', 'N/A')}")
             print(f"   Greenhushing Risk: {result.get('greenhushing', {}).get('risk_level', 'N/A')}")
             print(f"   Selective Disclosure: {result.get('selective_disclosure', {}).get('detected', 'N/A')}")
             print(f"   Overall Deception Score: {deception_risk.get('score', 'N/A')}/100")
-            
+
             confidence = result.get("confidence", 0.75)
         else:
             confidence = 0.5
-        
+
         state["agent_outputs"].append({
             "agent": "greenwishing_detection",
             "output": result,
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ GreenwishingDetector error: {e}")
         import traceback
@@ -640,7 +917,7 @@ def greenwishing_detection_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.3
         })
-    
+
     return state
 
 
@@ -652,7 +929,7 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
     print(f"Node: regulatory_scanning")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not REGULATORY_SCANNER_AVAILABLE:
         print("⚠️ RegulatoryHorizonScanner not available - skipping")
         state["agent_outputs"].append({
@@ -661,17 +938,17 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         scanner = RegulatoryHorizonScanner()
-        
+
         company = state.get("company", "")
         claim_text = state.get("claim", "")
         evidence = state.get("evidence", [])
         industry = state.get("industry", "")
-        
+
         print(f"⚖️ Scanning regulatory compliance for: {company}")
-        
+
         claim_dict = {
             "claim_id": "C1",
             "claim_text": claim_text,
@@ -679,7 +956,7 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
         }
 
         # Determine jurisdiction based on company name heuristics.
-        indian_companies = ["reliance", "tata", "infosys", "hdfc", "icici", "wipro", "bharti", 
+        indian_companies = ["reliance", "tata", "infosys", "hdfc", "icici", "wipro", "bharti",
                           "bajaj", "mahindra", "adani", "larsen", "maruti", "asian paints"]
         company_lower = company.lower()
 
@@ -704,8 +981,8 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
             jurisdiction = "US"
         else:
             jurisdiction = "Global"
-        
-        result = scanner.scan_regulatory_compliance(
+
+        base_result = scanner.scan_regulatory_compliance(
             company=company,
             claim=claim_dict,
             evidence=evidence,
@@ -713,25 +990,51 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
             country=country,
             industry=industry,
         )
-        
+
+        if MULTI_JURISDICTION_SCANNER_AVAILABLE:
+            try:
+                mj = MultiJurisdictionRegulatoryScanner()
+                jurisdictions = mj.detect_jurisdictions(industry=industry, hq_country=country)
+                sbti_status = "unknown"
+                carbon = state.get("carbon_extraction", {})
+                if isinstance(carbon, dict):
+                    sbti_status = str(carbon.get("sbti_status") or "unknown")
+                multi = mj.aggregate_results(
+                    company=company,
+                    claim_text=claim_text,
+                    jurisdictions=jurisdictions,
+                    base_regulatory=base_result if isinstance(base_result, dict) else {},
+                    evidence=evidence,
+                    sbti_status=sbti_status,
+                )
+                result = dict(base_result) if isinstance(base_result, dict) else {}
+                result["multi_jurisdiction"] = multi
+                result["compliance_score"] = multi.get("total_compliance_score", result.get("compliance_score"))
+                result["risk_level"] = str(multi.get("regulatory_risk_level", result.get("risk_level", "Unknown"))).upper()
+            except Exception as e:
+                print(f"⚠️ Multi-jurisdiction aggregation failed: {e}")
+                result = base_result
+        else:
+            result = base_result
+
         if isinstance(result, dict):
             state["regulatory_compliance"] = result
             state["regulatory_results"] = result
-            
+
             print(f"\n⚖️ REGULATORY COMPLIANCE RESULTS:")
             print(f"   Jurisdiction: {result.get('jurisdiction', 'N/A')}")
             print(f"   Applicable Regulations: {len(result.get('applicable_regulations', []))}")
             print(f"   Compliance Score: {result.get('compliance_score', 'N/A')}/100")
             print(f"   Risk Level: {result.get('risk_level', 'N/A')}")
-            
+
             # Show top regulations
             for reg in result.get('applicable_regulations', [])[:3]:
                 print(f"   - {reg}")
-            
+
             confidence = result.get("confidence", 0.8)
         else:
             confidence = 0.5
-        
+
         state["agent_outputs"].append({
             "agent": "regulatory_scanning",
             "output": result,
@@ -739,9 +1042,9 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
             "timestamp": datetime.now().isoformat()
         })
         state.setdefault("node_execution_order", []).append("Regulatory Scanning")
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ RegulatoryHorizonScanner error: {e}")
         import traceback
@@ -751,7 +1054,7 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.3
         })
-    
+
     return state
 
 
@@ -763,7 +1066,7 @@ def climatebert_analysis_node(state: ESGState) -> ESGState:
     print(f"Node: climatebert_analysis")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not CLIMATEBERT_AVAILABLE:
         print("⚠️ ClimateBERTAnalyzer not available - skipping")
         state["agent_outputs"].append({
@@ -772,15 +1075,15 @@ def climatebert_analysis_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         analyzer = ClimateBERTAnalyzer()
-        
+
         claim_text = state.get("claim", "")
         evidence = state.get("evidence", [])
-        
+
         print(f"🤖 Running ClimateBERT NLP analysis...")
-        
+
         # Extract evidence texts for comparison
         evidence_texts = []
         for ev in evidence[:10]:  # Limit to first 10
@@ -788,33 +1091,33 @@ def climatebert_analysis_node(state: ESGState) -> ESGState:
                 text = ev.get("content", ev.get("text", ev.get("snippet", "")))
                 if text:
                     evidence_texts.append(text[:500])
-        
+
         result = analyzer.analyze_claim_for_greenwashing(
             claim_text=claim_text,
             evidence_texts=evidence_texts if evidence_texts else None
         )
-        
+
         if isinstance(result, dict):
             state["climatebert_analysis"] = result
             state["climatebert_results"] = result
-            
+
             claim_analysis = result.get("claim_analysis", {})
             gw_detection = claim_analysis.get("greenwashing_detection", {})
-            
+
             print(f"\n🧠 CLIMATEBERT ANALYSIS RESULTS:")
             print(f"   Climate Relevance: {claim_analysis.get('climate_relevance', {}).get('score', 'N/A')}")
             print(f"   Greenwashing Risk: {gw_detection.get('risk_score', 'N/A')}/100")
             print(f"   Risk Level: {gw_detection.get('risk_level', 'N/A')}")
-            
+
             # Show detected patterns
             patterns = gw_detection.get("detected_patterns", [])
             if patterns:
                 print(f"   Detected Patterns: {', '.join(patterns[:3])}")
-            
+
             confidence = 0.85  # ClimateBERT is high confidence
         else:
             confidence = 0.5
-        
+
         state["agent_outputs"].append({
             "agent": "climatebert_analysis",
             "output": result,
@@ -822,9 +1125,9 @@ def climatebert_analysis_node(state: ESGState) -> ESGState:
             "timestamp": datetime.now().isoformat()
         })
         state.setdefault("node_execution_order", []).append("ClimateBERT Analysis")
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ ClimateBERTAnalyzer error: {e}")
         import traceback
@@ -834,7 +1137,141 @@ def climatebert_analysis_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.3
         })
-    
+
+    return state
+
+
+def social_analysis_node(state: ESGState) -> ESGState:
+    """
+    LIVE: SocialAgent - retrieves social pillar evidence and computes social risk signals.
+    """
+    print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
+    print("Node: social_analysis")
+    print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
+    print("=" * 70)
+
+    if not SOCIAL_AGENT_AVAILABLE:
+        print("⚠️ SocialAgent not available - skipping")
+        state["agent_outputs"].append({
+            "agent": "social_analysis",
+            "output": "Agent not available",
+            "confidence": 0.5,
+        })
+        return state
+
+    try:
+        agent = SocialAgent()
+
+        # Get report chunks
+        parser_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "report_parser"]
+        parsed_chunks = parser_outputs[-1].get("output", {}).get("chunks", []) if parser_outputs else []
+
+        enhanced_evidence = list(state.get("evidence", []))
+        for chunk in parsed_chunks:
+            text = chunk.get("text", str(chunk)) if isinstance(chunk, dict) else str(chunk)
+            if text:
+                enhanced_evidence.append({"snippet": text, "source": "Primary ESG Report"})
+
+        result = agent.analyze(
+            company=state.get("company", ""),
+            claim_text=state.get("claim", ""),
+            industry=state.get("industry", ""),
+            evidence=enhanced_evidence,
+        )
+
+        state["social_analysis"] = result if isinstance(result, dict) else {}
+        confidence = float(result.get("confidence", 0.7)) if isinstance(result, dict) else 0.5
+
+        if isinstance(result, dict):
+            print("✅ Social analysis complete")
+            print(f"   Social Score: {result.get('social_score', 'N/A')}/100")
+            print(f"   Risk Level: {result.get('risk_level', 'N/A')}")
+
+        state.setdefault("node_execution_order", []).append("Social Analysis")
+        state["agent_outputs"].append({
+            "agent": "social_analysis",
+            "output": result,
+            "confidence": confidence,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        print(f"{'✅ NODE COMPLETED':^70}")
+    except Exception as e:
+        print(f"❌ SocialAgent error: {e}")
+        state["agent_outputs"].append({
+            "agent": "social_analysis",
+            "error": str(e),
+            "confidence": 0.4,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    return state
+
+
+def governance_analysis_node(state: ESGState) -> ESGState:
+    """
+    LIVE: GovernanceAgent - parses governance evidence and proxy filing signals.
+    """
+    print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
+    print("Node: governance_analysis")
+    print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
+    print("=" * 70)
+
+    if not GOVERNANCE_AGENT_AVAILABLE:
+        print("⚠️ GovernanceAgent not available - skipping")
+        state["agent_outputs"].append({
+            "agent": "governance_analysis",
+            "output": "Agent not available",
+            "confidence": 0.5,
+        })
+        return state
+
+    try:
+        agent = GovernanceAgent()
+
+        # Get report chunks
+        parser_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "report_parser"]
+        parsed_chunks = parser_outputs[-1].get("output", {}).get("chunks", []) if parser_outputs else []
+
+        enhanced_evidence = list(state.get("evidence", []))
+        for chunk in parsed_chunks:
+            text = chunk.get("text", str(chunk)) if isinstance(chunk, dict) else str(chunk)
+            if text:
+                enhanced_evidence.append({"snippet": text, "source": "Primary ESG Report"})
+
+        result = agent.analyze(
+            company=state.get("company", ""),
+            claim_text=state.get("claim", ""),
+            industry=state.get("industry", ""),
+            evidence=enhanced_evidence,
+        )
+
+        state["governance_analysis"] = result if isinstance(result, dict) else {}
+        confidence = float(result.get("confidence", 0.7)) if isinstance(result, dict) else 0.5
+
+        if isinstance(result, dict):
+            print("✅ Governance analysis complete")
+            print(f"   Governance Score: {result.get('governance_score', 'N/A')}/100")
+            print(f"   Risk Level: {result.get('risk_level', 'N/A')}")
+
+        state.setdefault("node_execution_order", []).append("Governance Analysis")
+        state["agent_outputs"].append({
+            "agent": "governance_analysis",
+            "output": result,
+            "confidence": confidence,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        print(f"{'✅ NODE COMPLETED':^70}")
+    except Exception as e:
+        print(f"❌ GovernanceAgent error: {e}")
+        state["agent_outputs"].append({
+            "agent": "governance_analysis",
+            "error": str(e),
+            "confidence": 0.4,
+            "timestamp": datetime.now().isoformat(),
+        })
+
     return state
 
 
@@ -842,14 +1279,14 @@ def explainability_node(state: ESGState) -> ESGState:
     """
     LIVE: ESGExplainabilityEngine - SHAP/LIME explanations for ML predictions
     Runs AFTER risk_scoring to explain the ML model's decision
-    
+
     PHASE 9: Improved to always return meaningful factors
     """
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: explainability (SHAP/LIME)")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not EXPLAINABILITY_AVAILABLE:
         print("⚠️ ESGExplainabilityEngine not available - skipping")
         state["agent_outputs"].append({
@@ -858,24 +1295,24 @@ def explainability_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         engine = ESGExplainabilityEngine()
-        
+
         # Get ML prediction from risk scorer
         ml_prediction = state.get("ml_prediction", {})
-        
+
         print(f"📊 Generating SHAP/LIME explanations...")
-        
+
         # If we have ML feature data, explain it
         if ml_prediction and isinstance(ml_prediction, dict):
             features = ml_prediction.get("features")
             feature_names = ml_prediction.get("feature_names")
-            
+
             if features is not None and feature_names:
                 import numpy as np
                 features_array = np.array(features).reshape(1, -1) if not isinstance(features, np.ndarray) else features
-                
+
                 # Generate SHAP explanation
                 result = engine.explain_xgboost_prediction(
                     model=None,  # Will use fallback
@@ -896,14 +1333,14 @@ def explainability_node(state: ESGState) -> ESGState:
         else:
             # PHASE 9 FIX: Always extract meaningful factors
             risk_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "risk_scoring"]
-            
+
             if risk_outputs:
                 risk_result = risk_outputs[-1].get("output", {})
                 pillar_scores = risk_result.get("pillar_scores", {})
-                
+
                 # PHASE 9: Build comprehensive factors list from all available data
                 factors = []
-                
+
                 # Primary factors: ESG Pillars
                 if pillar_scores.get("environmental_score") is not None:
                     factors.append({
@@ -912,15 +1349,15 @@ def explainability_node(state: ESGState) -> ESGState:
                         "impact": "high",
                         "direction": "decreases risk" if pillar_scores["environmental_score"] > 60 else "increases risk"
                     })
-                
+
                 if pillar_scores.get("social_score") is not None:
                     factors.append({
                         "feature": "Social Performance",
                         "value": pillar_scores["social_score"],
-                        "impact": "moderate", 
+                        "impact": "moderate",
                         "direction": "decreases risk" if pillar_scores["social_score"] > 50 else "increases risk"
                     })
-                
+
                 if pillar_scores.get("governance_score") is not None:
                     factors.append({
                         "feature": "Governance Structure",
@@ -928,7 +1365,7 @@ def explainability_node(state: ESGState) -> ESGState:
                         "impact": "moderate",
                         "direction": "decreases risk" if pillar_scores["governance_score"] > 50 else "increases risk"
                     })
-                
+
                 # Secondary factors: Contradiction signals
                 contradiction_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "contradiction_analysis"]
                 if contradiction_outputs:
@@ -939,7 +1376,7 @@ def explainability_node(state: ESGState) -> ESGState:
                             "impact": "high",
                             "direction": "increases risk"
                         })
-                
+
                 # Tertiary factors: Historical patterns
                 temporal_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "temporal_analysis"]
                 if temporal_outputs:
@@ -950,7 +1387,7 @@ def explainability_node(state: ESGState) -> ESGState:
                             "impact": "moderate",
                             "direction": "increases risk"
                         })
-                
+
                 # PHASE 9: Ensure we always have factors
                 if not factors:
                     factors = [
@@ -958,7 +1395,7 @@ def explainability_node(state: ESGState) -> ESGState:
                         {"feature": "Historical Regulatory Violations", "impact": "high", "direction": "increases risk"},
                         {"feature": "Weak Social Performance", "impact": "moderate", "direction": "increases risk"}
                     ]
-                
+
                 result = {
                     "method": "ESG Pillar Analysis with Contradiction Detection",
                     "top_factors": factors,
@@ -975,26 +1412,26 @@ def explainability_node(state: ESGState) -> ESGState:
                     ],
                     "human_readable_explanation": "ESG assessment based on available disclosure and historical patterns."
                 }
-        
+
         if isinstance(result, dict):
             state["explainability_report"] = result
             state["explainability_results"] = result
-            
+
             print(f"\n📈 EXPLAINABILITY RESULTS:")
             print(f"   Method: {result.get('method', 'N/A')}")
             print(f"   Top Risk Drivers: {len(result.get('top_factors', []))}")
-            
+
             for i, factor in enumerate(result.get("top_factors", [])[:3], 1):
                 direction_symbol = "⬇️" if "decreases" in factor.get('direction', '') else "⬆️"
                 print(f"   {i}. {factor.get('feature')}: {factor.get('impact')} impact {direction_symbol} {factor.get('direction')}")
-            
+
             if result.get("human_readable_explanation"):
                 print(f"\n   📝 {result['human_readable_explanation'][:120]}...")
-            
+
             confidence = 0.85
         else:
             confidence = 0.5
-        
+
         state["agent_outputs"].append({
             "agent": "explainability",
             "output": result,
@@ -1002,9 +1439,9 @@ def explainability_node(state: ESGState) -> ESGState:
             "timestamp": datetime.now().isoformat()
         })
         state.setdefault("node_execution_order", []).append("Explainability")
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ ESGExplainabilityEngine error: {e}")
         import traceback
@@ -1014,7 +1451,7 @@ def explainability_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.3
         })
-    
+
     return state
 
 
@@ -1023,7 +1460,7 @@ def contradiction_analysis_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: contradiction_analysis")
     print("="*70)
-    
+
     if not CONTRADICTION_ANALYZER_AVAILABLE:
         state["agent_outputs"].append({
             "agent": "contradiction_analysis",
@@ -1031,12 +1468,12 @@ def contradiction_analysis_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         analyzer = ContradictionAnalyzer()
-        
+
         print(f"🔍 Analyzing contradictions...")
-        
+
         contradicting_evidence = []
         evidence_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "evidence_retrieval"]
         if evidence_outputs:
@@ -1048,7 +1485,28 @@ def contradiction_analysis_node(state: ESGState) -> ESGState:
             evidence=state.get("evidence", []),
             contradicting_evidence=contradicting_evidence,
         )
-        
+
+        decomposition = state.get("claim_decomposition") if isinstance(state.get("claim_decomposition"), dict) else {}
+        tension_pairs = decomposition.get("logical_tension_pairs") if isinstance(decomposition.get("logical_tension_pairs"), list) else []
+        if isinstance(result, dict) and tension_pairs:
+            logical_items = []
+            for t in tension_pairs:
+                if not isinstance(t, dict):
+                    continue
+                logical_items.append({
+                    "severity": str(t.get("severity", "medium")).upper(),
+                    "description": str(t.get("tension_description") or "Internal claim tension detected"),
+                    "source": "claim_decomposition",
+                    "source_type": "internal_logic",
+                    "confidence": "HIGH" if str(t.get("severity", "")).lower() == "high" else "MEDIUM",
+                })
+            if logical_items:
+                existing = result.get("contradictions") if isinstance(result.get("contradictions"), list) else []
+                result["contradictions"] = existing + logical_items
+                result["contradiction_list"] = result["contradictions"]
+                result["specific_contradictions"] = result["contradictions"]
+                result["contradictions_found"] = len(result["contradictions"])
+
         contradiction_count = 0
         confidence = 0.75
         if isinstance(result, dict):
@@ -1058,7 +1516,7 @@ def contradiction_analysis_node(state: ESGState) -> ESGState:
             state["contradiction_results"] = result
 
         state.setdefault("node_execution_order", []).append("Contradiction Analysis")
-        
+
         state["agent_outputs"].append({
             "agent": "contradiction_analysis",
             "output": result,
@@ -1066,9 +1524,9 @@ def contradiction_analysis_node(state: ESGState) -> ESGState:
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ ContradictionAnalyzer error: {e}")
         state["agent_outputs"].append({
@@ -1076,7 +1534,7 @@ def contradiction_analysis_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.5
         })
-    
+
     return state
 
 
@@ -1085,7 +1543,7 @@ def temporal_analysis_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: temporal_analysis")
     print("="*70)
-    
+
     if not HISTORICAL_ANALYST_AVAILABLE:
         state["agent_outputs"].append({
             "agent": "temporal_analysis",
@@ -1093,15 +1551,15 @@ def temporal_analysis_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         analyst = HistoricalAnalyst()
-        
+
         print(f"📅 Analyzing historical track record for {state['company']}...")
-        
+
         # FIXED: Call the CORRECT method name
         result = analyst.analyze_company_history(state["company"])
-        
+
         # Extract key metrics for logging
         if isinstance(result, dict):
             reputation = result.get("reputation_score", 50)
@@ -1115,16 +1573,16 @@ def temporal_analysis_node(state: ESGState) -> ESGState:
             confidence = 0.5
 
         state.setdefault("node_execution_order", []).append("Temporal Analysis")
-        
+
         state["agent_outputs"].append({
             "agent": "temporal_analysis",
             "output": result,
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ HistoricalAnalyst error: {e}")
         import traceback
@@ -1134,7 +1592,7 @@ def temporal_analysis_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.5
         })
-    
+
     return state
 
 
@@ -1144,7 +1602,7 @@ def peer_comparison_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: peer_comparison")
     print("="*70)
-    
+
     if not INDUSTRY_COMPARATOR_AVAILABLE:
         state["agent_outputs"].append({
             "agent": "peer_comparison",
@@ -1152,22 +1610,22 @@ def peer_comparison_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         comparator = IndustryComparator()
-        
+
         print(f"🏢 Comparing with industry peers...")
-        
+
         if hasattr(comparator, 'compare'):
             result = comparator.compare(state["company"], state["industry"])
         elif hasattr(comparator, 'analyze'):
             result = comparator.analyze(state["company"])
         else:
             result = {"peers": [], "confidence": 0.5}
-        
+
         confidence = result.get("confidence", 0.75) if isinstance(result, dict) else 0.75
         print(f"✅ Peer comparison complete")
-        
+
         state["agent_outputs"].append({
             "agent": "peer_comparison",
             "output": result,
@@ -1177,9 +1635,9 @@ def peer_comparison_node(state: ESGState) -> ESGState:
         if isinstance(result, dict):
             state["peer_results"] = result
         state.setdefault("node_execution_order", []).append("Peer Comparison")
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ IndustryComparator error: {e}")
         state["agent_outputs"].append({
@@ -1187,7 +1645,7 @@ def peer_comparison_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.5
         })
-    
+
     return state
 
 
@@ -1299,24 +1757,24 @@ def risk_scoring_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: risk_scoring (ML-Enhanced with Financial Analyst)")
     print("="*70)
-    
+
     if not RISK_SCORER_AVAILABLE:
         from core.minimal_agents import risk_scoring_node as minimal_risk
         return minimal_risk(state)
-    
+
     try:
         scorer = RiskScorer()
-        
+
         print(f"⚖️ Calculating risk score for {state['industry']} industry...")
         if scorer.use_ml:
             print(f"🤖 ML model loaded - using hybrid ML + formula approach")
             print(f"   NOTE: XGBoost now has visibility into ESG pillar scores")
         else:
             print(f"📐 Using formula-based scoring only")
-        
+
         # Build all_analyses dict from agent_outputs
         all_analyses = _build_analyses_dict(state)
-        
+
         # Add claim and company for pillar calculation
         all_analyses["claim"] = {
             "claim_id": "C1",
@@ -1355,13 +1813,13 @@ def risk_scoring_node(state: ESGState) -> ESGState:
                     f"verified={fg_summary.get('verified_fact_count', 0)}, "
                     f"linked={fg_summary.get('claim_linked_fact_count', 0)}"
                 )
-        
+
         # Call calculate_final_score with proper parameters
         result = scorer.calculate_final_score(
             company=state["company"],
             all_analyses=all_analyses
         )
-        
+
         if isinstance(result, dict):
             risk_level = result.get("risk_level", "MODERATE")
             rating_grade = result.get("rating_grade", "BBB")
@@ -1370,7 +1828,7 @@ def risk_scoring_node(state: ESGState) -> ESGState:
             high_carbon_flag = result.get("high_carbon_greenwashing_flag", False)
             pillar_scores = result.get("pillar_scores", {})
             esg_override_active = result.get("esg_override_active", False)
-            
+
             print(f"✅ Risk Level: {risk_level}")
             print(f"   Rating Grade: {rating_grade}")
             print(f"   Source: {risk_source}")
@@ -1388,19 +1846,19 @@ def risk_scoring_node(state: ESGState) -> ESGState:
             if result.get("abstain_recommended"):
                 print(f"   Abstention: RECOMMENDED")
                 print(f"   Reason: {result.get('abstention_reason', 'Insufficient evidence')}")
-            
+
             if pillar_scores:
                 print(f"   📊 Pillar Scores:")
                 print(f"      E: {pillar_scores.get('environmental_score', 0):.1f}/100")
                 print(f"      S: {pillar_scores.get('social_score', 0):.1f}/100")
                 print(f"      G: {pillar_scores.get('governance_score', 0):.1f}/100")
-            
+
             if esg_override_active:
                 print(f"   🔒 ESG PILLAR OVERRIDE ACTIVE (bypassed ML)")
-            
+
             if high_carbon_flag:
                 print(f"   🚨 High-Carbon Greenwashing Flag: ACTIVE")
-            
+
             # Show ML contribution if available
             if "ml_prediction" in result and not esg_override_active:
                 ml_info = result["ml_prediction"]
@@ -1414,12 +1872,12 @@ def risk_scoring_node(state: ESGState) -> ESGState:
             risk_level = "MODERATE"
             rating_grade = "BBB"
             confidence = 0.5
-        
+
         state["risk_level"] = risk_level
         state["rating_grade"] = rating_grade  # NEW: Set rating_grade in state
         state["confidence"] = confidence
         state.setdefault("node_execution_order", []).append("Risk Scoring")
-        
+
         state["agent_outputs"].append({
             "agent": "risk_scoring",
             "output": result,
@@ -1428,9 +1886,9 @@ def risk_scoring_node(state: ESGState) -> ESGState:
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ RiskScorer error: {e}")
         import traceback
@@ -1442,7 +1900,7 @@ def risk_scoring_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.5
         })
-    
+
     return state
 
 
@@ -1462,7 +1920,13 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
         "carbon_extraction": state.get("carbon_extraction", {}),
         "greenwishing_analysis": state.get("greenwishing_analysis", {}),
         "regulatory_compliance": state.get("regulatory_compliance", {}),
+        "social_analysis": state.get("social_analysis", {}),
+        "governance_analysis": state.get("governance_analysis", {}),
         "temporal_consistency": {},
+        "claim_decomposition": state.get("claim_decomposition", {}),
+        "adversarial_triangulation": state.get("adversarial_triangulation", {}),
+        "carbon_pathway_analysis": state.get("carbon_pathway_analysis", {}),
+        "commitment_ledger": state.get("commitment_ledger", {}),
         "debate_activated": False,
         "financial_context": None,
         "agent_outputs": list(state.get("agent_outputs", [])),
@@ -1470,17 +1934,17 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
         "external_benchmarks": state.get("external_esg_data", {}),
         "fact_graph": state.get("fact_graph", {}),
     }
-    
+
     for output in state.get("agent_outputs", []):
         agent_name = output.get("agent", "")
         agent_result = output.get("output", {})
-        
+
         if agent_name == "contradiction_analysis":
             if isinstance(agent_result, list):
                 analyses["contradiction_analysis"] = agent_result
             elif isinstance(agent_result, dict) and "contradictions" in agent_result:
                 analyses["contradiction_analysis"] = agent_result["contradictions"]
-        
+
         elif agent_name == "evidence_retrieval":
             if isinstance(agent_result, dict):
                 nested_evidence = agent_result.get("evidence", [])
@@ -1491,19 +1955,19 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
                 # Extract financial context
                 if "financial_context" in output:
                     analyses["financial_context"] = output["financial_context"]
-        
+
         elif agent_name == "credibility_analysis":
             analyses["credibility_analysis"] = agent_result
-        
+
         elif agent_name == "sentiment_analysis":
             if isinstance(agent_result, list):
                 analyses["sentiment_analysis"] = agent_result
             else:
                 analyses["sentiment_analysis"].append(agent_result)
-        
+
         elif agent_name == "temporal_analysis" or agent_name == "historical_analysis":
             analyses["historical_analysis"] = agent_result
-        
+
         elif agent_name == "peer_comparison":
             analyses["peer_comparison"] = agent_result
             analyses["industry_comparison"] = agent_result
@@ -1517,9 +1981,27 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
         elif agent_name == "regulatory_scanning":
             analyses["regulatory_compliance"] = agent_result
 
+        elif agent_name == "social_analysis":
+            analyses["social_analysis"] = agent_result
+
+        elif agent_name == "governance_analysis":
+            analyses["governance_analysis"] = agent_result
+
         elif agent_name == "temporal_consistency":
             analyses["temporal_consistency"] = agent_result
-        
+
+        elif agent_name == "claim_decomposition":
+            analyses["claim_decomposition"] = agent_result
+
+        elif agent_name == "adversarial_triangulation":
+            analyses["adversarial_triangulation"] = agent_result
+
+        elif agent_name == "carbon_pathway_analysis":
+            analyses["carbon_pathway_analysis"] = agent_result
+
+        elif agent_name == "commitment_ledger_update":
+            analyses["commitment_ledger"] = agent_result
+
         elif agent_name == "debate":
             analyses["debate_activated"] = True
             analyses["debate_result"] = agent_result
@@ -1528,7 +2010,7 @@ def _build_analyses_dict(state: ESGState) -> Dict[str, Any]:
             analyses["external_benchmarks"] = agent_result
         elif agent_name == "fact_graph_builder":
             analyses["fact_graph"] = agent_result
-    
+
     return analyses
 
 
@@ -1630,7 +2112,7 @@ def sentiment_analysis_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: sentiment_analysis")
     print("="*70)
-    
+
     if not SENTIMENT_ANALYZER_AVAILABLE:
         state["agent_outputs"].append({
             "agent": "sentiment_analysis",
@@ -1638,12 +2120,12 @@ def sentiment_analysis_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         analyzer = SentimentAnalyzer()
-        
+
         print(f"💭 Analyzing sentiment...")
-        
+
         result = analyzer.analyze_claim_language(
             claim={
                 "claim_id": "C1",
@@ -1652,22 +2134,22 @@ def sentiment_analysis_node(state: ESGState) -> ESGState:
             },
             evidence=state.get("evidence", []),
         )
-        
+
         confidence = result.get("confidence", 0.7) if isinstance(result, dict) else 0.7
         print(f"✅ Sentiment analysis complete")
         if isinstance(result, dict):
             state["sentiment_results"] = result
         state.setdefault("node_execution_order", []).append("Sentiment Analysis")
-        
+
         state["agent_outputs"].append({
             "agent": "sentiment_analysis",
             "output": result,
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ SentimentAnalyzer error: {e}")
         state["agent_outputs"].append({
@@ -1675,7 +2157,7 @@ def sentiment_analysis_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.5
         })
-    
+
     return state
 
 
@@ -1684,7 +2166,7 @@ def credibility_analysis_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: credibility_analysis")
     print("="*70)
-    
+
     if not CREDIBILITY_ANALYST_AVAILABLE:
         state["agent_outputs"].append({
             "agent": "credibility_analysis",
@@ -1692,10 +2174,10 @@ def credibility_analysis_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         analyst = CredibilityAnalyst()
-        
+
         print(f"🔒 Assessing source credibility...")
 
         evidence = state.get("evidence", [])
@@ -1716,7 +2198,7 @@ def credibility_analysis_node(state: ESGState) -> ESGState:
                 "relevant_text": ev.get("relevant_text") or ev.get("snippet") or ev.get("content") or "",
                 "data_freshness_days": ev.get("data_freshness_days", 999),
             })
-        
+
         if hasattr(analyst, 'analyze_sources'):
             result = analyst.analyze_sources(normalized_evidence)
         elif hasattr(analyst, 'analyze'):
@@ -1725,22 +2207,22 @@ def credibility_analysis_node(state: ESGState) -> ESGState:
             result = analyst.assess(normalized_evidence)
         else:
             result = {"overall_credibility": 50, "aggregate_metrics": {"average_credibility": 0.5, "total_sources": len(normalized_evidence)}, "confidence": 0.5}
-        
+
         confidence = result.get("confidence", 0.75) if isinstance(result, dict) else 0.75
         print(f"✅ Credibility assessment complete")
         if isinstance(result, dict):
             state["credibility_results"] = result
         state.setdefault("node_execution_order", []).append("Credibility Analysis")
-        
+
         state["agent_outputs"].append({
             "agent": "credibility_analysis",
             "output": result,
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ CredibilityAnalyst error: {e}")
         state["agent_outputs"].append({
@@ -1748,7 +2230,7 @@ def credibility_analysis_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.5
         })
-    
+
     return state
 
 
@@ -1757,7 +2239,7 @@ def realtime_monitoring_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: realtime_monitoring")
     print("="*70)
-    
+
     if not REALTIME_MONITOR_AVAILABLE:
         state["agent_outputs"].append({
             "agent": "realtime_monitoring",
@@ -1765,18 +2247,18 @@ def realtime_monitoring_node(state: ESGState) -> ESGState:
             "confidence": 0.5
         })
         return state
-    
+
     try:
         monitor = RealTimeMonitor()
-        
+
         print(f"📰 Scraping real-time news for {state['company']}...")
-        
+
         # Use the actual method from your file
         result = monitor.scrape_and_store(
             company=state["company"],
             hours_lookback=24
         )
-        
+
         confidence = 0.7
         if isinstance(result, dict):
             evidence_items = result.get("evidence_items", [])
@@ -1787,7 +2269,7 @@ def realtime_monitoring_node(state: ESGState) -> ESGState:
             confidence = 0.8 if evidence_items else 0.5
 
         state.setdefault("node_execution_order", []).append("Realtime Monitoring")
-        
+
         state["agent_outputs"].append({
             "agent": "realtime_monitoring",
             "output": result,
@@ -1795,9 +2277,9 @@ def realtime_monitoring_node(state: ESGState) -> ESGState:
             "timestamp": datetime.now().isoformat(),
             "live_fetch": True
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ RealTimeMonitor error: {e}")
         state["agent_outputs"].append({
@@ -1805,7 +2287,7 @@ def realtime_monitoring_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.5
         })
-    
+
     return state
 
 
@@ -1814,7 +2296,7 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: confidence_scoring")
     print("="*70)
-    
+
     # Calculate from successful agents only, one confidence per logical agent.
     unique_agent_confidences = {}
     for o in state.get("agent_outputs", []):
@@ -1829,7 +2311,7 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
     confidences = list(unique_agent_confidences.values())
     agent_count = len(confidences)
     assert agent_count < 100, f"Agent count {agent_count} is unreasonably high - counter not being reset"
-    
+
     avg_confidence = sum(confidences) / len(confidences) if confidences else 0.5
 
     # Apply reliability guardrails so sparse evidence runs cannot report inflated confidence.
@@ -1911,7 +2393,7 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
         f"✅ Average confidence: {avg_confidence:.2%} "
         f"(agents={agent_count}, evidence={evidence_count}, verifiable={verifiable_count}, domains={len(unique_domains)})"
     )
-    
+
     state["agent_outputs"].append({
         "agent": "confidence_scoring",
         "output": {
@@ -1931,9 +2413,9 @@ def confidence_scoring_node(state: ESGState) -> ESGState:
         "confidence": avg_confidence,
         "timestamp": datetime.now().isoformat()
     })
-    
+
     print(f"{'✅ NODE COMPLETED':^70}")
-    
+
     return state
 
 
@@ -1980,7 +2462,7 @@ def verdict_generation_node(state: ESGState) -> ESGState:
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: verdict_generation")
     print("="*70)
-    
+
     # ============================================================
     # PRIORITY 0: CHECK FOR ESG PILLAR OVERRIDE (HIGHEST PRIORITY)
     # ============================================================
@@ -2033,27 +2515,27 @@ def verdict_generation_node(state: ESGState) -> ESGState:
             print(f"   Reason: {abstention_reason}")
             print(f"{'✅ NODE COMPLETED':^70}")
             return state
-    
+
     if risk_scorer_outputs:
         risk_scorer_result = risk_scorer_outputs[-1].get("output", {})
         esg_override_active = risk_scorer_result.get("esg_override_active", False)
-        
+
         if esg_override_active:
             print(f"\n✅ ESG PILLAR OVERRIDE DETECTED - Strong Performance")
             print(f"   ESG Score: {risk_scorer_result.get('esg_score', 0)}/100")
             print(f"   Rating: {risk_scorer_result.get('rating_grade', 'A')}")
             print(f"   This override takes HIGHEST PRIORITY")
-            
+
             # Lock the verdict to ESG pillar-based assessment
             locked_risk_level = risk_scorer_result.get("risk_level", "LOW")
             locked_rating = risk_scorer_result.get("rating_grade", "A")
             locked_confidence = risk_scorer_result.get("confidence_level", 90) / 100
-            
+
             state["risk_level"] = locked_risk_level
             state["rating_grade"] = locked_rating
             state["confidence"] = locked_confidence
             state["verdict_locked"] = True
-            
+
             verdict_data = {
                 "company": state["company"],
                 "claim": state["claim"],
@@ -2065,7 +2547,7 @@ def verdict_generation_node(state: ESGState) -> ESGState:
                 "locked_by": "esg_pillar_override",
                 "lock_reason": f"Strong ESG performance (ESG >= 75) - {risk_scorer_result.get('risk_source')}"
             }
-            
+
             state["agent_outputs"].append({
                 "agent": "verdict_generation",
                 "output": verdict_data,
@@ -2073,28 +2555,28 @@ def verdict_generation_node(state: ESGState) -> ESGState:
                 "timestamp": datetime.now().isoformat(),
                 "verdict_locked": True
             })
-            
+
             state["final_verdict"] = verdict_data
-            
+
             print(f"\n🔒 VERDICT LOCKED BY ESG PILLAR OVERRIDE")
             print(f"   Risk Level: {locked_risk_level}")
             print(f"   Rating: {locked_rating}")
             print(f"   Confidence: {locked_confidence:.1%}")
             print(f"{'✅ NODE COMPLETED':^70}")
-            
+
             return state
-    
+
     # ============================================================
     # PRIORITY 1: CHECK IF RISK SCORER LOCKED THE DECISION (Domain Knowledge)
     # ============================================================
     # If risk_scorer already determined HIGH risk for oil_and_gas greenwashing,
     # DO NOT override - this is domain knowledge that must be preserved
-    
+
     if risk_scorer_outputs:
         risk_scorer_result = risk_scorer_outputs[-1].get("output", {})
         high_carbon_flag = risk_scorer_result.get("high_carbon_greenwashing_flag", False)
         risk_source = risk_scorer_result.get("risk_source", "")
-        
+
         # Check if risk scorer applied domain knowledge override
         if "Domain Knowledge Override" in risk_source or high_carbon_flag:
             print(f"\n🔒 VERDICT LOCKED - Risk Scorer Domain Knowledge Override Detected")
@@ -2102,18 +2584,18 @@ def verdict_generation_node(state: ESGState) -> ESGState:
             print(f"   High Carbon Flag: {high_carbon_flag}")
             print(f"   Industry: {state.get('industry')}")
             print(f"   ⚠️ Verdict generation will NOT override domain-specific risk assessment")
-            
+
             # Extract risk scorer's final decision
             locked_risk_level = risk_scorer_result.get("risk_level", "HIGH")
             locked_rating = risk_scorer_result.get("rating_grade", "BB")
             locked_confidence = state.get("confidence", 0.85)
-            
+
             # Lock the state
             state["risk_level"] = locked_risk_level
             state["rating_grade"] = locked_rating
             state["confidence"] = locked_confidence
             state["verdict_locked"] = True
-            
+
             verdict_data = {
                 "company": state["company"],
                 "claim": state["claim"],
@@ -2125,7 +2607,7 @@ def verdict_generation_node(state: ESGState) -> ESGState:
                 "locked_by": "risk_scorer_domain_knowledge",
                 "lock_reason": f"Oil & Gas greenwashing pattern detected - {risk_source}"
             }
-            
+
             state["agent_outputs"].append({
                 "agent": "verdict_generation",
                 "output": verdict_data,
@@ -2133,18 +2615,18 @@ def verdict_generation_node(state: ESGState) -> ESGState:
                 "timestamp": datetime.now().isoformat(),
                 "verdict_locked": True
             })
-            
+
             state["final_verdict"] = verdict_data
-            
+
             print(f"\n✅ LOCKED VERDICT: {locked_risk_level} (Rating: {locked_rating}, Confidence: {locked_confidence:.1%})")
             print(f"{'✅ NODE COMPLETED':^70}")
-            
+
             return state
-    
+
     # ============================================================
     # NORMAL VERDICT GENERATION (if not locked)
     # ============================================================
-    
+
     verdict_data = {
         "company": state["company"],
         "claim": state["claim"],
@@ -2153,29 +2635,29 @@ def verdict_generation_node(state: ESGState) -> ESGState:
         "evidence_count": len(state["evidence"]),
         "timestamp": datetime.now().isoformat()
     }
-    
+
     claim_lower = state["claim"].lower()
     import re
-    
+
     # ============================================================
     # AGENTIC INTELLIGENCE: Extract insights from agent outputs
     # ============================================================
     agent_outputs = state.get("agent_outputs", [])
-    
+
     # Get HistoricalAnalyst findings (LIVE, no hardcoding)
     historical_data = None
     for output in agent_outputs:
         if output.get("agent") == "temporal_analysis":
             historical_data = output.get("output", {})
             break
-    
+
     # Get ContradictionAnalyzer findings
     contradiction_count = 0
     for output in agent_outputs:
         if output.get("agent") == "contradiction_analysis":
             contradiction_count = output.get("contradictions_count", 0)
             break
-    
+
     # Get debate resolution data
     debate_conflict_ratio = 0
     debate_outputs = [o for o in agent_outputs if o.get('agent') in ['debate_orchestrator', 'debate_resolution']]
@@ -2207,8 +2689,8 @@ def verdict_generation_node(state: ESGState) -> ESGState:
 
     # Check if claim uses legitimate terminology WITH metrics
     is_legitimate_carbon_claim = (
-        any(term in claim_lower for term in legitimate_carbon_terms) 
-        and has_metrics 
+        any(term in claim_lower for term in legitimate_carbon_terms)
+        and has_metrics
         and has_year
     )
 
@@ -2233,7 +2715,7 @@ def verdict_generation_node(state: ESGState) -> ESGState:
         print(f"   - Specific metrics: {has_metrics}")
         print(f"   - Dated claim: {has_year}")
         print(f"   - Recognized terminology: carbon negative/net zero")
-        
+
         # FIXED: Actively downgrade to LOW if currently MODERATE
         if state["risk_level"] in ["MODERATE", "HIGH"]:
             original_risk = state["risk_level"]
@@ -2242,12 +2724,12 @@ def verdict_generation_node(state: ESGState) -> ESGState:
             verdict_data["risk_level"] = "LOW"
             verdict_data["downgrade"] = f"From {original_risk} to LOW - verified carbon accounting"
             verdict_data["verified_metrics"] = True
-            
+
             print(f"   🟢 DOWNGRADING: {original_risk} → LOW")
             print(f"   Reason: Verifiable claim with specific date and recognized carbon accounting")
 
 
-    
+
     # ============================================================
     # PRIORITY 2: HISTORICAL ANALYST INTELLIGENCE (AGENTIC)
     # ============================================================
@@ -2309,46 +2791,46 @@ def verdict_generation_node(state: ESGState) -> ESGState:
             verdict_data["risk_level"] = "HIGH"
             verdict_data["escalation"] = "Reactive greenwashing pattern detected"
             verdict_data["historical_intelligence"] = True
-    
+
     # ============================================================
     # PRIORITY 3: CONTRADICTION ANALYZER INTELLIGENCE
     # ============================================================
     if contradiction_count >= 3 and state["risk_level"] == "MODERATE":
         print(f"\n⚠️ AGENTIC DECISION: Multiple contradictions detected")
         print(f"   - Contradictions: {contradiction_count} (threshold: ≥3)")
-        
+
         state["risk_level"] = "HIGH"
         state["confidence"] *= 0.75
         verdict_data["risk_level"] = "HIGH"
         verdict_data["escalation"] = f"Multiple contradictions ({contradiction_count}) detected"
         verdict_data["contradiction_intelligence"] = True
-    
+
     # ============================================================
     # PRIORITY 4: DEBATE ORCHESTRATOR INTELLIGENCE
     # ============================================================
     if debate_conflict_ratio >= 0.60 and state["risk_level"] == "MODERATE":
         print(f"\n⚠️ AGENTIC DECISION: High agent conflict detected")
         print(f"   - Conflict Ratio: {debate_conflict_ratio:.0%} (threshold: ≥60%)")
-        
+
         state["risk_level"] = "HIGH"
         state["confidence"] *= 0.75
         verdict_data["risk_level"] = "HIGH"
         verdict_data["escalation"] = f"Agent disagreement ({debate_conflict_ratio:.0%})"
         verdict_data["debate_intelligence"] = True
-    
+
     # ============================================================
     # PRIORITY 5: HIGH-RISK SUPERLATIVES (Pattern-based)
     # ============================================================
     superlatives = ["greenest", "leader in", "pioneer", "most sustainable", "best in class", "world's leading"]
     if any(sup in claim_lower for sup in superlatives) and state["risk_level"] == "MODERATE":
         print(f"\n⚠️ AGENTIC DECISION: Superlative language detected")
-        
+
         state["risk_level"] = "HIGH"
         state["confidence"] *= 0.70
         verdict_data["risk_level"] = "HIGH"
         verdict_data["escalation"] = "Superlative greenwashing language"
         verdict_data["pattern_intelligence"] = True
-    
+
     # ============================================================
     # PRIORITY 6: VAGUE CLAIMS (High-Risk Sectors)
     # ============================================================
@@ -2356,25 +2838,25 @@ def verdict_generation_node(state: ESGState) -> ESGState:
     vague_keywords = ["committed to", "sustainable", "eco-friendly", "green", "clean energy"]
     keyword_count = sum(1 for kw in vague_keywords if kw in claim_lower)
     has_metrics = bool(re.search(r'\d+%|\d+\s*(tons|MW|GW|million|billion)|20\d{2}', state["claim"]))
-    
+
     if state["industry"] in high_risk_sectors and keyword_count >= 2 and not has_metrics:
         if state["risk_level"] == "MODERATE":
             print(f"\n⚠️ AGENTIC DECISION: Vague high-risk sector claim")
             print(f"   - Sector: {state['industry']} (high baseline risk)")
             print(f"   - Vague keywords: {keyword_count}, Metrics: {has_metrics}")
-            
+
             state["risk_level"] = "HIGH"
             state["confidence"] *= 0.80
             verdict_data["risk_level"] = "HIGH"
             verdict_data["escalation"] = f"Vague claim in {state['industry']} sector"
             verdict_data["sector_intelligence"] = True
-    
+
     # Update final verdict
     verdict_data["final_confidence"] = state["confidence"]
     state["final_verdict"] = verdict_data
-    
+
     print(f"\n✅ AGENTIC VERDICT: {state['risk_level']} (confidence: {state['confidence']:.1%})")
-    
+
     # Log which intelligence sources influenced decision
     intelligence_sources = []
     if verdict_data.get("historical_intelligence"):
@@ -2387,10 +2869,10 @@ def verdict_generation_node(state: ESGState) -> ESGState:
         intelligence_sources.append("Language Pattern Detection")
     if verdict_data.get("sector_intelligence"):
         intelligence_sources.append("Industry Risk Analysis")
-    
+
     if intelligence_sources:
         print(f"   Intelligence Sources: {', '.join(intelligence_sources)}")
-    
+
     state["agent_outputs"].append({
         "agent": "verdict_generation",
         "output": verdict_data,
@@ -2398,55 +2880,102 @@ def verdict_generation_node(state: ESGState) -> ESGState:
         "timestamp": datetime.now().isoformat(),
         "intelligence_sources": intelligence_sources
     })
-    
+
     print(f"{'✅ NODE COMPLETED':^70}")
     return state
 
 
 def report_generation_node(state: ESGState) -> ESGState:
-    """Generate comprehensive report"""
+    """Generate high-fidelity comprehensive report for JPMC Demo"""
     print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
     print(f"Node: report_generation")
     print("="*70)
-    
+
+    risk_results = state.get("risk_results", {})
+    pillar_scores = risk_results.get("pillar_scores", {})
+    reasons = risk_results.get("explainability_top_3_reasons", [])
+    insights = risk_results.get("actionable_insights", {})
+
+    # 5-Feature Signals
+    decomp = state.get("claim_decomposition", {})
+    ledger = state.get("commitment_ledger", {})
+    pathway = state.get("carbon_pathway_analysis", {})
+    triangulation = state.get("adversarial_triangulation", {})
+    reg_scan = state.get("regulatory_compliance", {})
+
     report = f"""
-{'='*70}
-ESG GREENWASHING ANALYSIS REPORT (LIVE)
-{'='*70}
-Company: {state['company']}
-Industry: {state['industry']}
-Analysis Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{'='*80}
+             ESGLens™ | HIGH-FIDELITY GREENWASHING ANALYSIS REPORT
+{'='*80}
+Company: {state['company'].upper()}
+Sector:  {state['industry'].replace('_', ' ').title()}
+Rating:  {risk_results.get('rating_grade', 'N/A')} ({state['risk_level']})
+Confidence: {state['confidence']:.1%} | Workflow: {state.get('workflow_path', 'Deep Scan')}
 
-CLAIM ANALYZED:
-{state['claim']}
+ANALYSIS TIMESTAMP: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+{'='*80}
 
-FINAL ASSESSMENT:
-Risk Level: {state['risk_level']}
-Confidence: {state['confidence']:.2%}
-Workflow Path: {state['workflow_path']}
+[1] EXECUTIVE SUMMARY & INTEGRITY SIGNALS
+--------------------------------------------------------------------------------
+{chr(10).join([f"• {r}" for r in reasons]) if reasons else "No specific integrity signals detected."}
 
-EVIDENCE SUMMARY:
-Total Sources: {len(state['evidence'])}
-Live Fetches: {sum(1 for o in state['agent_outputs'] if o.get('live_fetch'))}
+[2] ESG PILLAR PERFORMANCE (0-100)
+--------------------------------------------------------------------------------
+Environmental: {pillar_scores.get('environmental_score', 0):.1f} | Weight: 35%
+Social:        {pillar_scores.get('social_score', 0):.1f} | Weight: 35%
+Governance:    {pillar_scores.get('governance_score', 0):.1f} | Weight: 30%
+Overall ESG Score: {risk_results.get('esg_score', 0):.1f}
 
-AGENT EXECUTION:
-{len([o for o in state['agent_outputs'] if 'error' not in o])} agents succeeded
-{len([o for o in state['agent_outputs'] if 'error' in o])} agents had errors
+[3] HIGH-FIDELITY DIAGNOSTICS (2026 ENGINE)
+--------------------------------------------------------------------------------
+• CLAIM DECOMPOSITION: {decomp.get('internal_contradiction_score', 0)}/100 Contradiction Risk
+  - Atomic Sub-claims: {len(decomp.get('sub_claims', []))} assertions analyzed.
+  - Logical Tensions: {len(decomp.get('logical_tensions', []))} detected.
 
-{'='*70}
+• COMMITMENT LEDGER: {ledger.get('promise_degradation_score', 0):.1f}/100 Degradation Score
+  - Historical Revisions: {len(ledger.get('revision_events', []))} events tracked.
+  - Trajectory Status: {'DEGRADING' if ledger.get('promise_degradation_score', 0) > 40 else 'STABLE'}
+
+• CARBON PATHWAY MODEL: {pathway.get('alignment_status', 'UNKNOWN').upper()}
+  - 1.5°C Alignment Gap: {pathway.get('pathway_gap_pct', 0):.1f}%
+  - Scientific Credibility: {'HIGH' if pathway.get('pathway_gap_pct', 100) < 15 else 'LOW/BEYOND PHYSICS'}
+
+• ADVERSARIAL TRIANGULATION: {triangulation.get('triangulation_score', 0):.1f}/100 Cross-Source Score
+  - Third-Party Corroboration: {triangulation.get('third_party_corroboration_ratio', 0):.1%}
+  - Bias Detection: {'NEUTRAL' if triangulation.get('triangulation_score', 0) > 60 else 'SKEWED TO FIRST-PARTY'}
+
+• REGULATORY SCANNER: {len(reg_scan.get('compliance_results', []))} Frameworks Scanned
+  - Jurisdictional Gaps: {len([r for r in reg_scan.get('compliance_results', []) if r.get('gap_details')])} detected.
+
+[4] STAKEHOLDER INSIGHTS
+--------------------------------------------------------------------------------
+INVESTOR VIEW: {insights.get('for_investors', 'N/A')}
+
+REGULATORY VIEW: {insights.get('for_regulators', 'N/A')}
+
+CONSUMER VIEW: {insights.get('for_consumers', 'N/A')}
+
+[5] EVIDENCE & JUSTIFICATION GRAPH
+--------------------------------------------------------------------------------
+Total Sources: {len(state['evidence'])} verified items.
+Top Evidence Types: {', '.join(set([e.get('source_type', 'Web') for e in state['evidence'] if isinstance(e, dict)][:5]))}
+
+{'='*80}
+   Generated by ESGLens Multi-Agent Workflow Node: {state.get('workflow_path', 'Phase2')}
+{'='*80}
 """
-    
+
     state["report"] = report
-    print(f"✅ Report generated ({len(report)} characters)")
-    
+    print(f"✅ High-Fidelity Report generated ({len(report)} characters)")
+
     state["agent_outputs"].append({
         "agent": "report_generation",
-        "confidence": 0.9,
+        "confidence": 1.0,
         "timestamp": datetime.now().isoformat()
     })
-    
+
     print(f"{'✅ NODE COMPLETED':^70}")
-    
+
     return state
 
 
@@ -2463,7 +2992,7 @@ def report_discovery_node(state: ESGState) -> ESGState:
     print(f"Node: report_discovery")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not REPORT_DISCOVERY_AVAILABLE:
         print("⚠️  Report Discovery not available - skipping")
         state["agent_outputs"].append({
@@ -2472,19 +3001,19 @@ def report_discovery_node(state: ESGState) -> ESGState:
             "confidence": 0.0
         })
         return state
-    
+
     try:
         company = state.get("company")
         if not company:
             print("⚠️  No company specified - skipping report discovery")
             return state
-        
+
         print(f"[Workflow] Starting ESG report discovery for {company}")
         print(f"🔍 Searching for ESG reports (up to 5 results)...")
-        
+
         # Discover reports using convenience function
         discovered_reports = discover_company_reports(company, max_results=5)
-        
+
         if discovered_reports:
             print(f"✅ Discovered {len(discovered_reports)} reports:")
             for report in discovered_reports[:3]:
@@ -2492,9 +3021,9 @@ def report_discovery_node(state: ESGState) -> ESGState:
                 print(f"     Confidence: {report.get('confidence', 0):.0%}")
         else:
             print(f"⚠️  No ESG reports discovered for {company}")
-        
+
         confidence = 0.7 if discovered_reports else 0.3
-        
+
         state["agent_outputs"].append({
             "agent": "report_discovery",
             "output": {
@@ -2506,9 +3035,9 @@ def report_discovery_node(state: ESGState) -> ESGState:
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ Report Discovery error: {e}")
         import traceback
@@ -2518,7 +3047,7 @@ def report_discovery_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.0
         })
-    
+
     return state
 
 
@@ -2531,34 +3060,34 @@ def report_downloader_node(state: ESGState) -> ESGState:
     print(f"Node: report_downloader")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not REPORT_DOWNLOADER_AVAILABLE:
         print("⚠️  Report Downloader not available - skipping")
         return state
-    
+
     try:
         company = state.get("company")
-        
+
         # Find report discovery output
-        discovery_outputs = [o for o in state.get("agent_outputs", []) 
+        discovery_outputs = [o for o in state.get("agent_outputs", [])
                            if o.get("agent") == "report_discovery"]
-        
+
         if not discovery_outputs:
             print("⚠️  No report discovery output found - skipping download")
             return state
-        
+
         discovered_reports = discovery_outputs[-1].get("output", {}).get("reports", [])
-        
+
         if not discovered_reports:
             print("⚠️  No reports to download")
             return state
-        
+
         print(f"[Workflow] Downloading ESG reports for {company}")
         print(f"📥 Downloading {len(discovered_reports)} discovered reports...")
-        
+
         # Download reports using convenience function
         downloaded_reports = download_company_reports(company, discovered_reports)
-        
+
         if downloaded_reports:
             print(f"✅ Downloaded {len(downloaded_reports)} reports:")
             for report in downloaded_reports:
@@ -2568,9 +3097,9 @@ def report_downloader_node(state: ESGState) -> ESGState:
                 print(f"   - {report.get('year')}: {size_mb:.1f}MB {source}")
         else:
             print(f"⚠️  Failed to download any reports")
-        
+
         confidence = 0.8 if downloaded_reports else 0.3
-        
+
         state["agent_outputs"].append({
             "agent": "report_downloader",
             "output": {
@@ -2582,9 +3111,9 @@ def report_downloader_node(state: ESGState) -> ESGState:
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ Report Downloader error: {e}")
         import traceback
@@ -2594,7 +3123,7 @@ def report_downloader_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.0
         })
-    
+
     return state
 
 
@@ -2607,34 +3136,34 @@ def report_parser_node(state: ESGState) -> ESGState:
     print(f"Node: report_parser")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not REPORT_PARSER_AVAILABLE:
         print("⚠️  Report Parser not available - skipping")
         return state
-    
+
     try:
         company = state.get("company")
-        
+
         # Find report downloader output
-        downloader_outputs = [o for o in state.get("agent_outputs", []) 
+        downloader_outputs = [o for o in state.get("agent_outputs", [])
                             if o.get("agent") == "report_downloader"]
-        
+
         if not downloader_outputs:
             print("⚠️  No downloaded reports found - skipping parsing")
             return state
-        
+
         downloaded_reports = downloader_outputs[-1].get("output", {}).get("downloads", [])
-        
+
         if not downloaded_reports:
             print("⚠️  No reports to parse")
             return state
-        
+
         print(f"[Workflow] Parsing ESG reports for {company}")
         print(f"📄 Parsing {len(downloaded_reports)} reports into chunks...")
-        
+
         # Parse reports using convenience function
         parsed_chunks = parse_downloaded_reports(company, downloaded_reports)
-        
+
         if parsed_chunks:
             print(f"✅ Extracted {len(parsed_chunks)} text chunks:")
             years_found = set(chunk.get("year") for chunk in parsed_chunks)
@@ -2643,9 +3172,9 @@ def report_parser_node(state: ESGState) -> ESGState:
             print(f"   Avg chunk size: {avg_chunk_size} characters")
         else:
             print(f"⚠️  No chunks extracted from reports")
-        
+
         confidence = 0.8 if parsed_chunks else 0.3
-        
+
         state["agent_outputs"].append({
             "agent": "report_parser",
             "output": {
@@ -2658,9 +3187,9 @@ def report_parser_node(state: ESGState) -> ESGState:
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ Report Parser error: {e}")
         import traceback
@@ -2670,7 +3199,7 @@ def report_parser_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.0
         })
-    
+
     return state
 
 
@@ -2683,31 +3212,31 @@ def report_claim_extraction_node(state: ESGState) -> ESGState:
     print(f"Node: report_claim_extraction")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not CLAIM_EXTRACTOR_AVAILABLE:
         print("⚠️  Claim Extractor not available - skipping report claim extraction")
         return state
-    
+
     try:
         company = state.get("company")
-        
+
         # Find report parser output
-        parser_outputs = [o for o in state.get("agent_outputs", []) 
+        parser_outputs = [o for o in state.get("agent_outputs", [])
                          if o.get("agent") == "report_parser"]
-        
+
         if not parser_outputs:
             print("⚠️  No parsed report chunks found - skipping claim extraction")
             return state
-        
+
         parsed_chunks = parser_outputs[-1].get("output", {}).get("chunks", [])
-        
+
         if not parsed_chunks:
             print("⚠️  No chunks to extract claims from")
             return state
-        
+
         print(f"[Workflow] Extracting ESG claims from report chunks for {company}")
         print(f"📊 Processing {len(parsed_chunks)} chunks for claim extraction...")
-        
+
         # Use report-specific claim extraction method
         try:
             extractor = ClaimExtractor()
@@ -2719,7 +3248,7 @@ def report_claim_extraction_node(state: ESGState) -> ESGState:
         except AttributeError:
             print("⚠️  Report chunk extraction method not available - skipping")
             return state
-        
+
         if isinstance(result, dict):
             report_claims_by_year = result.get("report_claims_by_year", {})
             total_claims = result.get("total_report_claims", 0)
@@ -2728,11 +3257,11 @@ def report_claim_extraction_node(state: ESGState) -> ESGState:
             chunks_skipped = result.get("chunks_skipped", 0)
             cache_hits = result.get("cache_hits", 0)
             llm_calls_made = result.get("llm_calls_made", 0)
-            
+
             # Calculate optimization metrics
             total_chunks = chunks_processed + chunks_skipped
             esg_filtering_reduction = (100 * chunks_skipped / total_chunks) if total_chunks > 0 else 0
-            
+
             print(f"\n{'📊 OPTIMIZATION METRICS':=^70}")
             print(f"✅ Extracted {total_claims} claims from reports")
             print(f"\n📈 Pipeline Efficiency:")
@@ -2750,14 +3279,14 @@ def report_claim_extraction_node(state: ESGState) -> ESGState:
                 year_claims = report_claims_by_year.get(year, [])
                 print(f"   - {year}: {len(year_claims)} claims")
             print(f"{'='*70}")
-            
+
             confidence = 0.8 if total_claims > 0 else 0.3
         else:
             report_claims_by_year = {}
             total_claims = 0
             confidence = 0.3
             print("⚠️  Invalid result from claim extraction")
-        
+
         state["agent_outputs"].append({
             "agent": "claim_extractor",
             "output": result if isinstance(result, dict) else {"claims": []},
@@ -2773,9 +3302,9 @@ def report_claim_extraction_node(state: ESGState) -> ESGState:
                 "llm_calls_made": result.get("llm_calls_made", 0) if isinstance(result, dict) else 0
             }
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ Report Claim Extraction error: {e}")
         import traceback
@@ -2786,7 +3315,7 @@ def report_claim_extraction_node(state: ESGState) -> ESGState:
             "confidence": 0.0,
             "source": "report_chunks"
         })
-    
+
     return state
 
 
@@ -2800,18 +3329,18 @@ def temporal_consistency_node(state: ESGState) -> ESGState:
     print(f"Node: temporal_consistency")
     print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
-    
+
     if not TEMPORAL_CONSISTENCY_AVAILABLE:
         print("⚠️  Temporal Consistency Agent not available - skipping")
         return state
-    
+
     try:
         company = state.get("company")
-        
+
         # Check if we have report claims from report_claim_extraction_node
-        claim_extractor_outputs = [o for o in state.get("agent_outputs", []) 
+        claim_extractor_outputs = [o for o in state.get("agent_outputs", [])
                                   if o.get("agent") == "claim_extractor" and o.get("source") == "report_chunks"]
-        
+
         if not claim_extractor_outputs:
             print("⚠️  No PDF chunks — running temporal analysis on web evidence (reduced accuracy mode)")
             web_claims = {}
@@ -2844,14 +3373,14 @@ def temporal_consistency_node(state: ESGState) -> ESGState:
                 "mode": "web_evidence_fallback",
             })
             return state
-        
+
         latest_claim_output = claim_extractor_outputs[-1]
         report_claims_by_year = latest_claim_output.get("report_claims_by_year", {})
         if not report_claims_by_year:
             claim_extractor_output = latest_claim_output.get("output", {})
             if isinstance(claim_extractor_output, dict):
                 report_claims_by_year = claim_extractor_output.get("report_claims_by_year", {})
-        
+
         if not report_claims_by_year:
             # Fallback: derive lightweight claims directly from parsed report chunks.
             parser_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "report_parser"]
@@ -2882,45 +3411,45 @@ def temporal_consistency_node(state: ESGState) -> ESGState:
         if not report_claims_by_year:
             print("⚠️  No report claims by year - skipping temporal consistency analysis")
             return state
-        
+
         print(f"[Workflow] Running temporal consistency analysis for {company}")
         print(f"📈 Analyzing claim trends across {len(report_claims_by_year)} years...")
-        
+
         # Call temporal consistency analysis
         result = analyze_temporal_consistency(company, report_claims_by_year, state.get("agent_outputs", []))
-        
+
         if isinstance(result, dict):
             temporal_score = result.get("temporal_consistency_score", 50)
             risk_level = result.get("risk_level", "MODERATE")
             claim_trend = result.get("claim_trend", "unknown")
             env_trend = result.get("environmental_trend", "unknown")
-            
+
             print(f"✅ Temporal Consistency Analysis Complete:")
             print(f"   Score: {temporal_score:.0f}/100")
             print(f"   Risk Level: {risk_level}")
             print(f"   Claim Trend: {claim_trend}")
             print(f"   Environmental Trend: {env_trend}")
-            
+
             evidence = result.get("evidence", [])
             if evidence:
                 print(f"   Key Findings: {len(evidence)} inconsistencies detected")
                 for item in evidence[:2]:
                     print(f"   - {item[:70]}...")
-            
+
             confidence = 0.85
         else:
             print("⚠️  Invalid result from temporal consistency analysis")
             confidence = 0.3
-        
+
         state["agent_outputs"].append({
             "agent": "temporal_consistency",
             "output": result if isinstance(result, dict) else {"status": "error"},
             "confidence": confidence,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         print(f"{'✅ NODE COMPLETED':^70}")
-        
+
     except Exception as e:
         print(f"❌ Temporal Consistency error: {e}")
         import traceback
@@ -2930,7 +3459,70 @@ def temporal_consistency_node(state: ESGState) -> ESGState:
             "error": str(e),
             "confidence": 0.0
         })
-    
+
+    return state
+
+
+def commitment_ledger_update_node(state: ESGState) -> ESGState:
+    """Persist current commitments and detect revisions/degradation trajectory."""
+    print(f"\n{'🟢 LANGGRAPH NODE EXECUTING':=^70}")
+    print("Node: commitment_ledger_update")
+    print("=" * 70)
+
+    if not COMMITMENT_LEDGER_AVAILABLE:
+        state["commitment_ledger"] = {
+            "inserted_commitments": 0,
+            "revision_events": [],
+            "promise_degradation_score": 0.0,
+            "status": "unavailable",
+        }
+        state["agent_outputs"].append({
+            "agent": "commitment_ledger_update",
+            "output": state["commitment_ledger"],
+            "confidence": 0.4,
+            "timestamp": datetime.now().isoformat(),
+        })
+        return state
+
+    decomposition = state.get("claim_decomposition") if isinstance(state.get("claim_decomposition"), dict) else {}
+    sub_claims = decomposition.get("sub_claims") if isinstance(decomposition.get("sub_claims"), list) else []
+    if not sub_claims:
+        sub_claims = [{"id": "SC1", "text": state.get("claim", ""), "type": "policy_claim"}]
+
+    try:
+        ledger = CommitmentLedger("data/commitment_ledger.db")
+        run_date = datetime.now().date().isoformat()
+        run_id = f"{state.get('company', 'company')}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        output = ledger.update_from_subclaims(
+            company=state.get("company", ""),
+            run_id=run_id,
+            run_date=run_date,
+            sub_claims=sub_claims,
+            evidence=state.get("evidence", []),
+        )
+        output["status"] = "ok"
+    except Exception as e:
+        print(f"❌ CommitmentLedger error: {e}")
+        output = {
+            "inserted_commitments": 0,
+            "revision_events": [],
+            "promise_degradation_score": 0.0,
+            "status": "error",
+            "error": str(e),
+        }
+
+    state["commitment_ledger"] = output
+    state.setdefault("node_execution_order", []).append("Commitment Ledger Update")
+    state["agent_outputs"].append({
+        "agent": "commitment_ledger_update",
+        "output": output,
+        "confidence": 0.73,
+        "timestamp": datetime.now().isoformat(),
+    })
+    print(
+        f"✅ Ledger updated: commitments={output.get('inserted_commitments', 0)} | "
+        f"promise_degradation={output.get('promise_degradation_score', 0)}"
+    )
     return state
 
 
@@ -2944,11 +3536,11 @@ def esg_mismatch_node(state: ESGState) -> ESGState:
     Executes the ESG Mismatch Detector to compare company promises vs actual evidence.
     """
     print(f"\n{'?? NODE: ESG Mismatch Detector':=^70}")
-    
+
     # Initialize state collections if missing
     if "agent_outputs" not in state or not isinstance(state["agent_outputs"], list):
         state["agent_outputs"] = []
-        
+
     company = state.get("company", "")
     if not company or analyze_company_esg is None:
         print(f"?? Skipping mismatch detection (missing company name or module unavailable)")
@@ -2959,45 +3551,45 @@ def esg_mismatch_node(state: ESGState) -> ESGState:
             "timestamp": datetime.now().isoformat()
         })
         return state
-        
+
     try:
         print(f"?? Analyzing ESG promises vs reality for: {company}")
-        
+
         # Call the standalone pipeline
         # Note: the pipeline relies on caching internally.
         mismatch_results = analyze_company_esg(company)
-        
+
         if isinstance(mismatch_results, dict):
             # Save raw structure to state
             state["esg_mismatch_analysis"] = mismatch_results
-            
+
             risk = mismatch_results.get("Overall Greenwashing Risk", "Unknown")
             print(f"   Mismatch Risk Level: {risk}")
-            
+
             # Decide a confidence baseline
             confidence = 0.8 if risk in ["High", "Severe", "Violation Detected"] else 0.6
-                
+
             state["agent_outputs"].append({
                 "agent": "esg_mismatch",
                 "output": mismatch_results,
                 "confidence": confidence,
                 "timestamp": datetime.now().isoformat()
             })
-            
+
         else:
             print(f"?? Unexpected mismatch result format: {type(mismatch_results)}")
-            
+
     except Exception as e:
         print(f"? Error in ESG Mismatch Detector: {e}")
         import traceback
         traceback.print_exc()
-        
+
         state["agent_outputs"].append({
             "agent": "esg_mismatch",
             "error": str(e),
             "confidence": 0.0,
             "timestamp": datetime.now().isoformat()
         })
-        
+
     print(f"{'='*70}")
     return state

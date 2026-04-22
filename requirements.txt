@@ -43,6 +43,7 @@ langchain-core>=0.3.0
 
 # ClimateBERT NLP Integration
 transformers>=4.35.0
+sentence-transformers>=3.0.0
 torch>=2.0.0
 sentencepiece>=0.1.99
 

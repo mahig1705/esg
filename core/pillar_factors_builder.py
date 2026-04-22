@@ -548,7 +548,7 @@ def _score_indicator(
     unit = None
     methodology = None
 
-    if carbon_data and isinstance(carbon_data, dict) and "ghg" in name.lower() or "emission" in name.lower():
+    if isinstance(carbon_data, dict) and ("ghg" in name.lower() or "emission" in name.lower()):
         emissions = safe_get(carbon_data, "emissions", default={})
         if isinstance(emissions, dict):
             scope1_val = safe_get(emissions, "scope1", "value")
