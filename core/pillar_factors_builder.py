@@ -135,6 +135,43 @@ _INDUSTRY_EXTRA = {
 
 # Structured scoring rules to replace keyword-only scoring for selected indicators.
 _STRUCTURED_SCORING_RULES: Dict[str, Dict[str, Any]] = {
+    "Water Usage & Stress": {
+        "primary_metric": "Water withdrawal/intensity disclosure",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 90.0,
+            "above_average": 70.0,
+            "average": 50.0,
+            "below_average": 30.0,
+        },
+        "metric_patterns": [
+            r"water[^.\n]{0,80}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"water[^.\n]{0,80}?(\d[\d,\.]+)\s*(?:million\s*m3|m3|m\^3|cubic\s*met(?:er|re)s?)",
+        ],
+        "claim_keywords": ["water", "water stress", "water usage", "wastewater", "withdrawal"],
+        "policy_keywords": ["water policy", "water stewardship", "cdp water", "grI 303", "aqueduct"],
+        "source_hint": "CDP Water, sustainability report environmental tables",
+        "gri_alignment": ["GRI 303-1", "GRI 303-3"],
+        "sasb_alignment": ["SASB IF-EU-140a.1"],
+    },
+    "ESG Disclosure Quality": {
+        "primary_metric": "Disclosure completeness across carbon and verification controls",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 90.0,
+            "above_average": 70.0,
+            "average": 50.0,
+            "below_average": 30.0,
+        },
+        "metric_patterns": [],
+        "claim_keywords": ["disclosure", "transparency", "reporting", "gri", "tcfd", "sbti", "scope 3"],
+        "policy_keywords": ["assurance", "verified", "audited", "methodology", "third-party"],
+        "source_hint": "Integrated report + carbon disclosure completeness",
+        "gri_alignment": ["GRI 2-1", "GRI 2-3"],
+        "sasb_alignment": ["SASB CG-MR-000.A"],
+    },
     "Board Diversity": {
         "primary_metric": "Board gender/diversity representation (%)",
         "metric_unit": "%",
@@ -392,9 +429,67 @@ def _score_structured_indicator(
     indicator: Dict[str, Any],
     rule: Dict[str, Any],
     evidence_sources: List[Dict[str, Any]],
+    carbon_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Structured indicator scoring with quantitative thresholds and explicit fallback."""
     name = indicator["name"]
+    if name == "ESG Disclosure Quality" and isinstance(carbon_data, dict):
+        emissions = carbon_data.get("emissions", {}) if isinstance(carbon_data.get("emissions"), dict) else {}
+        scope1 = safe_get(emissions, "scope1", "value")
+        scope2 = safe_get(emissions, "scope2", "value")
+        scope3 = safe_get(emissions, "scope3", "total")
+        if scope3 is None:
+            scope3 = safe_get(emissions, "scope3", "value")
+        scope3_categories = safe_get(emissions, "scope3", "categories", default={})
+        if isinstance(scope3_categories, dict):
+            scope3_cat_count = len(scope3_categories)
+        elif isinstance(scope3_categories, list):
+            scope3_cat_count = len(scope3_categories)
+        else:
+            scope3_cat_count = 0
+        sbti_status = str(carbon_data.get("sbti_status") or "").lower()
+        renewable_disclosed = (
+            carbon_data.get("renewable_energy_percentage") is not None
+            or carbon_data.get("renewable_pct") is not None
+            or carbon_data.get("renewable_status") is not None
+        )
+        offset_status = str(safe_get(carbon_data, "offset_transparency", "status", default="")).lower()
+        third_party_verified = bool(
+            str(carbon_data.get("verification_status", "")).strip()
+            and "unverified" not in str(carbon_data.get("verification_status", "")).lower()
+        )
+        checks = [
+            (scope1 is not None, 15),
+            (scope2 is not None, 15),
+            (scope3 is not None, 10),
+            (scope3_cat_count >= 5, 10),
+            (sbti_status not in {"", "not submitted", "unverified"}, 15),
+            (renewable_disclosed, 10),
+            (offset_status not in {"", "not disclosed", "no_offset_disclosure", "unknown"}, 10),
+            (third_party_verified, 10),
+            (bool(carbon_data.get("net_zero_target")), 5),
+        ]
+        earned = sum(weight for passed, weight in checks if passed)
+        score = round(float(earned), 1)
+        return {
+            "name": name,
+            "score": score,
+            "weight": indicator["weight"],
+            "data_source": "Computed disclosure completeness checklist",
+            "source_url": None,
+            "data_year": 2024,
+            "methodology": "Weighted completeness checklist across core disclosure controls.",
+            "raw_value": f"{earned}/100 checklist points",
+            "unit": "%",
+            "verified": third_party_verified,
+            "primary_metric": rule.get("primary_metric"),
+            "metric_source_hint": rule.get("source_hint"),
+            "gri_alignment": rule.get("gri_alignment", []),
+            "sasb_alignment": rule.get("sasb_alignment", []),
+            "fallback_rule": "computed score (no hardcoded 100 defaults)",
+            "scoring_model": "structured_threshold_v1",
+        }
+
     metric_match = _extract_best_metric_value(rule, evidence_sources)
 
     thresholds = rule.get("thresholds", {})
@@ -550,7 +645,7 @@ def _score_indicator(
 
     structured_rule = _STRUCTURED_SCORING_RULES.get(name)
     if structured_rule:
-        return _score_structured_indicator(indicator, structured_rule, evidence_sources)
+        return _score_structured_indicator(indicator, structured_rule, evidence_sources, carbon_data=carbon_data)
 
     keywords = indicator.get("keywords", [])
 
@@ -762,11 +857,11 @@ def build_pillar_factors(
         for ind in env_indicators
     ]
     soc_scored = [
-        _score_indicator(ind, evidence_texts, evidence_sources, None)
+        _score_indicator(ind, evidence_texts, evidence_sources, carbon_data)
         for ind in soc_indicators
     ]
     gov_scored = [
-        _score_indicator(ind, evidence_texts, evidence_sources, None)
+        _score_indicator(ind, evidence_texts, evidence_sources, carbon_data)
         for ind in gov_indicators
     ]
 

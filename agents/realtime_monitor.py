@@ -188,12 +188,13 @@ class RealTimeMonitor:
         """Extract full content - BLOCKS problematic domains"""
         enriched = []
         
-        # Blocklist - sites that block scraping
+        # Blocklist - sites that block scraping or tarpit connections
         blocked_domains = [
             'yahoo.com', 'finance.yahoo', 
             'zhihu.com', 'baidu.com', 'weibo.com',  # Chinese sites
             'teslaaccessories.com',
-            'mckinsey.com/~/med'  # Broken URLs
+            'mckinsey.com/~/med',  # Broken URLs
+            'reuters.com', 'spglobal.com', 'bloomberg.com', 'wsj.com', 'ft.com', 'nytimes.com', 'seekingalpha.com'
         ]
         
         for i, article in enumerate(articles):
@@ -214,10 +215,10 @@ class RealTimeMonitor:
             # Rest of your existing code...
 
                 
-                # Use newspaper3k with better headers
+                # Use newspaper3k with better headers and strict timeout
                 news_article = Article(url)
                 news_article.config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                news_article.config.request_timeout = 10
+                news_article.config.request_timeout = 3  # Fail fast to prevent pipeline hangs
                 
                 news_article.download()
                 news_article.parse()

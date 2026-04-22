@@ -497,12 +497,29 @@ class IndustryComparator:
 
     def compare(self, company: str, industry: str) -> Dict[str, Any]:
         """Primary entrypoint used by the workflow wrapper."""
-        table = self.generate_dynamic_peer_table(company=company, industry=industry)
-        if not isinstance(table, dict):
-            return {"peers": [], "confidence": 0.5, "data_source": "none"}
+        try:
+            table = self.generate_dynamic_peer_table(company=company, industry=industry)
+            if not isinstance(table, dict):
+                return {
+                    "peers": [],
+                    "confidence": 0.5,
+                    "data_source": "none",
+                    "error": "Invalid peer table format",
+                    "fallback_used": True
+                }
 
-        table["confidence"] = 0.8 if table.get("real_peer_count", 0) >= 2 else 0.6
-        return table
+            table["confidence"] = 0.8 if table.get("real_peer_count", 0) >= 2 else 0.6
+            return table
+        except Exception as e:
+            print(f"⚠️ Industry comparator failed ({e}) - returning fallback")
+            return {
+                "peers": [],
+                "confidence": 0.4,
+                "data_source": "none",
+                "error": str(e),
+                "fallback_used": True,
+                "available": False
+            }
 
     def analyze(self, company: str) -> Dict[str, Any]:
         """Backward-compatible alias for older wrappers."""

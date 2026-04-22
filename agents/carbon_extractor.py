@@ -52,7 +52,7 @@ SCOPE3_INDUSTRY_MINIMUMS = {
     "consumer goods": 10_000_000,
     "fmcg": 10_000_000,
     "retail": 10_000_000,
-    "automotive": 50_000_000,
+    "automotive": 1_000_000,
     "technology": 1_000_000,
     "healthcare": 1_000_000,
     "manufacturing": 10_000_000,
@@ -1007,6 +1007,25 @@ class CarbonExtractor:
             "waste_data": extracted_data.get("waste_data"),
             **additional_info  # Include net zero target, renewable %, etc.
         }
+
+        scope1_val = (result.get("emissions", {}).get("scope1", {}) or {}).get("value")
+        scope2_val = (result.get("emissions", {}).get("scope2", {}) or {}).get("value")
+        scope3_val = (
+            (result.get("emissions", {}).get("scope3", {}) or {}).get("total")
+            or (result.get("emissions", {}).get("scope3", {}) or {}).get("value")
+        )
+        try:
+            s1 = float(scope1_val or 0)
+            s2 = float(scope2_val or 0)
+            s3 = float(scope3_val or 0)
+            total = s1 + s2 + s3
+            result["scope3_share_pct"] = round((s3 / total) * 100, 1) if total > 0 else None
+        except Exception:
+            result["scope3_share_pct"] = None
+
+        sbti_status_txt = str(result.get("sbti_status") or additional_info.get("sbti_status") or "").strip().lower()
+        result.setdefault("flags", {})
+        result["flags"]["sbti_not_submitted"] = sbti_status_txt == "not submitted"
 
         result["net_zero_target"] = (
             result.get("net_zero_target")

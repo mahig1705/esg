@@ -451,6 +451,15 @@ def claim_decomposition_node(state: ESGState) -> ESGState:
             }
 
     state["claim_decomposition"] = decomposition
+    sub_claims = decomposition.get("sub_claims") if isinstance(decomposition.get("sub_claims"), list) else []
+    if len(sub_claims) < 2 and len(str(claim_text).split()) >= 10:
+        # Hard floor for long claims: force at least two atomic checks.
+        fallback = [
+            {"id": "SC1", "text": str(claim_text).strip(), "type": "policy_claim", "pillar": "cross-pillar", "measurable": False},
+            {"id": "SC2", "text": "Implicit verification requirement: comparative baseline, scope, and mechanism evidence required.", "type": "verification_requirement", "pillar": "cross-pillar", "measurable": True},
+        ]
+        decomposition["sub_claims"] = fallback
+        state["claim_decomposition"] = decomposition
     state.setdefault("node_execution_order", []).append("Claim Decomposition")
     state["agent_outputs"].append({
         "agent": "claim_decomposition",
@@ -470,9 +479,9 @@ def adversarial_triangulation_node(state: ESGState) -> ESGState:
 
     if not ADVERSARIAL_VALIDATOR_AVAILABLE:
         result = {
-            "triangulation_score": 50.0,
+            "triangulation_score": None,
             "adversarial_ratio": 0.0,
-            "evidence_balance": "MIXED",
+            "evidence_balance": "UNCLASSIFIED — validator unavailable",
             "source_stances": [],
             "first_party_bias_warning": False,
         }
@@ -487,9 +496,9 @@ def adversarial_triangulation_node(state: ESGState) -> ESGState:
         except Exception as e:
             print(f"❌ AdversarialEvidenceValidator error: {e}")
             result = {
-                "triangulation_score": 50.0,
+                "triangulation_score": None,
                 "adversarial_ratio": 0.0,
-                "evidence_balance": "MIXED",
+                "evidence_balance": "UNCLASSIFIED — validator failed",
                 "source_stances": [],
                 "first_party_bias_warning": False,
             }
@@ -983,6 +992,7 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
         else:
             jurisdiction = "Global"
 
+        carbon_state = state.get("carbon_extraction", {}) if isinstance(state.get("carbon_extraction"), dict) else {}
         base_result = scanner.scan_regulatory_compliance(
             company=company,
             claim=claim_dict,
@@ -990,6 +1000,7 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
             jurisdiction=jurisdiction,
             country=country,
             industry=industry,
+            carbon_data=carbon_state,
         )
 
         if MULTI_JURISDICTION_SCANNER_AVAILABLE:
@@ -1010,8 +1021,44 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
                 )
                 result = dict(base_result) if isinstance(base_result, dict) else {}
                 result["multi_jurisdiction"] = multi
-                result["compliance_score"] = multi.get("total_compliance_score", result.get("compliance_score"))
-                result["risk_level"] = str(multi.get("regulatory_risk_level", result.get("risk_level", "Unknown"))).upper()
+                unified_frameworks = multi.get("jurisdiction_results", []) if isinstance(multi, dict) else []
+                gap_count = sum(
+                    1 for row in unified_frameworks
+                    if isinstance(row, dict) and str(row.get("status", "")).lower() != "compliant"
+                )
+                unified_score = float(multi.get("total_compliance_score", 0.0))
+                assert not (gap_count == 0 and unified_score < 40), (
+                    f"Compliance score {unified_score} inconsistent with 0 gaps"
+                )
+                result["compliance_result"] = {
+                    "score": round(unified_score, 1),
+                    "risk_level": str(multi.get("regulatory_risk_level", result.get("risk_level", "Unknown"))).upper(),
+                    "frameworks": unified_frameworks,
+                    "gap_count": gap_count,
+                    "jurisdiction": multi.get("highest_risk_jurisdiction", jurisdiction),
+                }
+                result["compliance_score"] = {
+                    "score": result["compliance_result"]["score"],
+                    "risk_level": result["compliance_result"]["risk_level"],
+                    "gap_count": result["compliance_result"]["gap_count"],
+                    "frameworks": result["compliance_result"]["frameworks"],
+                    "jurisdiction": result["compliance_result"]["jurisdiction"],
+                }
+                result["risk_level"] = result["compliance_result"]["risk_level"]
+                
+                # Enforce canonical regulatory scoring (no dual path inconsistency)
+                canonical_results = []
+                for mj_row in unified_frameworks:
+                    if not isinstance(mj_row, dict): continue
+                    canonical_results.append({
+                        "regulation_name": f"{mj_row.get('jurisdiction', 'Global')} | {mj_row.get('framework', 'Framework')}",
+                        "gap_details": [mj_row.get("specific_violation")] if mj_row.get("specific_violation") else [],
+                        "status": "GAP" if str(mj_row.get("status", "")).lower() != "compliant" else "COMPLIANT"
+                    })
+                result["compliance_results"] = canonical_results
+                result["gaps"] = gap_count
+                result["total_regulations"] = len(unified_frameworks)
+                result["compliant_regulations"] = len(unified_frameworks) - gap_count
             except Exception as e:
                 print(f"⚠️ Multi-jurisdiction aggregation failed: {e}")
                 result = base_result
@@ -1025,7 +1072,9 @@ def regulatory_scanning_node(state: ESGState) -> ESGState:
             print(f"\n⚖️ REGULATORY COMPLIANCE RESULTS:")
             print(f"   Jurisdiction: {result.get('jurisdiction', 'N/A')}")
             print(f"   Applicable Regulations: {len(result.get('applicable_regulations', []))}")
-            print(f"   Compliance Score: {result.get('compliance_score', 'N/A')}/100")
+            score_obj = result.get("compliance_score", {})
+            score_value = score_obj.get("score") if isinstance(score_obj, dict) else score_obj
+            print(f"   Compliance Score: {score_value}/100")
             print(f"   Risk Level: {result.get('risk_level', 'N/A')}")
 
             # Show top regulations
@@ -1746,6 +1795,7 @@ def _enrich_external_esg_benchmarks(state: ESGState) -> Dict[str, Any]:
             "scores": scores,
             "sources": sources,
             "wba_company_name": filled.get("_wba_company_name") if isinstance(filled, dict) else None,
+            "wba_data_year": filled.get("_wba_data_year") if isinstance(filled, dict) else None,
             "hq_coordinates": hq_coords,
             "wba_indicator_count": len(indicators) if isinstance(indicators, dict) else 0,
             "query_company_name": selected_company_name,
@@ -3568,6 +3618,29 @@ def esg_mismatch_node(state: ESGState) -> ESGState:
         if isinstance(mismatch_results, dict):
             # Save raw structure to state
             state["esg_mismatch_analysis"] = mismatch_results
+            promises = mismatch_results.get("promises", [])
+            if isinstance(promises, list):
+                renewable_promise = None
+                for item in promises:
+                    if not isinstance(item, dict):
+                        continue
+                    metric = str(item.get("metric", "")).lower()
+                    quote = str(item.get("supporting_quote") or item.get("source") or "").lower()
+                    if "renewable" in metric or "renewable" in quote:
+                        renewable_promise = item
+                        break
+                if renewable_promise:
+                    carbon_data = state.get("carbon_extraction", {})
+                    if not isinstance(carbon_data, dict):
+                        carbon_data = {}
+                    target = renewable_promise.get("target")
+                    deadline = renewable_promise.get("deadline")
+                    if target is not None:
+                        carbon_data["renewable_target_pct"] = target
+                    if deadline is not None:
+                        carbon_data["renewable_target_year"] = deadline
+                    carbon_data["renewable_status"] = "pledged_not_verified"
+                    state["carbon_extraction"] = carbon_data
 
             risk = mismatch_results.get("Overall Greenwashing Risk", "Unknown")
             print(f"   Mismatch Risk Level: {risk}")

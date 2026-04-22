@@ -13,18 +13,28 @@ Uses ChromaDB for regulation text storage and semantic search
 """
 
 import json
+import os
 import re
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.llm_call import call_llm
 import asyncio
 from core.vector_store import vector_store
 from config.agent_prompts import REGULATORY_COMPLIANCE_PROMPT
+import requests
+
+try:
+    import pandas as pd
+except Exception:  # pragma: no cover - optional runtime dependency
+    pd = None
 
 
 EU_COUNTRIES = {"DE", "FR", "NL", "DK", "SE", "IT", "ES", "PL", "BE", "AT", "CH"}
 UK_COUNTRIES = {"GB", "UK"}
 US_COUNTRIES = {"US", "USA"}
+SBTI_PROGRESS_REPORT_URL = "https://sciencebasedtargets.org/resources/files/SBTi-Progress-Report.xlsx"
+SBTI_CACHE_FILE = os.path.join("data", "sbti_company_cache.json")
+SBTI_CACHE_DAYS = 7
 
 
 def get_applicable_frameworks(company: str, industry: str, country: str) -> list[str]:
@@ -565,7 +575,12 @@ class RegulatoryHorizonScanner:
                                    evidence: List[Dict[str, Any]],
                                    jurisdiction: str = "India",
                                    country: Optional[str] = None,
-                                   industry: str = "") -> Dict[str, Any]:
+                                   industry: str = "",
+                                   carbon_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        carbon_data = carbon_data if isinstance(carbon_data, dict) else {}
+        sbti_not_submitted = bool(carbon_data.get("flags", {}).get("sbti_not_submitted")) or (
+            str(carbon_data.get("sbti_status", "")).strip().lower() == "not submitted"
+        )
         """
         Scan claim against applicable regulations
         
@@ -603,8 +618,26 @@ class RegulatoryHorizonScanner:
         print(f"⚖️ Checking compliance against {len(applicable_regs)} regulations...")
         compliance_results = []
         for reg_id in applicable_regs:
-            result = self._check_regulation_compliance(reg_id, claim, evidence_text)
+            result = self._check_regulation_compliance(
+                reg_id,
+                claim,
+                evidence_text,
+                company=company,
+                sbti_not_submitted=sbti_not_submitted,
+            )
             compliance_results.append(result)
+        # Cross-validation guard: carbon and regulatory SBTi status must be consistent.
+        if sbti_not_submitted:
+            for row in compliance_results:
+                if str(row.get("regulation_name", "")).lower().find("science based targets initiative") != -1:
+                    if str(row.get("status", "")).upper() == "COMPLIANT":
+                        row["status"] = "GAP"
+                        row.setdefault("gap_details", []).append(
+                            "Carbon agent confirms no SBTi submission despite compliance flag"
+                        )
+                        row["critical_gap"] = True
+                        print("⚠️ SBTi contradiction detected and resolved")
+
         
         # 3. LLM deep compliance analysis
         print("🤖 Running AI compliance analysis...")
@@ -711,7 +744,8 @@ class RegulatoryHorizonScanner:
         return list(set(applicable))
     
     def _check_regulation_compliance(self, reg_id: str, claim: Dict[str, Any],
-                                     evidence_text: str) -> Dict[str, Any]:
+                                     evidence_text: str, company: str = "",
+                                     sbti_not_submitted: bool = False) -> Dict[str, Any]:
         """Check compliance with a specific regulation"""
         
         reg = self.regulations.get(reg_id, {})
@@ -771,6 +805,15 @@ class RegulatoryHorizonScanner:
             kw in claim_text for kw in ["net zero", "net-zero", "carbon neutral", "carbon negative", "climate positive"]
         )
         framework_name = str(reg.get("name") or "").strip().lower()
+        critical_gap = False
+        # Hard SBTi gate: keyword hits are not enough without registry confirmation.
+        if "science based targets initiative" in framework_name:
+            in_registry = self._company_in_sbti_registry(company)
+            if sbti_not_submitted or not in_registry:
+                gap_message = "No SBTi submission/validation found in public SBTi list"
+                if gap_message not in gap_details:
+                    gap_details.append(gap_message)
+                critical_gap = True
         sbti_evidence_present = any(
             token in evidence_lower
             for token in [
@@ -799,7 +842,6 @@ class RegulatoryHorizonScanner:
         evidence_confirms_compliance = len(requirements_met) > 0 and len(requirements_unverified) == 0
 
         is_required_framework = any(req in framework_name for req in net_zero_required_frameworks)
-        critical_gap = False
         if net_zero_claim and is_required_framework and not evidence_confirms_compliance:
             gap_message = f"Cannot confirm {reg.get('name')} compliance from available evidence"
             if gap_message not in gap_details:
@@ -824,6 +866,62 @@ class RegulatoryHorizonScanner:
             "violations": violations,
             "penalties": reg.get("penalties", {})
         }
+
+    def _company_in_sbti_registry(self, company: str) -> bool:
+        names = self._load_sbti_company_names()
+        if not names:
+            return False
+        token = re.sub(r"[^a-z0-9 ]+", " ", (company or "").lower()).strip()
+        if not token:
+            return False
+        token = re.sub(r"\b(inc|ltd|limited|corp|corporation|plc|group|co)\b", "", token).strip()
+        return any(token and (token in name or name in token) for name in names)
+
+    def _load_sbti_company_names(self) -> List[str]:
+        os.makedirs("data", exist_ok=True)
+        now = datetime.utcnow()
+        if os.path.exists(SBTI_CACHE_FILE):
+            try:
+                with open(SBTI_CACHE_FILE, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                fetched_at = datetime.fromisoformat(str(cached.get("fetched_at")))
+                if now - fetched_at <= timedelta(days=SBTI_CACHE_DAYS):
+                    return cached.get("company_names", [])
+            except Exception:
+                pass
+
+        company_names: List[str] = []
+        if pd is not None:
+            try:
+                frame = pd.read_excel(SBTI_PROGRESS_REPORT_URL)
+                for col in frame.columns:
+                    col_l = str(col).lower()
+                    if "company" in col_l or "organisation" in col_l or "organization" in col_l:
+                        values = frame[col].dropna().astype(str).tolist()
+                        company_names.extend(v.strip().lower() for v in values if v.strip())
+                        if company_names:
+                            break
+            except Exception:
+                company_names = []
+
+        # Fallback with no pandas/read_excel support.
+        if not company_names:
+            try:
+                resp = requests.get("https://sciencebasedtargets.org/companies-taking-action", timeout=10)
+                text = resp.text.lower()
+                hits = re.findall(r"\b[a-z][a-z0-9&\-\.\s]{2,60}\b", text)
+                company_names = [h.strip() for h in hits if len(h.strip().split()) <= 6]
+            except Exception:
+                company_names = []
+
+        # Deduplicate and cache.
+        deduped = sorted(set(company_names))
+        try:
+            with open(SBTI_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"fetched_at": now.isoformat(), "company_names": deduped}, f)
+        except Exception:
+            pass
+        return deduped
     
     def _llm_compliance_analysis(self, company: str, claim_text: str,
                                  evidence_text: str, applicable_regs: List[str]) -> Dict[str, Any]:
