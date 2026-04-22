@@ -116,7 +116,13 @@ class CredibilityAnalyst:
                 llm_result = {}
         except Exception as e:
             print(f"      ⚠️ LLM credibility analysis failed: {e}")
-            llm_result = {}
+            llm_result = self._heuristic_credibility_fallback(
+                evidence=evidence,
+                source_type=source_type,
+                source_name=source_name,
+                url=url,
+                content=content,
+            )
             
         base_cred = llm_result.get("base_credibility", self.base_scores.get(source_type, 0.50))
         final_score = llm_result.get("final_credibility_score", base_cred)
@@ -133,7 +139,66 @@ class CredibilityAnalyst:
             "final_credibility_score": round(final_score, 2),
             "paid_content_detected": paid,
             "bias_direction": bias,
-            "url": url
+            "url": url,
+            "analysis_method": llm_result.get("analysis_method", "llm")
+        }
+
+    def _heuristic_credibility_fallback(
+        self,
+        evidence: Dict[str, Any],
+        source_type: str,
+        source_name: str,
+        url: str,
+        content: str,
+    ) -> Dict[str, Any]:
+        """Deterministic fallback when remote LLM providers are unavailable."""
+        base_cred = float(self.base_scores.get(source_type, 0.50))
+        final_score = base_cred
+        adjustments: List[str] = []
+        url_lower = str(url or "").lower()
+        source_name_lower = str(source_name or "").lower()
+        freshness_days = evidence.get("data_freshness_days")
+
+        paid = self._detect_paid_content(content, source_name)
+        if paid:
+            final_score -= 0.25
+            adjustments.append("paid/sponsored indicators: -0.25")
+
+        if url_lower.startswith("https://"):
+            final_score += 0.03
+            adjustments.append("https url present: +0.03")
+        elif not url_lower or url_lower == "#":
+            final_score -= 0.08
+            adjustments.append("missing source url: -0.08")
+
+        if any(token in url_lower for token in [".gov", ".edu", "sec.gov", "europa.eu", "reuters.com", "bloomberg.com", "ft.com"]):
+            final_score += 0.05
+            adjustments.append("high-trust domain signal: +0.05")
+
+        if any(token in url_lower or token in source_name_lower for token in ["blog", "wordpress", "medium.com", "substack"]):
+            final_score -= 0.10
+            adjustments.append("self-published/blog signal: -0.10")
+
+        if isinstance(freshness_days, (int, float)):
+            if freshness_days <= 30:
+                final_score += 0.03
+                adjustments.append("fresh source data: +0.03")
+            elif freshness_days > 3650:
+                final_score -= 0.03
+                adjustments.append("very old source data: -0.03")
+
+        bias = self._detect_bias(content, source_type)
+        if source_type == "Company-Controlled":
+            bias = "Pro-company"
+
+        final_score = max(0.0, min(1.0, final_score))
+        return {
+            "base_credibility": round(base_cred, 2),
+            "adjustments": adjustments,
+            "final_credibility_score": round(final_score, 2),
+            "paid_content_detected": paid,
+            "bias_direction": bias,
+            "analysis_method": "heuristic_fallback",
         }
     
     def _detect_paid_content(self, content: str, source_name: str) -> bool:
