@@ -1233,7 +1233,27 @@ class EvidenceRetriever:
         if isinstance(graph_evidence, list) and graph_evidence:
             structured_evidence.extend(graph_evidence)
             print(f"   GraphRAG evidence added: {len(graph_evidence)}")
-        
+
+        # NEW: Integrate enhanced government/international data sources
+        if os.getenv("USE_ENHANCED_DATA_SOURCES", "true").lower() == "true":
+            try:
+                from utils.enhanced_evidence_integration import integrate_enhanced_sources_into_evidence
+                country_code = claim.get("country", "Global")
+                industry = claim.get("category", "")
+
+                structured_evidence = asyncio.run(
+                    integrate_enhanced_sources_into_evidence(
+                        existing_evidence=structured_evidence,
+                        company=company,
+                        industry=industry,
+                        country=country_code
+                    )
+                )
+                print(f"   ✅ Enhanced government sources integrated")
+            except Exception as e:
+                print(f"   ⚠️  Enhanced data integration skipped: {e}")
+                # Continue with base evidence - no crash
+
         # 6. Store in vector DB
         self._store_evidence_in_vectordb(structured_evidence, company, claim_id)
         

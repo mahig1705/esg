@@ -3,6 +3,8 @@ import logging
 import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional
+import html
+from bs4 import BeautifulSoup
 
 from core.company_knowledge_graph import CompanyKnowledgeGraph
 from core.archive_retriever import get_historical_snapshot
@@ -18,8 +20,25 @@ def clean_snippet_text(text: str) -> str:
     """Fix common encoding/scrape artifacts in snippet text."""
     if not text:
         return text
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(text))
+
+    # Decode HTML entities (&quot;, &amp;, etc.)
+    text = html.unescape(str(text))
+    # Strip HTML tags that leak from scraped snippets.
+    text = BeautifulSoup(text, "html.parser").get_text(separator=" ")
+
+    # Repair common mojibake sequences (e.g., "Â°C" -> "°C").
+    try:
+        text = text.encode("latin-1", errors="ignore").decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+
+    # Fix camelCase splitting
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+
+    # Fix spacing after punctuation
     text = re.sub(r"(?<=[,.;:])(?=[A-Za-z])", " ", text)
+
+    # Fix common phrase spacing
     text = re.sub(r"(net)\s*-?\s*(zero)", r"\1-\2", text, flags=re.IGNORECASE)
     text = re.sub(r"(zero)\s*(by)", r"\1 \2", text, flags=re.IGNORECASE)
     text = re.sub(r"(climate)\s*(change)", r"\1 \2", text, flags=re.IGNORECASE)
@@ -28,7 +47,14 @@ def clean_snippet_text(text: str) -> str:
     text = re.sub(r"(due)\s*(to)\s*(rising)", r"\1 \2 \3", text, flags=re.IGNORECASE)
     text = re.sub(r"(rising)\s*(emissions)", r"\1 \2", text, flags=re.IGNORECASE)
     text = re.sub(r"(across)\s*(its)", r"\1 \2", text, flags=re.IGNORECASE)
+
+    # Normalize whitespace
     text = re.sub(r"\s+", " ", text).strip()
+
+    # If extraction starts mid-word, trim to the next likely sentence boundary.
+    if text and re.match(r"^[a-z]\s", text):
+        text = re.sub(r"^[a-z]\s+", "", text)
+
     return text
 
 class ContradictionAnalyzer:

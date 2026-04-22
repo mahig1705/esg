@@ -10,9 +10,12 @@ from urllib.parse import urlparse
 from datetime import datetime, timezone
 from core.carbon_validator import CarbonDataValidator
 from typing import Dict, Any, List, Tuple, Set
-from core.safe_utils import safe_get, safe_number, parse_source_name, normalize_industry_label, normalize_industry_key
+from core.safe_utils import safe_get, safe_number, parse_source_name, normalize_industry_label, normalize_industry_key, get_reliability_tier
 
 TICKER_SYMBOL_MAP = {
+    "Tesla": "TSLA",
+    "Microsoft": "MSFT",
+    "ExxonMobil": "XOM",
     "JPMorgan Chase": "JPM",
     "JPMC": "JPM",
     "Shell": "SHEL",
@@ -226,6 +229,21 @@ class ProfessionalReportGenerator:
         company = str(state.get("company") or "Unknown").strip() or "Unknown"
         industry = str(state.get("industry") or "Unknown").strip() or "Unknown"
         ticker = str(state.get("ticker") or state.get("symbol") or "N/A").strip() or "N/A"
+        if ticker == "N/A":
+            company_l = company.lower()
+            ticker_map = {
+                "tesla": "TSLA",
+                "shell": "SHEL",
+                "microsoft": "MSFT",
+                "bp": "BP",
+                "totalenergies": "TTE",
+                "exxonmobil": "XOM",
+            }
+            for key, value in ticker_map.items():
+                if key in company_l.replace(" ", ""):
+                    ticker = value
+                    state["ticker"] = value
+                    break
 
         try:
             stages_completed.append("structured_build")
@@ -736,6 +754,7 @@ class ProfessionalReportGenerator:
                 "adjustments": external_adjustments,
                 "wba_company_name": external_data.get("wba_company_name"),
                 "wba_indicator_count": external_data.get("wba_indicator_count", 0),
+                "wba_data_year": external_data.get("wba_data_year"),
                 "error": external_data.get("error"),
             },
             # 2026 Engine High-Fidelity Diagnostics
@@ -829,8 +848,19 @@ class ProfessionalReportGenerator:
             "-" * 92,
         ]
         triangulation = state.get("adversarial_triangulation") if isinstance(state.get("adversarial_triangulation"), dict) else {}
+        tri_stance_map: Dict[str, str] = {}
+        if triangulation and isinstance(triangulation.get("source_stances"), list):
+            for row in triangulation.get("source_stances", []):
+                if not isinstance(row, dict):
+                    continue
+                k = str(row.get("source_name") or "").strip().lower()
+                v = str(row.get("stance") or "").strip().upper()
+                if k and v:
+                    tri_stance_map[k] = v
         if triangulation:
-            sec2_lines.insert(4, f"Triangulation Score: {triangulation.get('triangulation_score', 'N/A')}/100")
+            tri_score = triangulation.get("triangulation_score")
+            tri_score_txt = f"{tri_score}/100" if isinstance(tri_score, (int, float)) else "N/A (UNCLASSIFIED)"
+            sec2_lines.insert(4, f"Triangulation Score: {tri_score_txt}")
             sec2_lines.insert(5, f"Adversarial Ratio: {triangulation.get('adversarial_ratio', 'N/A')} | Balance: {triangulation.get('evidence_balance', 'MIXED')}")
             sec2_lines.insert(6, f"Supporting: {triangulation.get('corroborating_sources', 0)} | Contradicting: {triangulation.get('contradicting_sources', 0)} | First-party: {triangulation.get('first_party_source_count', 0)}")
             sec2_lines.insert(7, "")
@@ -848,6 +878,9 @@ class ProfessionalReportGenerator:
         primary_company_token = company_tokens[0] if company_tokens else ""
         first_party_count = 0
         for i, c in enumerate(v["citations"], start=1):
+            if not isinstance(c, dict):
+                sec2_lines.append(f"{i:<4} {'Documented Source':<32} {'General Web / Other':<28} {'NO':<11} {'Neutral':<12}")
+                continue
             src = str(c.get("source_name") or "").strip()
             if not src or src.lower() in {"unknown", "web source", "general web", "general web / other"}:
                 src = parse_source_name(str(c.get("url") or "")) or ""
@@ -879,6 +912,9 @@ class ProfessionalReportGenerator:
 
             ver = "YES" if c.get("verifiable") else "NO"
             stance_raw = str(c.get("claim_support") or "Neutral").lower()
+            tri_stance = tri_stance_map.get(src.lower())
+            if tri_stance in {"SUPPORTS", "CONTRADICTS", "NEUTRAL", "MIXED"}:
+                stance_raw = tri_stance.lower()
             if "contradict" in stance_raw:
                 stance = "Contradicts"
             elif "support" in stance_raw:
@@ -953,6 +989,20 @@ class ProfessionalReportGenerator:
             f"  {'Factor':<36} {'Signal':<16} {'Source':<22} {'Weight':<6} {'Points':<6} {'Confidence':<10}",
             "  " + "─" * 98,
         ]
+        modifier_ledger = v["scores"].get("score_modifier_ledger", []) if isinstance(v.get("scores"), dict) else []
+        if isinstance(modifier_ledger, list) and modifier_ledger:
+            score_header.extend([
+                "SCORE MODIFIER LEDGER",
+                "─" * 56,
+            ])
+            for row in modifier_ledger:
+                if not isinstance(row, dict):
+                    continue
+                label = str(row.get("label") or "Modifier")
+                value = row.get("value")
+                value_txt = f"{float(value):+.2f}" if isinstance(value, (int, float)) else str(value)
+                score_header.append(f"  {label:<36} {value_txt:>10}")
+            score_header.append("")
 
         def _append_pillar_rows(block: Dict[str, Any], fallback_score: float, expected_total: int) -> Tuple[int, int, float]:
             sub = block.get("sub_indicators", []) if isinstance(block, dict) else []
@@ -1056,6 +1106,11 @@ class ProfessionalReportGenerator:
             score_header.append(
                 f"  WBA indicators observed: {int(ext.get('wba_indicator_count') or 0)}"
             )
+            if isinstance(ext.get("wba_data_year"), int):
+                age = max(0, datetime.now().year - int(ext.get("wba_data_year")))
+                score_header.append(
+                    f"  WBA data year: {ext.get('wba_data_year')} ({age} year(s) old)"
+                )
             if ext_sources:
                 source_pairs = ", ".join(f"{k}={val}" for k, val in sorted(ext_sources.items()))
                 score_header.append(f"  Sources: {source_pairs}")
@@ -1093,7 +1148,15 @@ class ProfessionalReportGenerator:
             lower = text.lower()
             direction = "decreases risk" if any(k in lower for k in ["decrease", "reduces", "strong", "improved", "improvement", "high score"]) else "increases risk"
             impact = "HIGH" if idx == 0 else "MEDIUM"
-            risk_driver_lines.append(f"  {idx + 1}. {text[:70]} | Impact: {impact} | Direction: {direction}")
+            risk_driver_lines.append(f"  {idx + 1}. {text} | Impact: {impact} | Direction: {direction}")
+
+        deduped_driver_lines: List[str] = []
+        for line in risk_driver_lines:
+            norm = re.sub(r"\s+", " ", line.lower()).strip()
+            if any(norm in re.sub(r"\s+", " ", d.lower()).strip() or re.sub(r"\s+", " ", d.lower()).strip() in norm for d in deduped_driver_lines):
+                continue
+            deduped_driver_lines.append(line)
+        risk_driver_lines = deduped_driver_lines
 
         if len(risk_driver_lines) < 3:
             carbon_completeness = "0/15"
@@ -1154,14 +1217,13 @@ class ProfessionalReportGenerator:
         multi_reg = safe_get(v["regulatory"], "multi_jurisdiction", default={})
         if isinstance(multi_reg, dict) and multi_reg:
             section4.append(
-                f"Multi-jurisdiction score: {multi_reg.get('total_compliance_score', 'N/A')}/100 | "
                 f"Active litigation: {multi_reg.get('active_litigation_count', 0)} | "
                 f"Highest-risk jurisdiction: {multi_reg.get('highest_risk_jurisdiction', 'N/A')}"
             )
         section4.append("")
         section4.append(f"  {'Framework':<32} {'Status':<12} {'Gaps':<40}")
         section4.append("  " + "-" * 88)
-        for row in (v["regulatory"].get("compliance_results", []) or [])[:10]:
+        for row in (v["regulatory"].get("compliance_results", []) or [])[:15]:
             if not isinstance(row, dict):
                 continue
             name = str(row.get("regulation_name") or "Unknown framework")
@@ -1169,14 +1231,6 @@ class ProfessionalReportGenerator:
             status = "[GAP]" if gaps else "[COMPLIANT]"
             gap_txt = " - " if not gaps else str(gaps[0])
             section4.append(f"  {name[:32]:<32} {status:<12} {gap_txt[:40]:<40}")
-        mj_rows = multi_reg.get("jurisdiction_results", []) if isinstance(multi_reg, dict) else []
-        for row in mj_rows[:8]:
-            if not isinstance(row, dict):
-                continue
-            name = f"{row.get('jurisdiction', 'Global')} | {row.get('framework', 'Framework')}"
-            status = str(row.get("status", "cannot_determine")).upper()
-            gap_txt = str(row.get("specific_violation") or row.get("remediation_required") or "-")
-            section4.append(f"  {name[:32]:<32} {status[:12]:<12} {gap_txt[:40]:<40}")
         section4.append("  " + "-" * 88)
         section4.append(major)
 
@@ -1289,8 +1343,16 @@ class ProfessionalReportGenerator:
                 for w in carbon_validation["warnings"]:
                     section5.append(f"  ⚠ {w}")
 
-        renewable_txt = self._fmt_pct(renewable_pct) if isinstance(renewable_pct, (int, float)) else "NOT DISCLOSED"
-        section5.append(f"  Renewable Energy:     {renewable_txt} of operational electricity")
+        if isinstance(renewable_pct, (int, float)):
+            renewable_txt = f"{self._fmt_pct(renewable_pct)} of operational electricity"
+        elif carbon.get("renewable_status") == "pledged_not_verified":
+            renewable_txt = (
+                f"Pledged {carbon.get('renewable_target_pct', 'N/A')}% by "
+                f"{carbon.get('renewable_target_year', 'N/A')} (UNVERIFIED)"
+            )
+        else:
+            renewable_txt = "NOT DISCLOSED"
+        section5.append(f"  Renewable Energy:     {renewable_txt}")
         section5.append(f"  Net-Zero Target:      {carbon.get('net_zero_target') or 'None declared'}")
         sbti_raw = carbon.get("science_based_target")
         if sbti_raw is None:
@@ -1328,6 +1390,8 @@ class ProfessionalReportGenerator:
         if not pathway:
             section5b.append("Pathway modelling output was not available for this run.")
         else:
+            fallback_scope3_share = carbon.get("scope3_share_pct", "N/A")
+            pathway_scope3_share = pathway.get("scope3_share_pct", fallback_scope3_share)
             section5b.append(f"  Claimed Alignment:     {pathway.get('claimed_pathway', 'N/A')}")
             section5b.append(f"  Alignment Status:      {str(pathway.get('alignment_status', 'unknown')).upper()}")
             section5b.append(f"  Pathway Gap:           {pathway.get('pathway_gap_pct', 'N/A')}%")
@@ -1335,7 +1399,7 @@ class ProfessionalReportGenerator:
             section5b.append(f"  Company Implied Rate:  {pathway.get('company_implied_cagr', 'N/A')}%")
             section5b.append("")
             section5b.append("  Scope 3 Physical Feasibility:")
-            section5b.append(f"    Scope 3 Share:       {pathway.get('scope3_share_pct', 'N/A')}%")
+            section5b.append(f"    Scope 3 Share:       {pathway_scope3_share}%")
             section5b.append(f"    Production Plan:     {pathway.get('production_plan', 'N/A')}")
             section5b.append(f"    Assessment:          {pathway.get('scope3_feasibility', 'N/A')}")
             section5b.append("")
@@ -1348,6 +1412,12 @@ class ProfessionalReportGenerator:
         overall_lvl = str(safe_get(green, "overall_deception_risk", "level", default="LOW")).upper()
         section7 = [major, "SECTION 9: DECEPTION PATTERN ANALYSIS", major]
         section7.append(f"  Overall Deception Risk:  {self._fmt_score1(overall_dec)}/100  ({overall_lvl})")
+        if isinstance(overall_dec, (int, float)) and abs(float(overall_dec) - float(v["gw_score"])) > 30:
+            section7.append(
+                f"  NOTE: Deception Risk ({self._fmt_score1(overall_dec)}) and Greenwashing Score ({v['gw_score']:.1f}) "
+                "diverge materially. High greenwashing with lower deception indicates disclosure-gap risk "
+                "rather than confirmed intentional manipulation."
+            )
         section7.append("")
         section7.append(f"  {'Tactic':<24} {'Risk Level':<11} {'Score':<8} {'Evidence':<32}")
         section7.append("  " + "-" * 78)
@@ -1436,7 +1506,9 @@ class ProfessionalReportGenerator:
             status_label = f"{cal_state} (n={dataset_size} cases)"
             section9.append(f"Status:                 {status_label}")
             section9.append(f"Calibration subset:     {dataset_size} cases (industry: {subset_industry}, claim type: {subset_claim_type})")
-            if isinstance(spearman_r, (int, float)):
+            if isinstance(dataset_size, int) and dataset_size < 15:
+                section9.append("Spearman r:             NOT REPORTED (n<15 minimum sample)")
+            elif isinstance(spearman_r, (int, float)):
                 section9.append(f"Spearman r:             {spearman_r:.4f}")
             else:
                 section9.append("Spearman r:             unavailable")
@@ -1537,12 +1609,15 @@ class ProfessionalReportGenerator:
         gw_score_disp = f"{v['gw_score']:.1f} / 100"
         esg_score_disp = f"{v.get('esg_score', 0):.1f} / 100"
         n_size = cal.get("dataset_size")
+        band_disp = str(v['band'])
         if n_size is None or n_size < 30:
             band_disp = f"{v['band']} (Provisional numeric score shown; calibration sample too small for this sector)"
-            cal_status_disp = f"PROVISIONAL [{cal.get('calibration_status', 'N/A')} - n={n_size or 0}]"
+        if n_size is None or n_size < 10:
+            cal_status_disp = f"PROVISIONAL [{cal.get('calibration_status', 'N/A')} - VERY_LOW (n={n_size or 0})]"
+        elif n_size < 30:
+            cal_status_disp = f"PROVISIONAL [{cal.get('calibration_status', 'N/A')} - LOW (n={n_size or 0})]"
         else:
-            band_disp = str(v['band'])
-            cal_status_disp = f"{v['calibration_status']}  [{cal.get('calibration_status', 'N/A')}]"
+            cal_status_disp = f"{v['calibration_status']}  [{cal.get('calibration_status', 'N/A')} - n={n_size or 0}]"
 
         verdict_justification = []
         if score_disclaimer:
@@ -3546,9 +3621,17 @@ Score: {score:.1f}/100 — {level}
         lines.append("")
         lines.append("Score Calibration:")
         spearman_r = calibration.get("spearman_r")
+        n_size = calibration.get("dataset_size")
         if cal_state == "NOT_AVAILABLE":
             lines.append("  Spearman r:        Not available — no ground truth data")
             lines.append("  Optimal Threshold: Not available")
+        elif isinstance(n_size, int) and n_size < 15:
+            lines.append("  Spearman r:        NOT REPORTED (n<15 minimum sample)")
+            optimal = calibration.get("optimal_threshold")
+            if isinstance(optimal, (int, float)):
+                lines.append(f"  Optimal Threshold: {optimal:.1f}/100")
+            else:
+                lines.append("  Optimal Threshold: Not available")
         elif isinstance(spearman_r, (int, float)):
             lines.append(f"  Spearman r:        {spearman_r:.4f} ({cal_state})")
             optimal = calibration.get("optimal_threshold")
@@ -4157,11 +4240,41 @@ Industry Baseline Adjustment: {industry_adj:+.1f} points
         independent_sources_raw = int(quality_metrics.get("independent_sources", 0) or 0)
         premium_sources_raw = int(quality_metrics.get("premium_sources", 0) or 0)
         if total_evidence_sources <= 0:
-            total_evidence_sources = max(independent_sources_raw, premium_sources_raw, 0)
+            total_evidence_sources = max(
+                int(quality_metrics.get("total_sources", 0) or 0),
+                len(state.get("evidence", []) if isinstance(state.get("evidence", []), list) else []),
+                independent_sources_raw,
+                premium_sources_raw,
+                0,
+            )
 
         independent_sources = min(independent_sources_raw, total_evidence_sources)
         premium_sources = min(premium_sources_raw, total_evidence_sources)
         source_diversity = int(quality_metrics.get("source_diversity", len(source_breakdown)) or 0)
+        if independent_sources == 0 or premium_sources == 0 or source_diversity == 0:
+            evidence_items = state.get("evidence", []) if isinstance(state.get("evidence"), list) else []
+            independent_guess = 0
+            premium_guess = 0
+            source_types = set()
+            company_token = str(state.get("company", "")).lower().split(" ")[0]
+            for ev in evidence_items:
+                if not isinstance(ev, dict):
+                    continue
+                src_type = str(ev.get("source_type", "")).strip() or "Unknown"
+                source_types.add(src_type)
+                url = str(ev.get("url", "")).lower()
+                is_first_party = bool(company_token and company_token in url)
+                if not is_first_party:
+                    independent_guess += 1
+                tier = get_reliability_tier(url)
+                if tier <= 2:
+                    premium_guess += 1
+            if independent_sources == 0:
+                independent_sources = min(independent_guess, total_evidence_sources)
+            if premium_sources == 0:
+                premium_sources = min(premium_guess, total_evidence_sources)
+            if source_diversity == 0:
+                source_diversity = len(source_types)
         evidence_gap = bool(quality_metrics.get("evidence_gap", False))
 
         independent_share = (independent_sources / max(total_evidence_sources, 1)) * 100
@@ -4789,6 +4902,7 @@ KEY PERFORMANCE METRICS
                 "adjustments": pillar_ext_adjustments,
                 "wba_company_name": external_meta.get("wba_company_name") or external_state.get("wba_company_name"),
                 "wba_indicator_count": external_meta.get("wba_indicator_count", external_state.get("wba_indicator_count", 0)),
+                "wba_data_year": external_meta.get("wba_data_year", external_state.get("wba_data_year")),
                 "error": external_meta.get("error") or external_state.get("error"),
             },
             "report_generation_log": analysis_state.get("report_generation_log", {
@@ -4835,7 +4949,7 @@ KEY PERFORMANCE METRICS
         Highlights contradictions between company promises and actual evidence.
         """
         mismatch_data = state.get("esg_mismatch_analysis")
-        if not mismatch_data:
+        if not mismatch_data or not isinstance(mismatch_data, dict):
             return "No ESG Promise vs Actual gap analysis was performed for this report."
 
         lines = [

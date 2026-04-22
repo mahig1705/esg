@@ -573,10 +573,17 @@ class RiskScorer:
         ext_scores = external.get("scores", {})
         if not isinstance(ext_scores, dict):
             return environmental_score, social_score, governance_score, adjustments
+        wba_data_year = external.get("wba_data_year")
+        current_year = datetime.now().year
+        age_years = None
+        if isinstance(wba_data_year, int):
+            age_years = max(0, current_year - wba_data_year)
 
         social_external = self._normalize_external_score(ext_scores.get("social"))
         if social_external is not None:
             weight = 0.12 if not sg_adequacy.get("social", {}).get("is_adequate", False) else 0.08
+            if isinstance(age_years, int) and age_years > 2:
+                weight = min(weight, 0.25)
             before = social_score
             social_score = ((1.0 - weight) * social_score) + (weight * social_external)
             adjustments.append({
@@ -586,11 +593,14 @@ class RiskScorer:
                 "external": round(social_external, 2),
                 "weight": weight,
                 "source": "WBA",
+                "data_year": wba_data_year,
             })
 
         governance_external = self._normalize_external_score(ext_scores.get("governance"))
         if governance_external is not None:
             weight = 0.12 if not sg_adequacy.get("governance", {}).get("is_adequate", False) else 0.08
+            if isinstance(age_years, int) and age_years > 2:
+                weight = min(weight, 0.25)
             before = governance_score
             governance_score = ((1.0 - weight) * governance_score) + (weight * governance_external)
             adjustments.append({
@@ -600,11 +610,14 @@ class RiskScorer:
                 "external": round(governance_external, 2),
                 "weight": weight,
                 "source": "WBA",
+                "data_year": wba_data_year,
             })
 
         environment_external = self._normalize_external_score(ext_scores.get("environment"))
         if environment_external is not None:
             weight = 0.20
+            if isinstance(age_years, int) and age_years > 2:
+                weight = min(weight, 0.15)
             before = environmental_score
             environmental_score = ((1.0 - weight) * environmental_score) + (weight * environment_external)
             adjustments.append({
@@ -614,6 +627,7 @@ class RiskScorer:
                 "external": round(environment_external, 2),
                 "weight": weight,
                 "source": "WBA",
+                "data_year": wba_data_year,
             })
 
         water_risk_external = self._normalize_external_score(ext_scores.get("water_risk"))
@@ -718,11 +732,19 @@ class RiskScorer:
             if any(kw in str(c).lower() for kw in social_keywords)
         )
 
+        soc_penalty = min(soc_negative * 15, 60)
+        # MSCI-like conservative baseline: sparse disclosure should not default to 0 or 100.
+        fallback_social_score = max(0, min(100, 30 + (soc_positive * 7) - soc_penalty))
         social_score, social_lane = self._score_normalized_sg_pillar("social", sg_pack, sg_adequacy.get("social", {}))
+        if not social_lane.get("track_scores"):
+            social_score = fallback_social_score
+
+        if soc_positive == 0 and soc_negative == 0 and not social_lane.get("track_scores"):
+            social_score = 35.0 if not sg_adequacy.get("social", {}).get("is_adequate", False) else 45.0
 
         if not sg_adequacy.get("social", {}).get("is_adequate", False):
-            # Pull social score toward neutral when evidence is not decision-grade.
-            social_score = round((social_score * 0.40) + (50.0 * 0.60), 1)
+            # Pull social score toward conservative mid-low when evidence is not decision-grade.
+            social_score = round((social_score * 0.50) + (35.0 * 0.50), 1)
             print("   ⚠️ Social pillar confidence-limited due to insufficient free-source evidence")
 
         social_agent_score = social_agent_output.get("social_score")
@@ -751,11 +773,17 @@ class RiskScorer:
             if any(kw in str(c).lower() for kw in governance_keywords)
         )
 
+        gov_penalty = min(gov_negative * 15, 60)
+        fallback_governance_score = max(0, min(100, 35 + (gov_positive * 7) - gov_penalty))
         governance_score, governance_lane = self._score_normalized_sg_pillar("governance", sg_pack, sg_adequacy.get("governance", {}))
+        if not governance_lane.get("track_scores"):
+            governance_score = fallback_governance_score
+        if gov_positive == 0 and gov_negative == 0 and not governance_lane.get("track_scores"):
+            governance_score = 38.0 if not sg_adequacy.get("governance", {}).get("is_adequate", False) else 48.0
 
         if not sg_adequacy.get("governance", {}).get("is_adequate", False):
-            # Pull governance score toward neutral when evidence is not decision-grade.
-            governance_score = round((governance_score * 0.40) + (50.0 * 0.60), 1)
+            # Pull governance score toward conservative mid-low when evidence is not decision-grade.
+            governance_score = round((governance_score * 0.50) + (38.0 * 0.50), 1)
             print("   ⚠️ Governance pillar confidence-limited due to insufficient free-source evidence")
 
         # SEC Metrics Integration
@@ -811,6 +839,12 @@ class RiskScorer:
             environmental_score = max(0, environmental_score - min(35, high_severity_count * 6 + reg_gaps * 2))
             social_score = max(0, social_score - min(30, high_severity_count * 5 + reg_gaps * 2))
             governance_score = max(0, governance_score - min(40, high_severity_count * 7 + reg_gaps * 3))
+
+        # Avoid pathological pillar collapse from evidence sparsity alone.
+        if soc_negative == 0 and not social_flags.get("supply_chain_disclosure_missing"):
+            social_score = max(12.0, social_score)
+        if gov_negative == 0 and not governance_flags.get("ethical_claim_with_fines"):
+            governance_score = max(15.0, governance_score)
 
         (
             environmental_score,
@@ -868,7 +902,7 @@ class RiskScorer:
         )
 
         # Master weighting required by product policy.
-        w_e, w_s, w_g = 0.35, 0.35, 0.30
+        w_e, w_s, w_g = 0.35, 0.30, 0.35
         overall_esg = (environmental_score * w_e) + (social_score * w_s) + (governance_score * w_g)
 
         print(f"   Overall ESG: {overall_esg:.1f}/100 (E×{w_e:.2f} + S×{w_s:.2f} + G×{w_g:.2f})")
@@ -958,8 +992,8 @@ class RiskScorer:
         if all(s is not None for s in [environmental_score, social_score, governance_score]):
             overall_esg_score = (
                 float(environmental_score) * 0.35
-                + float(social_score) * 0.35
-                + float(governance_score) * 0.30
+                + float(social_score) * 0.30
+                + float(governance_score) * 0.35
             )
             overall_esg_score = round(max(0.0, min(100.0, overall_esg_score)), 1)
             greenwashing_risk = round(100.0 - overall_esg_score, 1)
@@ -1510,6 +1544,7 @@ class RiskScorer:
                 "scores": external_scores,
                 "wba_company_name": external_payload.get("wba_company_name"),
                 "wba_indicator_count": external_payload.get("wba_indicator_count", 0),
+                "wba_data_year": external_payload.get("wba_data_year"),
                 "hq_coordinates": external_payload.get("hq_coordinates", {}),
                 "error": external_payload.get("error"),
             },
@@ -1517,6 +1552,18 @@ class RiskScorer:
                 "available": bool(fact_graph_summary),
                 "summary": fact_graph_summary,
             },
+            "score_modifier_ledger": [
+                {"label": "Base ESG from pillars", "value": round(overall_esg_score, 2)},
+                {"label": "Confidence penalty applied", "value": round(confidence_penalty_total * -100, 2)},
+                {"label": "ESG Score (final)", "value": round(esg_score, 1)},
+                {"label": "Base greenwashing (100 - ESG)", "value": round(100.0 - esg_score, 1)},
+                {"label": "Industry baseline adjustment", "value": round(industry_adjustment, 1)},
+                {"label": "Peer adjustment", "value": round(peer_modifier, 1)},
+                {"label": "Debate penalty", "value": round(debate_penalty, 1)},
+                {"label": "Greenwashing risk raw", "value": round(final_score, 1)},
+                {"label": "Calibration delta", "value": round(final_score_recalibrated - final_score, 1)},
+                {"label": "Greenwashing risk final", "value": round(final_score_recalibrated, 1)},
+            ],
         }
         if score_disclaimer:
             result.setdefault("quality_warnings", []).append(score_disclaimer)
@@ -2393,9 +2440,11 @@ Industry:"""
         
         industry_context = f"Industry context: {industry.replace('_', ' ').title()} materiality weighting applied (MSCI-style)."
         
-        # Ensure at least one positive or industry context is included when reasons are sparse
+        # Ensure at least one positive or industry context is included when reasons are sparse.
         if positives and len(reasons) < 3:
-            reasons.append(f"Offsetting factor: {positives[0]}")
+            candidate = f"Offsetting factor: {positives[0]}"
+            if candidate.lower() not in {r.lower() for r in reasons}:
+                reasons.append(candidate)
         
 
         # High-Fidelity Signal Check (Priority Reasons)
@@ -2495,6 +2544,8 @@ Industry:"""
                 for positive in positives:
                     if len(reasons) >= 3:
                         break
+                    if positive.lower() in {r.lower() for r in reasons}:
+                        continue
                     reasons.append(positive)
             except Exception:
                 pass
@@ -2503,7 +2554,13 @@ Industry:"""
         while len(reasons) < 3:
             reasons.append(f"Industry Context: {industry.replace('_', ' ').title()} materiality profile applied.")
 
-        return reasons[:3]
+        deduped: List[str] = []
+        for reason in reasons:
+            norm = re.sub(r"\s+", " ", str(reason).strip().lower())
+            if any(norm in re.sub(r"\s+", " ", d.lower()) or re.sub(r"\s+", " ", d.lower()) in norm for d in deduped):
+                continue
+            deduped.append(str(reason).strip())
+        return deduped[:3]
 
     def _generate_insights(self, risk_score: float, risk_level: str,
                           industry: str, company: str) -> Dict[str, str]:

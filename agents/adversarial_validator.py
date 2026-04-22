@@ -40,6 +40,8 @@ class AdversarialEvidenceValidator:
             if is_first_party:
                 first_party_count += 1
                 credibility = min(credibility, 0.30)
+                # First-party disclosures support the issuer's own claim by default.
+                stance = "SUPPORTS"
 
             row = {
                 "source_id": item.get("source_id") or f"ev_{idx:03d}",
@@ -69,15 +71,18 @@ class AdversarialEvidenceValidator:
             triangulation_score = max(0.0, triangulation_score - 10.0)
         triangulation_score = max(0.0, min(100.0, triangulation_score))
 
-        evidence_balance = "MIXED"
-        if triangulation_score >= 80:
-            evidence_balance = "PREDOMINANTLY_SUPPORTED"
-        elif triangulation_score >= 40:
-            evidence_balance = "MIXED"
-        elif triangulation_score >= 20:
+        supporting_count = len([c for c in classified if c.get("stance") == "SUPPORTS"])
+        contradicting_count = len([c for c in classified if c.get("stance") == "CONTRADICTS"])
+
+        if supporting_count == 0 and contradicting_count == 0:
+            triangulation_score = None
+            evidence_balance = "UNCLASSIFIED — Stance classification failed"
+        elif adversarial_ratio > 0.6:
             evidence_balance = "PREDOMINANTLY_CONTRADICTED"
+        elif adversarial_ratio < 0.3:
+            evidence_balance = "PREDOMINANTLY_SUPPORTED"
         else:
-            evidence_balance = "REFUTED"
+            evidence_balance = "MIXED"
 
         most_damaging = ""
         contradicting = [c for c in classified if c.get("stance") == "CONTRADICTS"]
@@ -88,16 +93,16 @@ class AdversarialEvidenceValidator:
 
         return {
             "source_stances": classified,
-            "triangulation_score": round(triangulation_score, 1),
+            "triangulation_score": round(triangulation_score, 1) if isinstance(triangulation_score, (int, float)) else None,
             "adversarial_ratio": round(adversarial_ratio, 2),
             "most_damaging_evidence": most_damaging,
             "evidence_balance": evidence_balance,
             "first_party_bias_warning": bool(first_party_count > 0),
             "first_party_source_count": first_party_count,
-            "corroborating_sources": len([c for c in classified if c.get("stance") == "SUPPORTS"]),
-            "contradicting_sources": len([c for c in classified if c.get("stance") == "CONTRADICTS"]),
+            "corroborating_sources": supporting_count,
+            "contradicting_sources": contradicting_count,
             "neutral_sources": neutral_count,
-            "recommendation": self._recommendation_for_score(triangulation_score),
+            "recommendation": self._recommendation_for_score(triangulation_score if isinstance(triangulation_score, (int, float)) else 50.0),
         }
 
     def _tier_for_source(self, source_name: str, source_type: str) -> str:

@@ -38,13 +38,16 @@ function loadStoredUser(): SidebarUser | null {
 export default function Sidebar({ mobileOpen, setMobileOpen }: { mobileOpen: boolean, setMobileOpen: (open: boolean) => void }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [user] = useState<SidebarUser | null>(() => loadStoredUser());
+  const [user, setUser] = useState<SidebarUser | null>(null);
 
   useEffect(() => {
-    if (!user) {
+    const loadedUser = loadStoredUser();
+    if (loadedUser) {
+      setUser(loadedUser);
+    } else {
       router.push("/login");
     }
-  }, [router, user]);
+  }, [router]);
 
   const navItems = [
     { name: "Dashboard", href: "/dashboard", icon: <LayoutDashboard className="w-5 h-5" /> },

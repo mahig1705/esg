@@ -206,6 +206,18 @@ class FinancialAnalyst:
     def _get_ticker(self, company: str) -> Optional[str]:
         """Get stock ticker from company name"""
         company_lower = company.lower().strip()
+        common_ticker_map = {
+            "tesla": "TSLA",
+            "shell": "SHEL",
+            "microsoft": "MSFT",
+            "bp": "BP",
+            "totalenergies": "TTE",
+            "exxonmobil": "XOM",
+        }
+        normalized = company_lower.replace(" ", "")
+        for key, ticker in common_ticker_map.items():
+            if key in normalized:
+                return ticker
 
         # Config alias map takes precedence for edge cases (e.g., BP vs BP.L)
         for canonical, alias_data in self.company_aliases.items():

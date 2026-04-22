@@ -317,6 +317,24 @@ def _collect_wba_scores(
     return scores, indicators
 
 
+def _extract_latest_methodology_year(rows: list[dict[str, Any]]) -> int | None:
+    years: list[int] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        for key in ("methodology_year", "year", "reporting_year"):
+            value = row.get(key)
+            if isinstance(value, (int, float)):
+                y = int(value)
+                if 1990 <= y <= 2100:
+                    years.append(y)
+            elif isinstance(value, str):
+                m = re.search(r"\b(20\d{2})\b", value)
+                if m:
+                    years.append(int(m.group(1)))
+    return max(years) if years else None
+
+
 def get_wba_company_assessment(
     company_name: str,
     api_key: str | None = None,
@@ -430,6 +448,7 @@ def get_wba_company_assessment(
                 "benchmarks_rows": benchmark_rows,
                 "indicator_rows": indicator_rows,
             }
+            result["data_year"] = _extract_latest_methodology_year(benchmark_rows + indicator_rows)
 
             result["found"] = bool(result["scores"] or result["indicators"])
             logger.info(
@@ -1099,6 +1118,7 @@ def fill_missing_pillars(
 
             scores["_wba_indicators"] = wba["indicators"]
             scores["_wba_company_name"] = wba["company_name"]
+            scores["_wba_data_year"] = wba.get("data_year")
             if isinstance(wba.get("hq_coordinates"), dict):
                 scores["_wba_hq_coordinates"] = wba["hq_coordinates"]
         else:

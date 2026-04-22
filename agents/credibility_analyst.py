@@ -1,5 +1,6 @@
 import json
 import asyncio
+import os
 from typing import Dict, Any, List
 from core.evidence_cache import evidence_cache
 from config.agent_prompts import SOURCE_CREDIBILITY_PROMPT
@@ -8,6 +9,8 @@ from core.llm_call import call_llm
 class CredibilityAnalyst:
     def __init__(self):
         self.name = "Source Credibility & Bias Analyst"
+        self.max_llm_sources = int(os.getenv("ESG_CREDIBILITY_LLM_MAX_SOURCES", "6"))
+        self.llm_timeout_seconds = float(os.getenv("ESG_CREDIBILITY_LLM_TIMEOUT_SECONDS", "8"))
         
         # Base credibility scores by source type
         self.base_scores = {
@@ -41,7 +44,7 @@ class CredibilityAnalyst:
         for i, ev in enumerate(evidence, 1):
             print(f"\r   Processing source {i}/{len(evidence)}...", end="", flush=True)
             
-            analysis = self._analyze_single_source(ev)
+            analysis = self._analyze_single_source(ev, use_llm=i <= self.max_llm_sources)
             source_analyses.append(analysis)
             credibility_scores.append(analysis['final_credibility_score'])
         
@@ -84,7 +87,7 @@ class CredibilityAnalyst:
             "credibility_warning": f"{low_credibility} of {len(evidence)} sources scored low credibility"
         }
     
-    def _analyze_single_source(self, evidence: Dict[str, Any]) -> Dict[str, Any]:
+    def _analyze_single_source(self, evidence: Dict[str, Any], use_llm: bool = True) -> Dict[str, Any]:
         """Analyze a single source for credibility and bias using LLM"""
         
         source_type = evidence.get('source_type', 'Web Source')
@@ -97,11 +100,26 @@ class CredibilityAnalyst:
             or evidence.get("title")
             or ""
         )
+
+        if not use_llm:
+            llm_result = self._heuristic_credibility_fallback(
+                evidence=evidence,
+                source_type=source_type,
+                source_name=source_name,
+                url=url,
+                content=content,
+            )
+            return self._format_source_analysis(evidence, source_name, source_type, url, llm_result)
         
         prompt = f"SOURCE: {source_name}\nTYPE: {source_type}\nURL: {url}\nCONTENT: {content[:2000]}"
         
         try:
-            response = asyncio.run(call_llm("credibility_analysis", prompt, system=SOURCE_CREDIBILITY_PROMPT))
+            response = asyncio.run(
+                asyncio.wait_for(
+                    call_llm("credibility_analysis", prompt, system=SOURCE_CREDIBILITY_PROMPT),
+                    timeout=self.llm_timeout_seconds,
+                )
+            )
             if response:
                 import re
                 cleaned = re.sub(r'```\s*json?\s*', '', response)
@@ -123,13 +141,23 @@ class CredibilityAnalyst:
                 url=url,
                 content=content,
             )
-            
+        
+        return self._format_source_analysis(evidence, source_name, source_type, url, llm_result)
+
+    def _format_source_analysis(
+        self,
+        evidence: Dict[str, Any],
+        source_name: str,
+        source_type: str,
+        url: str,
+        llm_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
         base_cred = llm_result.get("base_credibility", self.base_scores.get(source_type, 0.50))
         final_score = llm_result.get("final_credibility_score", base_cred)
         paid = llm_result.get("paid_content_detected", False)
         bias = llm_result.get("bias_direction", "Neutral")
         adjustments = llm_result.get("adjustments", [])
-        
+
         return {
             "source_id": evidence.get('source_id'),
             "source_name": source_name,

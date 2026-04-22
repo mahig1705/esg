@@ -17,10 +17,16 @@ ORIGINAL CLAIM: {claim_text}
 
 INSTRUCTIONS:
 1. Split the claim at logical conjunctions: and, while, as well as, in addition to, alongside
+1b. Also split implicit assertions even without conjunctions, including:
+   - Comparative claims (e.g., "reduces emissions") that require a baseline comparison
+   - Vague quantifiers (e.g., "significantly", "substantially", "meaningfully") that require numeric thresholds
+   - Geographic scope claims (e.g., "global", "across all markets") that require coverage evidence
+   - Causal mechanism claims (e.g., "through X") that require mechanism validation
 2. Identify each distinct commitment, target, or assertion
 3. Flag logical tensions between sub-claims (e.g., growing fossil fuel production cannot coexist with Scope 3 reduction)
 4. For each sub-claim, state what evidence WOULD be needed to verify it
 5. Assign a greenwashing_signal from [red_flag, amber_flag, green_flag, unverifiable] based on internal logic alone
+6. If a claim is longer than 10 words and you return only 1 sub-claim, re-check for implicit assertions and decompose further.
 
 Return ONLY valid JSON.
 """
@@ -42,7 +48,16 @@ class ClaimDecomposer:
 
         llm_result = self._try_llm(company, industry, claim_text)
         if llm_result:
-            return self._post_process(llm_result, claim_text)
+            processed = self._post_process(llm_result, claim_text)
+            words = len(re.findall(r"\w+", claim_text or ""))
+            if words > 10 and len(processed.get("sub_claims", [])) < 2:
+                # Retry once with stronger decomposition constraints for implicit assertions.
+                retry_result = self._try_llm(company, industry, claim_text, force_retry=True)
+                if retry_result:
+                    processed_retry = self._post_process(retry_result, claim_text)
+                    if len(processed_retry.get("sub_claims", [])) >= 2:
+                        return processed_retry
+            return processed
 
         return self._heuristic_decomposition(claim_text)
 
@@ -63,12 +78,18 @@ class ClaimDecomposer:
             score += w * m * 25
         return float(min(score, 100.0))
 
-    def _try_llm(self, company: str, industry: str, claim_text: str) -> Dict[str, Any]:
+    def _try_llm(self, company: str, industry: str, claim_text: str, force_retry: bool = False) -> Dict[str, Any]:
         prompt = CLAIM_DECOMPOSITION_PROMPT.format(
             company=company,
             industry=industry,
             claim_text=claim_text,
         )
+        if force_retry:
+            prompt += (
+                "\n\nRETRY INSTRUCTION: You returned only 1 sub-claim earlier. "
+                "Re-examine implicit assertions, vague qualifiers, and scope language "
+                "and return at least 2 atomic sub-claims where applicable."
+            )
         try:
             response = asyncio.run(call_llm("claim_decomposition", prompt))
             if not response:
@@ -86,6 +107,20 @@ class ClaimDecomposer:
         parts = [p.strip(" ,.;") for p in re.split(split_pattern, claim_text, flags=re.IGNORECASE) if p.strip()]
         if len(parts) == 1:
             parts = [claim_text.strip()]
+
+        lower_claim = claim_text.lower()
+        implicit_parts: List[str] = []
+        if any(tok in lower_claim for tok in ["reduces", "reduction", "lower than", "decrease"]):
+            implicit_parts.append("Claim implies comparative baseline against counterfactual emissions scenario.")
+        if any(tok in lower_claim for tok in ["significantly", "substantially", "meaningfully"]):
+            implicit_parts.append("Claim uses vague quantifier requiring explicit numeric threshold for verification.")
+        if any(tok in lower_claim for tok in ["global", "globally", "across all"]):
+            implicit_parts.append("Claim asserts geographic scope requiring multi-region evidence coverage.")
+        if "through " in lower_claim:
+            implicit_parts.append("Claim asserts causal mechanism requiring mechanism-specific evidence.")
+
+        if len(parts) == 1 and len(re.findall(r"\w+", claim_text)) > 10 and implicit_parts:
+            parts.extend(implicit_parts[:3])
 
         sub_claims: List[Dict[str, Any]] = []
         for idx, part in enumerate(parts, start=1):

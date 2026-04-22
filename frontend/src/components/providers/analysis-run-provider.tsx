@@ -418,10 +418,11 @@ export function AnalysisRunProvider({ children }: { children: React.ReactNode })
       if (!runResult && !runError && activeRunTokenRef.current === runToken) {
         setAppState("input");
       }
-    } catch {
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? ` (${error.message})` : "";
       if (activeRunTokenRef.current === runToken) {
         appendLog({
-          message: "Request finished without a new report. Previous fallback data is still available.",
+          message: `Request finished without a new report${detail}. Previous fallback data is still available.`,
           level: "warn",
           source: "stderr",
           ts: new Date().toISOString(),
