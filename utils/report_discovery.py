@@ -149,7 +149,16 @@ class ReportDiscoveryService:
                     print(f"      ✅ Found {len(pdf_results)} PDF results")
                     all_results.extend(pdf_results)
                 else:
-                    print(f"      ⚠️ No PDF results for this query")
+                    page_results = [
+                        r for r in results
+                        if self._is_likely_report_page(r, company_name)
+                        and not self._is_competitor_contaminated(company_name, r)
+                    ]
+                    if page_results:
+                        print(f"      ℹ️ No PDFs found; keeping {len(page_results)} likely report page result(s)")
+                        all_results.extend(page_results)
+                    else:
+                        print(f"      ⚠️ No PDF results for this query")
                 
                 # Rate limiting
                 time.sleep(0.5)
@@ -304,6 +313,32 @@ class ReportDiscoveryService:
         ]
         
         return any(indicator in url_lower for indicator in pdf_indicators)
+
+    def _is_likely_report_page(self, result: Dict[str, Any], company_name: str) -> bool:
+        """Allow official HTML report landing pages when direct PDFs are unavailable."""
+        url = str(result.get("url", "")).lower()
+        title = str(result.get("title", "")).lower()
+        snippet = str(result.get("snippet", "")).lower()
+        combined = f"{url} {title} {snippet}"
+        company_tokens = [tok for tok in re.split(r"[^a-z0-9]+", company_name.lower()) if len(tok) > 2]
+
+        report_terms = [
+            "annual report", "sustainability", "esg", "climate", "csr",
+            "investor", "investor relations", "reporting", "disclosures",
+            "responsibility", "environment", "governance",
+        ]
+        host_terms = [
+            "investor", "ir.", "sustainability", "esg", "annual-report",
+            "annualreport", "report", "reports", "disclosure", "governance",
+        ]
+        bad_filetypes = (".jpg", ".jpeg", ".png", ".gif", ".mp4", ".zip")
+
+        has_company_match = any(tok in combined for tok in company_tokens) if company_tokens else False
+        has_report_signal = any(term in combined for term in report_terms)
+        has_host_signal = any(term in url for term in host_terms)
+        is_bad_file = any(url.endswith(ext) for ext in bad_filetypes)
+
+        return has_company_match and (has_report_signal or has_host_signal) and not is_bad_file
     
     def _extract_report_metadata(self, result: Dict[str, Any], company_name: str) -> Optional[Dict[str, Any]]:
         """

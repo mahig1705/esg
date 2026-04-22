@@ -162,6 +162,7 @@ def extract_carbon_tables(pdf_path: str) -> list[dict]:
     for page_num in carbon_pages:
         page_str = str(page_num)
         tables_found = False
+        temp_write_blocked = False
 
         # --- Attempt 1: lattice ---
         try:
@@ -189,11 +190,20 @@ def extract_carbon_tables(pdf_path: str) -> list[dict]:
                     page_num, sum(1 for r in results if r["page"] == page_num),
                 )
                 continue  # skip stream if lattice worked
+        except PermissionError:
+            temp_write_blocked = True
+            logger.exception(
+                "Camelot temp-file write failed on page %d of %s; aborting further table extraction for this PDF",
+                page_num, pdf_path_str,
+            )
         except Exception:
             logger.exception(
                 "Lattice extraction failed on page %d of %s",
                 page_num, pdf_path_str,
             )
+
+        if temp_write_blocked:
+            break
 
         # --- Attempt 2: stream fallback ---
         try:
@@ -219,6 +229,12 @@ def extract_carbon_tables(pdf_path: str) -> list[dict]:
                 page_num,
                 sum(1 for r in results if r["page"] == page_num and r["flavor"] == "stream"),
             )
+        except PermissionError:
+            logger.exception(
+                "Camelot temp-file write failed on page %d of %s; aborting further table extraction for this PDF",
+                page_num, pdf_path_str,
+            )
+            break
         except Exception:
             logger.exception(
                 "Stream extraction failed on page %d of %s",

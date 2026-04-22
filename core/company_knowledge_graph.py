@@ -583,11 +583,19 @@ class CompanyKnowledgeGraph:
     def __init__(self) -> None:
         self.enabled = os.getenv("KG_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
         self.uri = os.getenv("NEO4J_URI", "").strip()
+        self.driver_uri = self._normalize_driver_uri(self.uri)
         self.username = os.getenv("NEO4J_USERNAME", "").strip()
         self.password = os.getenv("NEO4J_PASSWORD", "").strip()
         self.database = os.getenv("NEO4J_DATABASE", "neo4j").strip() or "neo4j"
         self.use_llm_graph_transformer = os.getenv("KG_USE_LLM_GRAPH_TRANSFORMER", "false").strip().lower() in {"1", "true", "yes"}
         self._transformer = None
+
+    def _normalize_driver_uri(self, uri: str) -> str:
+        """Use direct bolt for local single-instance Neo4j to avoid routing issues."""
+        cleaned = str(uri or "").strip()
+        if cleaned.startswith("neo4j://127.0.0.1") or cleaned.startswith("neo4j://localhost"):
+            return "bolt://" + cleaned[len("neo4j://"):]
+        return cleaned
 
     def is_configured(self) -> bool:
         return self.enabled and bool(self.uri and self.username and self.password and GraphDatabase is not None)
@@ -595,13 +603,13 @@ class CompanyKnowledgeGraph:
     def _get_driver(self):
         if not self.is_configured():
             return None
-        return GraphDatabase.driver(self.uri, auth=(self.username, self.password))
+        return GraphDatabase.driver(self.driver_uri or self.uri, auth=(self.username, self.password))
 
     def _get_graph(self):
         if not self.is_configured() or Neo4jGraph is None:
             return None
         return Neo4jGraph(
-            url=self.uri,
+            url=self.driver_uri or self.uri,
             username=self.username,
             password=self.password,
             database=self.database,
@@ -908,10 +916,10 @@ class CompanyKnowledgeGraph:
     def run_cypher(self, cypher: str, params: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
         if not self.is_configured():
             return []
-        graph = self._get_graph()
-        if graph is None:
-            return []
         try:
+            graph = self._get_graph()
+            if graph is None:
+                return []
             rows = graph.query(cypher, params=params or {})
             return rows if isinstance(rows, list) else []
         except Exception:

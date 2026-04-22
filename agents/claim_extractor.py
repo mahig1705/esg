@@ -305,6 +305,97 @@ Return ONLY valid JSON in the exact format specified. No markdown, no explanatio
 
         return None
 
+    def _salvage_claims_objects(self, text: str) -> Optional[List[Dict[str, Any]]]:
+        """Recover individual claim objects from malformed JSON-like output."""
+        key_idx = text.find('"claims"')
+        if key_idx == -1:
+            key_idx = text.find("'claims'")
+        if key_idx == -1:
+            return None
+
+        bracket_start = text.find("[", key_idx)
+        if bracket_start == -1:
+            return None
+
+        claims: List[Dict[str, Any]] = []
+        depth = 0
+        obj_start = -1
+        in_string = False
+        escape = False
+
+        for idx in range(bracket_start, len(text)):
+            ch = text[idx]
+
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+
+            if ch == "{":
+                depth += 1
+                if depth == 1:
+                    obj_start = idx
+            elif ch == "}":
+                if depth == 1 and obj_start != -1:
+                    parsed = self._salvage_single_claim_object(text[obj_start:idx + 1])
+                    if parsed:
+                        claims.append(parsed)
+                    obj_start = -1
+                depth = max(0, depth - 1)
+            elif ch == "]" and depth == 0:
+                break
+
+        return claims or None
+
+    def _salvage_single_claim_object(self, obj_text: str) -> Optional[Dict[str, Any]]:
+        """Extract known claim fields with regex when JSON decoding fails."""
+        field_patterns = {
+            "claim_id": r'"claim_id"\s*:\s*(\d+)',
+            "actor": r'"actor"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            "claim_text": r'"claim_text"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            "category": r'"category"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            "subcategory": r'"subcategory"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            "metric": r'"metric"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            "timeline": r'"timeline"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            "claim_type": r'"claim_type"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            "specificity_score": r'"specificity_score"\s*:\s*(-?\d+)',
+        }
+
+        claim: Dict[str, Any] = {}
+        for field, pattern in field_patterns.items():
+            match = re.search(pattern, obj_text, re.DOTALL)
+            if not match:
+                continue
+            value = match.group(1)
+            if field in {"claim_id", "specificity_score"}:
+                try:
+                    claim[field] = int(value)
+                except Exception:
+                    continue
+            else:
+                cleaned = value.replace('\\"', '"').replace("\\n", " ").replace("\\r", " ")
+                claim[field] = re.sub(r"\s+", " ", cleaned).strip()
+
+        if not claim.get("claim_text"):
+            return None
+
+        claim.setdefault("actor", "")
+        claim.setdefault("category", "Environmental")
+        claim.setdefault("subcategory", "")
+        claim.setdefault("metric", "")
+        claim.setdefault("timeline", "")
+        claim.setdefault("claim_type", "")
+        claim.setdefault("specificity_score", 5)
+        claim.setdefault("claim_id", 0)
+        return claim
+
     def _parse_claims_json_response(self, response: str, company_name: str, year: Any = None) -> Dict[str, Any]:
         """Parse claims JSON robustly with repair and salvage fallbacks."""
         cleaned = self._clean_json_response(response)
@@ -342,6 +433,26 @@ Return ONLY valid JSON in the exact format specified. No markdown, no explanatio
                     if "year" not in claim:
                         claim["year"] = year
             print(f"         ✅ Recovered {len(result['claims'])} claim(s) from malformed JSON")
+            return result
+
+        # Attempt 4: salvage individual claim objects from a broken claims array.
+        claims = self._salvage_claims_objects(repaired)
+        if claims is None:
+            claims = self._salvage_claims_objects(cleaned)
+
+        if claims is not None:
+            result = {
+                "company": company_name,
+                "claims": claims,
+                "parsing_note": "claim objects salvaged from malformed JSON"
+            }
+            if year is not None:
+                for idx, claim in enumerate(result["claims"], start=1):
+                    if "year" not in claim:
+                        claim["year"] = year
+                    if not claim.get("claim_id"):
+                        claim["claim_id"] = idx
+            print(f"         ✅ Recovered {len(result['claims'])} claim(s) from malformed JSON objects")
             return result
 
         # Final fallback
