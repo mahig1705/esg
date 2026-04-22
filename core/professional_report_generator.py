@@ -177,6 +177,28 @@ class ProfessionalReportGenerator:
         self.methodology = "Multi-Agent ESG Analysis (Pillar-Primary, Calibrated)"
 
     @staticmethod
+    def _coerce_datetime(value: Any) -> datetime:
+        """Safely coerce value to datetime.
+
+        In the subprocess execution path (frontend → API → Python), the
+        structured dict can be rebuilt from state that has already been
+        serialised/deserialised (e.g. via JSON), so `timestamp_dt` may
+        arrive as an ISO-8601 string instead of a datetime object.
+        Calling .strftime() on a string raises AttributeError — this
+        helper prevents that crash.
+        """
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                # Handle both aware (Z / +00:00) and naive ISO strings
+                cleaned = value.replace("Z", "+00:00")
+                return datetime.fromisoformat(cleaned)
+            except (ValueError, AttributeError):
+                pass
+        return datetime.utcnow()
+
+    @staticmethod
     def _major_divider() -> str:
         return "=" * 80
 
@@ -223,6 +245,30 @@ class ProfessionalReportGenerator:
         stages_failed = []
         warnings = []
         generation_status = "success"
+
+        # ── GLOBAL STATE SANITIZER ───────────────────────────────────────────────
+        # The subprocess execution path (frontend → API → Python) can deliver state
+        # where keys exist but values are None, wrong-typed strings, or bare ints.
+        # state.get("key", []) returns None when the key is present with value None
+        # — so we normalise once here before any code touches state.
+        _state_list_fields = [
+            "agent_outputs", "evidence", "extracted_claims", "claims",
+        ]
+        for _slf in _state_list_fields:
+            if not isinstance(state.get(_slf), list):
+                state[_slf] = []
+        _state_dict_fields = [
+            "final_verdict", "carbon_extraction", "regulatory_compliance",
+            "greenwishing_analysis", "climatebert_analysis", "claim_decomposition",
+            "adversarial_triangulation", "carbon_pathway_analysis",
+            "commitment_ledger", "social_analysis", "governance_analysis",
+            "explainability_report", "esg_mismatch_analysis",
+        ]
+        for _sdf in _state_dict_fields:
+            if not isinstance(state.get(_sdf), dict):
+                state[_sdf] = {}
+        # ── END GLOBAL STATE SANITIZER ───────────────────────────────────────────
+
 
         # Safety: define company/industry/ticker at method scope so sub-methods
         # that inadvertently reference them as free variables won't crash.
@@ -277,7 +323,9 @@ class ProfessionalReportGenerator:
                 "error_message": str(exc),
                 "traceback": _tb.format_exc(),
             }
-            print(f"[ERROR] Report generation failed: {json.dumps(_err_log, default=str)[:500]}")
+            with open("reports/crash_traceback.log", "w", encoding="utf-8") as f:
+                f.write(_tb.format_exc())
+            print(f"[ERROR] Report generation failed. Full traceback written to reports/crash_traceback.log")
             report = (
                 f"{'=' * 80}\n"
                 f"ESG GREENWASHING RISK ASSESSMENT REPORT (PARTIAL)\n"
@@ -620,10 +668,12 @@ class ProfessionalReportGenerator:
         }
         
         validated_carbon = validator.validate(flat_carbon, company, industry, report_year=datetime.now().year)
-        
-        if not validated_carbon["validation"]["passed"]:
+        # FIX: safe access — validate() should always return a dict with 'validation' but guard anyway
+        _vc_validation = validated_carbon.get("validation", {}) if isinstance(validated_carbon, dict) else {}
+
+        if not _vc_validation.get("passed", True):
             logger = logging.getLogger(__name__)
-            logger.warning("Carbon data rejected for %s | reasons: %s", company, validated_carbon["validation"]["rejection_reasons"])
+            logger.warning("Carbon data rejected for %s | reasons: %s", company, _vc_validation.get("rejection_reasons", []))
             try:
                 from core.carbon_retrieval import fetch_carbon_with_fallback
                 try:
@@ -640,13 +690,13 @@ class ProfessionalReportGenerator:
                         ))
                     _t = threading.Thread(target=_run)
                     _t.start()
-                    _t.join()
-                    fallback_carbon = _res[0]
+                    _t.join(timeout=30)  # FIX: never block indefinitely
+                    fallback_carbon = _res[0] if _res else validated_carbon  # FIX: guard empty list
                 else:
                     fallback_carbon = asyncio.run(
                         fetch_carbon_with_fallback(company, ticker, industry, "US", datetime.now().year)
                     )
-                validated_carbon = fallback_carbon
+                validated_carbon = fallback_carbon if isinstance(fallback_carbon, dict) else validated_carbon
             except Exception as e:
                 logger.error(f"Fallback fetch failed: {e}")
 
@@ -665,6 +715,8 @@ class ProfessionalReportGenerator:
         citations = evidence.get("citations", []) or []
         premium = 0
         for c in citations:
+            if not isinstance(c, dict):
+                continue
             tier = str(c.get("reliability_tier", "")).lower()
             if "regulatory filing" in tier or "cdp / third-party verified" in tier:
                 premium += 1
@@ -707,11 +759,11 @@ class ProfessionalReportGenerator:
         external_enabled = bool(external_data.get("enabled") or external_sources)
 
         # 2026 Engine High-Fidelity Diagnostics
-        claim_decomposition = state.get("claim_decomposition") or agents.get("claim_decomposition", {}).get("output", {})
-        commitment_ledger = state.get("commitment_ledger") or agents.get("commitment_ledger", {}).get("output", {})
-        carbon_pathway = state.get("carbon_pathway_analysis") or agents.get("carbon_pathway", {}).get("output", {})
-        adversarial_triangulation = state.get("adversarial_triangulation") or agents.get("adversarial_triangulation", {}).get("output", {})
-        regulatory_scanning = state.get("regulatory_scanning") or agents.get("regulatory_scanning", {}).get("output", {})
+        claim_decomposition = state.get("claim_decomposition") or safe_get(agents, "claim_decomposition", "output", default={})
+        commitment_ledger = state.get("commitment_ledger") or safe_get(agents, "commitment_ledger", "output", default={})
+        carbon_pathway = state.get("carbon_pathway_analysis") or safe_get(agents, "carbon_pathway", "output", default={})
+        adversarial_triangulation = state.get("adversarial_triangulation") or safe_get(agents, "adversarial_triangulation", "output", default={})
+        regulatory_scanning = state.get("regulatory_scanning") or safe_get(agents, "regulatory_scanning", "output", default={})
 
         return {
             "metadata": metadata,
@@ -766,16 +818,73 @@ class ProfessionalReportGenerator:
                 "regulatory_scanning": regulatory_scanning,
             }
         }
+    def _safe_section(self, section_name: str, fn, *args, **kwargs):
+        """Execute fn(*args, **kwargs) isolated — any crash yields a placeholder section."""
+        try:
+            return fn(*args, **kwargs)
+        except Exception as _sec_exc:
+            import traceback as _tb2
+            _tb2.print_exc()
+            _m = "=" * 80
+            return "\n".join([
+                _m,
+                f"{section_name} [SECTION UNAVAILABLE]",
+                _m,
+                f"  Error rendering section: {type(_sec_exc).__name__}: {_sec_exc}",
+                "  All other sections and the JSON export are unaffected.",
+                _m,
+            ])
 
     def _render_v4_report(self, state: Dict[str, Any], structured: Dict[str, Any], quality: Dict[str, Any]) -> str:
         major = self._major_divider()
         minor = self._minor_divider()
         v = self._collect_v4_values(state, structured, quality)
+
+        # ── FIELD SANITIZER ──────────────────────────────────────────────────────
+        # When triggered via the frontend subprocess path, fields in the collected
+        # values dict may be wrong-typed (None, string, int) if state was partially
+        # reconstructed.  Normalise every field that any render section reads so
+        # that downstream code never encounters a type surprise.
+        _list_fields = ["citations", "contradiction_list", "reg_gaps",
+                        "same_industry_peers", "limitations", "quality_warnings"]
+        for _f in _list_fields:
+            if not isinstance(v.get(_f), list):
+                v[_f] = []
+        _dict_fields = ["evidence", "scores", "agents", "calibration",
+                        "regulatory", "carbon", "contradiction_output",
+                        "external_benchmarks", "metadata"]
+        for _f in _dict_fields:
+            if not isinstance(v.get(_f), dict):
+                v[_f] = {}
+        if not isinstance(v.get("gw_score"), (int, float)):
+            v["gw_score"] = 55.0
+        if not isinstance(v.get("esg_score"), (int, float)):
+            v["esg_score"] = max(0.0, min(100.0, 100.0 - float(v["gw_score"])))
+        if not isinstance(v.get("confidence_pct"), (int, float)):
+            v["confidence_pct"] = 45.0
+        if not isinstance(v.get("contradiction_count"), int):
+            v["contradiction_count"] = len(v["contradiction_list"])
+        for _sf in ["band", "rating", "company", "industry", "claim",
+                    "ticker", "workflow", "report_confidence",
+                    "calibration_status", "confidence_label"]:
+            if not isinstance(v.get(_sf), str) or not v[_sf]:
+                _defaults = {
+                    "band": "MODERATE", "rating": "BBB",
+                    "company": "Unknown", "industry": "Unknown",
+                    "claim": "No claim provided", "ticker": "N/A",
+                    "workflow": "workflow_unavailable",
+                    "report_confidence": "MEDIUM",
+                    "calibration_status": "Calibration not available",
+                    "confidence_label": "MEDIUM",
+                }
+                v[_sf] = _defaults.get(_sf, "Unknown")
+        # ── END SANITIZER ─────────────────────────────────────────────────────────
+
         industry_label = str(
             v.get("industry")
             or safe_get(structured, "company", "industry", default=state.get("industry") or "Unknown")
         ).strip() or "Unknown"
-        ts = v["metadata"].get("timestamp_dt") or datetime.utcnow()
+        ts = self._coerce_datetime(v["metadata"].get("timestamp_dt"))  # FIX: str→datetime safe
         report_id = str(v["metadata"].get("report_id") or f"{ts.strftime('%Y%m%d-%H%M%S')}-{v['company'][:4].upper()}")
         date_line = ts.strftime("%d %B %Y at %H:%M UTC")
         report_version = "4.0"
@@ -854,9 +963,9 @@ class ProfessionalReportGenerator:
                 if not isinstance(row, dict):
                     continue
                 k = str(row.get("source_name") or "").strip().lower()
-                v = str(row.get("stance") or "").strip().upper()
-                if k and v:
-                    tri_stance_map[k] = v
+                stance_val = str(row.get("stance") or "").strip().upper()
+                if k and stance_val:
+                    tri_stance_map[k] = stance_val
         if triangulation:
             tri_score = triangulation.get("triangulation_score")
             tri_score_txt = f"{tri_score}/100" if isinstance(tri_score, (int, float)) else "N/A (UNCLASSIFIED)"
@@ -879,7 +988,6 @@ class ProfessionalReportGenerator:
         first_party_count = 0
         for i, c in enumerate(v["citations"], start=1):
             if not isinstance(c, dict):
-                sec2_lines.append(f"{i:<4} {'Documented Source':<32} {'General Web / Other':<28} {'NO':<11} {'Neutral':<12}")
                 continue
             src = str(c.get("source_name") or "").strip()
             if not src or src.lower() in {"unknown", "web source", "general web", "general web / other"}:
@@ -1239,7 +1347,7 @@ class ProfessionalReportGenerator:
         floor_label = self._resolve_floor_label(carbon_validation, industry_label)
         
         if carbon_validation.get("passed") is False and carbon_validation.get("fallback_estimate"):
-            fb = carbon_validation["fallback_estimate"]
+            fb = carbon_validation.get("fallback_estimate") or {}  # FIX: safe .get
             section5.extend([
                 "  ┌" + "─" * 57 + "┐",
                 "  │  CARBON DATA — ESTIMATED (primary source unavailable)   │",
@@ -1270,11 +1378,13 @@ class ProfessionalReportGenerator:
                 "  └" + "─" * 57 + "┘"
             ])
             
-            v["quality_warnings"].append(
-                "Carbon data could not be verified from primary sources. "
-                "Emissions figures in this report are estimated ranges only. "
-                "Net-zero claim evaluation is INDICATIVE."
-            )
+            # FIX: quality_warnings may not be a list if structured dict was reconstructed
+            if isinstance(v.get("quality_warnings"), list):
+                v["quality_warnings"].append(
+                    "Carbon data could not be verified from primary sources. "
+                    "Emissions figures in this report are estimated ranges only. "
+                    "Net-zero claim evaluation is INDICATIVE."
+                )
             report_confidence = "TIER_2 (Indicative)"
             v["report_confidence"] = "TIER_2 (Indicative)"
             missing_scopes = ["Scope 1", "Scope 2", "Scope 3"]
@@ -1340,8 +1450,8 @@ class ProfessionalReportGenerator:
             
             if carbon_validation.get("warnings"):
                 section5.append("")
-                for w in carbon_validation["warnings"]:
-                    section5.append(f"  ⚠ {w}")
+                for w in (carbon_validation.get("warnings") or []):  # FIX: safe .get
+                    section5.append(f"  \u26a0 {w}")
 
         if isinstance(renewable_pct, (int, float)):
             renewable_txt = f"{self._fmt_pct(renewable_pct)} of operational electricity"
@@ -1449,7 +1559,7 @@ class ProfessionalReportGenerator:
         section7.append(f"    Verdict:              {safe_get(climate, 'final_verdict', 'verdict', default=('HIGH_RISK' if cb_level == 'HIGH' else 'MODERATE_RISK' if cb_level in {'MEDIUM', 'MODERATE'} else 'LOW_RISK'))}")
         section7.append("\n" + major)
 
-        cal = v["calibration"]
+        cal = v.get("calibration") or {}  # FIX: safe .get — never bare bracket
         section9 = [major, "SECTION 10: CALIBRATION & CONFIDENCE", major]
         cal_state = cal.get("calibration_status", "NOT_AVAILABLE")
         dataset_size = cal.get("dataset_size")
@@ -1792,7 +1902,9 @@ class ProfessionalReportGenerator:
                 defaults = {"LOW": 25.0, "MODERATE": 55.0, "HIGH": 80.0}
                 greenwashing_risk_score = defaults.get(str(risk_level).upper(), 55.0)
 
-        state_confidence = float(state.get("confidence") or 0.0)
+        _raw_conf = state.get("confidence")
+        state_confidence = float(_raw_conf) if isinstance(_raw_conf, (int, float)) else 0.0  # FIX: guard string confidence
+
         scorer_confidence_level = risk_scorer_result.get("confidence_level")
         scorer_confidence = (
             float(scorer_confidence_level) / 100.0
@@ -2977,7 +3089,7 @@ class ProfessionalReportGenerator:
         workflow_display: str,
         quality: Dict[str, Any],
     ) -> str:
-        timestamp = metadata.get("timestamp_dt")
+        timestamp = self._coerce_datetime(metadata.get("timestamp_dt")) if metadata.get("timestamp_dt") else None  # FIX: str→datetime safe
         analysis_date = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if timestamp else "Unknown"
         report_id = metadata.get("report_id", "Unknown")
         workflow_short = workflow_display if len(workflow_display) <= 300 else workflow_display[:297] + "..."
@@ -4933,7 +5045,7 @@ KEY PERFORMANCE METRICS
             meta = structured.get("metadata", {})
             report_metadata = {
                 "report_id": meta.get("report_id"),
-                "analysis_date": (meta.get("timestamp_dt") or datetime.utcnow()).isoformat(),
+                "analysis_date": self._coerce_datetime(meta.get("timestamp_dt")).isoformat(),  # FIX: str→datetime safe
                 "report_confidence": quality.get("report_confidence_level", "MEDIUM"),
                 "quality_warnings": quality.get("quality_warnings", []),
             }
@@ -5626,7 +5738,9 @@ def professional_report_generation_node(state: Dict[str, Any]) -> Dict[str, Any]
 
     metadata = {
         "report_id": structured.get("metadata", {}).get("report_id"),
-        "analysis_date": (structured.get("metadata", {}).get("timestamp_dt") or datetime.utcnow()).isoformat(),
+        "analysis_date": ProfessionalReportGenerator._coerce_datetime(  # FIX: str→datetime safe
+            structured.get("metadata", {}).get("timestamp_dt")
+        ).isoformat(),
         "report_confidence": quality.get("report_confidence_level", "MEDIUM"),
         "quality_warnings": quality.get("quality_warnings", []),
     }

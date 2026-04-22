@@ -9,6 +9,7 @@ import {
   FileText,
   History,
   AlertTriangle,
+  Bot,
   Settings,
   LogOut,
   ShieldCheck,
@@ -38,20 +39,18 @@ function loadStoredUser(): SidebarUser | null {
 export default function Sidebar({ mobileOpen, setMobileOpen }: { mobileOpen: boolean, setMobileOpen: (open: boolean) => void }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [user, setUser] = useState<SidebarUser | null>(null);
+  const [user] = useState<SidebarUser | null>(() => loadStoredUser());
 
   useEffect(() => {
-    const loadedUser = loadStoredUser();
-    if (loadedUser) {
-      setUser(loadedUser);
-    } else {
+    if (!user) {
       router.push("/login");
     }
-  }, [router]);
+  }, [router, user]);
 
   const navItems = [
     { name: "Dashboard", href: "/dashboard", icon: <LayoutDashboard className="w-5 h-5" /> },
     { name: "Analyze Company", href: "/dashboard/analyze", icon: <SearchCode className="w-5 h-5" /> },
+    { name: "ESG Chatbot", href: "/dashboard/chatbot", icon: <Bot className="w-5 h-5" /> },
     { name: "Mismatch Detector", href: "/dashboard/mismatch", icon: <AlertTriangle className="w-5 h-5" /> },
     { name: "My Reports", href: "/dashboard/reports", icon: <FileText className="w-5 h-5" /> },
     { name: "History", href: "/dashboard/history", icon: <History className="w-5 h-5" /> },
