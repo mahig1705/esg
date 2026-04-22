@@ -18,6 +18,7 @@ from xml.etree import ElementTree as ET
 import httpx
 from core.company_knowledge_graph import CompanyKnowledgeGraph
 from core.vector_store import vector_store
+from core.sg_evidence import build_legacy_sg_adequacy, build_sg_evidence_pack
 from utils.enterprise_data_sources import enterprise_fetcher
 from utils.web_search import classify_source
 from config.agent_prompts import EVIDENCE_RETRIEVAL_PROMPT
@@ -982,100 +983,8 @@ class EvidenceRetriever:
                 "governance": {"is_adequate": True},
                 "warnings": [],
             }
-
-        min_items = int(cfg.get("min_items_per_pillar", 4) or 4)
-        min_sources = int(cfg.get("min_distinct_sources_per_pillar", 3) or 3)
-        min_apis = int(cfg.get("min_distinct_apis_per_pillar", 2) or 2)
-        min_high_trust = int(cfg.get("min_high_trust_items_per_pillar", 2) or 2)
-        high_trust_types = set(cfg.get("high_trust_source_types", []))
-
-        social_keywords = [
-            "labor", "labour", "worker", "workplace", "safety", "injury", "fatality",
-            "human rights", "union", "diversity", "dei", "discrimination", "harassment",
-            "supply chain", "community",
-        ]
-        governance_keywords = [
-            "board", "independence", "audit", "ethics", "compliance", "corruption",
-            "bribery", "fraud", "restatement", "whistleblower", "transparency",
-            "sanction", "enforcement", "governance", "executive pay",
-        ]
-
-        social_evidence: List[Dict[str, Any]] = []
-        governance_evidence: List[Dict[str, Any]] = []
-
-        for ev in evidence:
-            if not isinstance(ev, dict):
-                continue
-            text = self._normalize_signal_text(ev)
-            source_type = str(ev.get("source_type", "") or "")
-
-            if any(k in text for k in social_keywords) or source_type in {"NGO", "Climate NGO", "Supply Chain Database"}:
-                social_evidence.append(ev)
-
-            if any(k in text for k in governance_keywords) or source_type in {
-                "Government/Regulatory",
-                "Legal/Court Documents",
-                "Compliance/Sanctions Database",
-                "UK/EU Regulatory",
-            }:
-                governance_evidence.append(ev)
-
-        def summarize(items: List[Dict[str, Any]], pillar_name: str) -> Dict[str, Any]:
-            distinct_sources = {
-                str(item.get("source_name") or item.get("source") or "Unknown").strip().lower()
-                for item in items
-                if isinstance(item, dict)
-            }
-            distinct_apis = {
-                str(item.get("data_source_api") or "Unknown").strip().lower()
-                for item in items
-                if isinstance(item, dict)
-            }
-            high_trust_count = sum(
-                1
-                for item in items
-                if str(item.get("source_type", "") or "") in high_trust_types
-            )
-
-            is_adequate = (
-                len(items) >= min_items
-                and len([s for s in distinct_sources if s]) >= min_sources
-                and len([a for a in distinct_apis if a]) >= min_apis
-                and high_trust_count >= min_high_trust
-            )
-
-            warning = None
-            if not is_adequate:
-                warning = (
-                    f"{pillar_name} evidence insufficient: items={len(items)} (min {min_items}), "
-                    f"sources={len(distinct_sources)} (min {min_sources}), "
-                    f"apis={len(distinct_apis)} (min {min_apis}), "
-                    f"high_trust={high_trust_count} (min {min_high_trust})."
-                )
-
-            return {
-                "is_adequate": is_adequate,
-                "items": len(items),
-                "distinct_sources": len(distinct_sources),
-                "distinct_apis": len(distinct_apis),
-                "high_trust_items": high_trust_count,
-                "warning": warning,
-            }
-
-        social_summary = summarize(social_evidence, "Social")
-        governance_summary = summarize(governance_evidence, "Governance")
-        warnings = [
-            msg for msg in [social_summary.get("warning"), governance_summary.get("warning")]
-            if msg
-        ]
-
-        return {
-            "enabled": True,
-            "overall_ready": bool(social_summary["is_adequate"] and governance_summary["is_adequate"]),
-            "social": social_summary,
-            "governance": governance_summary,
-            "warnings": warnings,
-        }
+        sg_pack = build_sg_evidence_pack(evidence=evidence, adequacy_cfg=cfg)
+        return build_legacy_sg_adequacy(sg_pack)
     
     def retrieve_evidence(self, claim: Dict[str, Any], company: str) -> Dict[str, Any]:
         """
@@ -1790,7 +1699,11 @@ class EvidenceRetriever:
         # Coverage score
         total_api_sources = len([k for k in source_dict.keys() if source_dict[k]])
         coverage_score = (total_api_sources / 6) * 100  # 6 main source types
-        sg_adequacy = self._evaluate_social_governance_adequacy(evidence)
+        sg_pack = build_sg_evidence_pack(
+            evidence=evidence,
+            adequacy_cfg=self.sg_adequacy_config if isinstance(self.sg_adequacy_config, dict) else {},
+        )
+        sg_adequacy = build_legacy_sg_adequacy(sg_pack)
         
         return {
             "evidence_gap": evidence_gap,
@@ -1803,6 +1716,7 @@ class EvidenceRetriever:
             "total_sources": len(evidence),
             "source_type_breakdown": type_breakdown,
             "api_source_breakdown": api_breakdown,
+            "social_governance_evidence": sg_pack,
             "social_governance_adequacy": sg_adequacy,
         }
 

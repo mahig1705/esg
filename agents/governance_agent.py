@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 
 from utils.free_data_sources import search_duckduckgo
 from utils.web_search import RealTimeDataFetcher
+from core.sg_evidence import build_sg_evidence_pack
 
 
 class GovernanceAgent:
@@ -120,6 +121,7 @@ class GovernanceAgent:
 
         if status == "insufficient_data":
             confidence = 0.1
+        governance_lane = build_sg_evidence_pack(evidence=evidence, claim_text=claim_text).get("pillars", {}).get("governance", {})
 
         return {
             "company": company,
@@ -146,6 +148,8 @@ class GovernanceAgent:
             "red_flags": red_flags,
             "key_findings": findings,
             "evidence_sources": sources[:15],
+            "extraction_tracks": governance_lane.get("tracks", []),
+            "evidence_lane": governance_lane,
             "timestamp": datetime.now().isoformat(),
         }
 

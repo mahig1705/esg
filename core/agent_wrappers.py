@@ -1104,9 +1104,13 @@ def climatebert_analysis_node(state: ESGState) -> ESGState:
 
             claim_analysis = result.get("claim_analysis", {})
             gw_detection = claim_analysis.get("greenwashing_detection", {})
+            evidence_analysis = result.get("evidence_analysis", {}) if isinstance(result.get("evidence_analysis"), dict) else {}
 
             print(f"\n🧠 CLIMATEBERT ANALYSIS RESULTS:")
             print(f"   Climate Relevance: {claim_analysis.get('climate_relevance', {}).get('score', 'N/A')}")
+            print(f"   Backend: {result.get('analysis_backend', claim_analysis.get('analysis_backend', 'unknown'))}")
+            if evidence_analysis:
+                print(f"   Evidence Climate Relevance: {evidence_analysis.get('climate_relevance', {}).get('score', 'N/A')}")
             print(f"   Greenwashing Risk: {gw_detection.get('risk_score', 'N/A')}/100")
             print(f"   Risk Level: {gw_detection.get('risk_level', 'N/A')}")
 
@@ -2049,6 +2053,7 @@ def fact_graph_node(state: ESGState) -> ESGState:
         temporal_outputs = [o for o in state.get("agent_outputs", []) if o.get("agent") == "temporal_consistency"]
         if temporal_outputs:
             temporal_payload = temporal_outputs[-1].get("output", {}) or {}
+        analyses = _build_analyses_dict(state)
 
         result = build_esg_fact_graph(
             company=state.get("company", ""),
@@ -2056,6 +2061,7 @@ def fact_graph_node(state: ESGState) -> ESGState:
             evidence=state.get("evidence", []),
             contradictions=contradictions if isinstance(contradictions, list) else [],
             temporal_consistency=temporal_payload if isinstance(temporal_payload, dict) else {},
+            normalized_sg_evidence=analyses.get("evidence_quality_metrics", {}).get("social_governance_evidence", {}) if isinstance(analyses.get("evidence_quality_metrics", {}), dict) else {},
         )
 
         summary = result.get("summary", {}) if isinstance(result, dict) else {}

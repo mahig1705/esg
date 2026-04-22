@@ -177,6 +177,10 @@ class ClimateBERTAnalyzer:
             # Fallback to pattern-based analysis
             print("   Using pattern-based analysis (no GPU/models)")
             result = self._pattern_based_analysis(text)
+
+        if isinstance(result, dict):
+            result["analysis_backend"] = "transformer" if models_available else "pattern_based"
+            result["requested_analysis_type"] = analysis_type
         
         # Add greenwashing detection
         greenwashing_scores = self._detect_greenwashing_patterns(text)
@@ -467,6 +471,7 @@ class ClimateBERTAnalyzer:
             "claim_analysis": claim_analysis,
             "evidence_analysis": evidence_analysis,
             "comparison": comparison,
+            "analysis_backend": claim_analysis.get("analysis_backend", "unknown") if isinstance(claim_analysis, dict) else "unknown",
             "final_verdict": self._final_greenwashing_verdict(claim_analysis, comparison)
         }
     

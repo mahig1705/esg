@@ -1528,17 +1528,28 @@ class ProfessionalReportGenerator:
         appendix_b = [major, "APPENDIX B: TEMPORAL ESG CONSISTENCY", major, self._plain_textify(self._generate_temporal_consistency_section(state)), "", major]
         appendix_c = [major, "APPENDIX C: EVIDENCE & OFFSET INTEGRITY", major, self._plain_textify(self._generate_realism_diagnostics_section(state)), "", major]
 
+        raw_scores = v.get("scores", {}).get("raw", {}) if isinstance(v.get("scores", {}).get("raw", {}), dict) else {}
+        score_disclaimer = str(raw_scores.get("score_disclaimer", "") or "").strip()
+        decision_status = str(raw_scores.get("decision_status", "SCORED") or "SCORED").strip()
+        abstain_recommended = bool(raw_scores.get("abstain_recommended", False))
+        abstention_reason = str(raw_scores.get("abstention_reason", "") or "").strip()
+
+        gw_score_disp = f"{v['gw_score']:.1f} / 100"
+        esg_score_disp = f"{v.get('esg_score', 0):.1f} / 100"
         n_size = cal.get("dataset_size")
         if n_size is None or n_size < 30:
-            gw_score_disp = "[SUPPRESSED]"
-            esg_score_disp = "[SUPPRESSED]"
-            band_disp = f"{v['band']} (Score numeric suppressed — calibration sample too small for this sector)"
+            band_disp = f"{v['band']} (Provisional numeric score shown; calibration sample too small for this sector)"
             cal_status_disp = f"PROVISIONAL [{cal.get('calibration_status', 'N/A')} - n={n_size or 0}]"
         else:
-            gw_score_disp = f"{v['gw_score']:.1f} / 100"
-            esg_score_disp = f"{v.get('esg_score', 0):.1f} / 100"
             band_disp = str(v['band'])
             cal_status_disp = f"{v['calibration_status']}  [{cal.get('calibration_status', 'N/A')}]"
+
+        verdict_justification = []
+        if score_disclaimer:
+            verdict_justification.append(score_disclaimer)
+        if abstain_recommended:
+            reason = abstention_reason or "Evidence quality checks triggered an abstention recommendation."
+            verdict_justification.append(f"Decision status: {decision_status}. Justification: {reason}")
 
         blocks = {
             "cover": "\n".join([
@@ -1569,6 +1580,7 @@ class ProfessionalReportGenerator:
                 f"  Risk Band:                {band_disp}",
                 f"  Confidence:               {v['confidence_pct']:.1f}%",
                 f"  Calibration Status:       {cal_status_disp}",
+                *([""] + ["  Score justification:", *[f"  - {line}" for line in verdict_justification]] if verdict_justification else []),
                 "",
                 "  One-sentence plain-English summary:",
                 self._wrap_paragraph(summary_sentence, width=80),

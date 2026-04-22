@@ -12,6 +12,7 @@ import re
 import requests
 
 from utils.free_data_sources import search_duckduckgo
+from core.sg_evidence import build_sg_evidence_pack
 
 
 class SocialAgent:
@@ -111,6 +112,7 @@ class SocialAgent:
         confidence = 0.65 + min(0.25, len(sources) * 0.02)
         if status == "insufficient_data":
             confidence = 0.1
+        social_lane = build_sg_evidence_pack(evidence=evidence, claim_text=claim_text).get("pillars", {}).get("social", {})
 
         return {
             "company": company,
@@ -137,6 +139,8 @@ class SocialAgent:
             "red_flags": red_flags,
             "key_findings": findings,
             "evidence_sources": sources[:15],
+            "extraction_tracks": social_lane.get("tracks", []),
+            "evidence_lane": social_lane,
             "timestamp": datetime.now().isoformat(),
         }
 

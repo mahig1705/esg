@@ -11,6 +11,7 @@ import asyncio
 from config.agent_prompts import RISK_SCORING_PROMPT
 from core.pillar_factors_builder import build_pillar_factors
 from core.materiality_profile_loader import load_materiality_profiles
+from core.sg_evidence import build_legacy_sg_adequacy, build_sg_evidence_pack
 import json
 import os
 import logging
@@ -319,7 +320,11 @@ class RiskScorer:
         if not isinstance(quality_metrics, dict):
             return defaults
 
-        adequacy = quality_metrics.get("social_governance_adequacy", {})
+        sg_pack = quality_metrics.get("social_governance_evidence", {})
+        if isinstance(sg_pack, dict) and sg_pack:
+            adequacy = build_legacy_sg_adequacy(sg_pack)
+        else:
+            adequacy = quality_metrics.get("social_governance_adequacy", {})
         if not isinstance(adequacy, dict):
             return defaults
 
@@ -332,6 +337,69 @@ class RiskScorer:
             "social": {"is_adequate": bool(social_block.get("is_adequate", False)), **social_block},
             "governance": {"is_adequate": bool(governance_block.get("is_adequate", False)), **governance_block},
             "warnings": warnings,
+        }
+
+    @staticmethod
+    def _get_sg_evidence_pack(all_analyses: Dict[str, Any]) -> Dict[str, Any]:
+        quality_metrics = all_analyses.get("evidence_quality_metrics", {})
+        if isinstance(quality_metrics, dict):
+            existing = quality_metrics.get("social_governance_evidence", {})
+            if isinstance(existing, dict) and existing:
+                return existing
+        evidence = all_analyses.get("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+        return build_sg_evidence_pack(
+            evidence=evidence,
+            claim_text=str(all_analyses.get("claim_text") or ""),
+            external_benchmarks=all_analyses.get("external_benchmarks", {}),
+        )
+
+    @staticmethod
+    def _score_normalized_sg_pillar(
+        pillar_name: str,
+        sg_pack: Dict[str, Any],
+        adequacy_block: Dict[str, Any],
+    ) -> tuple[float, Dict[str, Any]]:
+        pillars = sg_pack.get("pillars", {}) if isinstance(sg_pack, dict) else {}
+        pillar = pillars.get(pillar_name, {}) if isinstance(pillars, dict) else {}
+        tracks = pillar.get("tracks", []) if isinstance(pillar.get("tracks"), list) else []
+        if not tracks:
+            return 50.0, {"evidence_state": "insufficient_evidence", "track_scores": []}
+
+        track_scores = []
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            track_scores.append(
+                {
+                    "track": track.get("track"),
+                    "indicator_name": track.get("indicator_name"),
+                    "evidence_state": track.get("evidence_state"),
+                    "disclosure_stage": track.get("disclosure_stage"),
+                    "track_score": float(track.get("track_score", 50.0) or 50.0),
+                    "controversy_count": int(track.get("controversy_count", 0) or 0),
+                }
+            )
+
+        base_score = sum(item["track_score"] for item in track_scores) / len(track_scores)
+        if not adequacy_block.get("is_adequate", False):
+            base_score = 50.0
+
+        reconciliation = pillar.get("benchmark_reconciliation", {}) if isinstance(pillar.get("benchmark_reconciliation"), dict) else {}
+        temporal_memory = pillar.get("temporal_memory", {}) if isinstance(pillar.get("temporal_memory"), dict) else {}
+        ext_score = reconciliation.get("external_score")
+        if isinstance(ext_score, (int, float)):
+            base_score = (base_score * 0.88) + (float(ext_score) * 0.12)
+        if temporal_memory.get("mode") == "multi_year" and temporal_memory.get("multi_year_track_count", 0) >= 2:
+            base_score = min(100.0, base_score + 2.0)
+
+        return round(max(0.0, min(100.0, base_score)), 1), {
+            "evidence_state": pillar.get("evidence_state", "insufficient_evidence"),
+            "pre_score_gate": pillar.get("pre_score_gate", {}),
+            "track_scores": track_scores,
+            "temporal_memory": temporal_memory,
+            "benchmark_reconciliation": reconciliation,
         }
 
     def _load_materiality_map(self) -> Dict[str, Any]:
@@ -508,7 +576,7 @@ class RiskScorer:
 
         social_external = self._normalize_external_score(ext_scores.get("social"))
         if social_external is not None:
-            weight = 0.45 if not sg_adequacy.get("social", {}).get("is_adequate", False) else 0.25
+            weight = 0.12 if not sg_adequacy.get("social", {}).get("is_adequate", False) else 0.08
             before = social_score
             social_score = ((1.0 - weight) * social_score) + (weight * social_external)
             adjustments.append({
@@ -522,7 +590,7 @@ class RiskScorer:
 
         governance_external = self._normalize_external_score(ext_scores.get("governance"))
         if governance_external is not None:
-            weight = 0.45 if not sg_adequacy.get("governance", {}).get("is_adequate", False) else 0.25
+            weight = 0.12 if not sg_adequacy.get("governance", {}).get("is_adequate", False) else 0.08
             before = governance_score
             governance_score = ((1.0 - weight) * governance_score) + (weight * governance_external)
             adjustments.append({
@@ -581,6 +649,7 @@ class RiskScorer:
         # Get evidence and contradictions
         evidence = all_analyses.get('evidence', [])
         sg_adequacy = self._resolve_sg_adequacy(all_analyses)
+        sg_pack = self._get_sg_evidence_pack(all_analyses)
         contradiction_payload = all_analyses.get('contradiction_analysis', [])
         contradictions = []
         if isinstance(contradiction_payload, dict):
@@ -649,9 +718,7 @@ class RiskScorer:
             if any(kw in str(c).lower() for kw in social_keywords)
         )
 
-        soc_penalty = min(soc_negative * 15, 60)
-        social_score = 50 + (soc_positive * 10) - soc_penalty
-        social_score = max(0, min(100, social_score))
+        social_score, social_lane = self._score_normalized_sg_pillar("social", sg_pack, sg_adequacy.get("social", {}))
 
         if not sg_adequacy.get("social", {}).get("is_adequate", False):
             # Pull social score toward neutral when evidence is not decision-grade.
@@ -661,7 +728,7 @@ class RiskScorer:
         social_agent_score = social_agent_output.get("social_score")
         if isinstance(social_agent_score, (int, float)):
             before_blend = social_score
-            social_score = round((social_score * 0.55) + (float(social_agent_score) * 0.45), 1)
+            social_score = round((social_score * 0.75) + (float(social_agent_score) * 0.25), 1)
             print(f"   Social agent blend: {before_blend:.1f} -> {social_score:.1f}")
 
         social_flags = social_agent_output.get("rule_flags", {}) if isinstance(social_agent_output.get("rule_flags"), dict) else {}
@@ -684,9 +751,7 @@ class RiskScorer:
             if any(kw in str(c).lower() for kw in governance_keywords)
         )
 
-        gov_penalty = min(gov_negative * 15, 60)
-        governance_score = 50 + (gov_positive * 10) - gov_penalty
-        governance_score = max(0, min(100, governance_score))
+        governance_score, governance_lane = self._score_normalized_sg_pillar("governance", sg_pack, sg_adequacy.get("governance", {}))
 
         if not sg_adequacy.get("governance", {}).get("is_adequate", False):
             # Pull governance score toward neutral when evidence is not decision-grade.
@@ -716,7 +781,7 @@ class RiskScorer:
         governance_agent_score = governance_agent_output.get("governance_score")
         if isinstance(governance_agent_score, (int, float)):
             before_blend = governance_score
-            governance_score = round((governance_score * 0.55) + (float(governance_agent_score) * 0.45), 1)
+            governance_score = round((governance_score * 0.75) + (float(governance_agent_score) * 0.25), 1)
             print(f"   Governance agent blend: {before_blend:.1f} -> {governance_score:.1f}")
 
         governance_flags = governance_agent_output.get("rule_flags", {}) if isinstance(governance_agent_output.get("rule_flags"), dict) else {}
@@ -817,6 +882,9 @@ class RiskScorer:
             "pillar_weighting": {"E": w_e, "S": w_s, "G": w_g},
             "materiality_profile": materiality_profile,
             "data_adequacy": sg_adequacy,
+            "social_lane": social_lane,
+            "governance_lane": governance_lane,
+            "normalized_sg_fact_count": int(sg_pack.get("summary", {}).get("normalized_fact_count", 0) or 0),
             "external_benchmark_adjustments": external_adjustments,
             "external_benchmarks_used": bool(external_adjustments),
         }
@@ -1471,7 +1539,14 @@ class RiskScorer:
                 carbon_data=carbon_data_for_factors,
                 pillar_scores=pillar_scores,
             )
-            # FIX 1B: Back-populate raw_signal_normalized and points_contributed from factor weights.
+            # Keep the calibrated pillar-primary scores authoritative.
+            canonical_pillar_scores = {
+                "environmental_score": float(result["pillar_scores"].get("environmental_score", 0.0) or 0.0),
+                "social_score": float(result["pillar_scores"].get("social_score", 0.0) or 0.0),
+                "governance_score": float(result["pillar_scores"].get("governance_score", 0.0) or 0.0),
+            }
+
+            # Back-populate raw_signal_normalized and points_contributed for explainability only.
             pillar_key_map = {
                 "environmental": "environmental_score",
                 "social": "social_score",
@@ -1494,14 +1569,16 @@ class RiskScorer:
                     f"pillar={pillar_total}, sum_points={points_sum}"
                 )
 
-                pillar_total = round(max(0.0, min(100.0, pillar_total)), 1)
-                pillar_block["score"] = pillar_total
-                result["pillar_scores"][score_key] = pillar_total
+                explainability_total = round(max(0.0, min(100.0, pillar_total)), 1)
+                canonical_total = round(max(0.0, min(100.0, canonical_pillar_scores.get(score_key, explainability_total))), 1)
+                pillar_block["score"] = canonical_total
+                pillar_block["explainability_reconstructed_score"] = explainability_total
+                result["pillar_scores"][score_key] = canonical_total
 
-            # Keep final ESG/risk synchronized with pillar-derived totals.
-            e = float(result["pillar_scores"].get("environmental_score", 0.0) or 0.0)
-            s = float(result["pillar_scores"].get("social_score", 0.0) or 0.0)
-            g = float(result["pillar_scores"].get("governance_score", 0.0) or 0.0)
+            # Keep final ESG/risk synchronized with the canonical pillar-primary totals.
+            e = float(canonical_pillar_scores.get("environmental_score", 0.0) or 0.0)
+            s = float(canonical_pillar_scores.get("social_score", 0.0) or 0.0)
+            g = float(canonical_pillar_scores.get("governance_score", 0.0) or 0.0)
             materiality_weights = result["pillar_scores"].get("pillar_weighting", {"E": 0.35, "S": 0.35, "G": 0.30})
             w_e_sync = float(materiality_weights.get("E", 0.35) or 0.35)
             w_s_sync = float(materiality_weights.get("S", 0.35) or 0.35)

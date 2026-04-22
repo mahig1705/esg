@@ -126,6 +126,17 @@ class CarbonPathwayModeller:
         slope = (end_val - start_val) / max(1, end_year - start_year)
         return start_val + slope * (target_year - start_year)
 
+    def _reference_reduction_for_industry(self, industry: str, target_year: int, pathway: str) -> float:
+        """
+        Return the cumulative reduction fraction expected by the reference pathway.
+
+        This currently mirrors the calibrated industry decline lookup used elsewhere
+        in the modeller so pathway-vs-benchmark comparisons remain internally
+        consistent instead of crashing at runtime.
+        """
+        reduction = self._required_decline_for_industry(industry, pathway, target_year)
+        return max(0.0, min(1.0, float(reduction)))
+
     def _ipcc_budget_for_industry(self, industry: str) -> float:
         ind = (industry or "").lower().replace(" ", "_")
         return float(IPCC_BUDGET_REFERENCE.get(ind, IPCC_BUDGET_REFERENCE["default"]))

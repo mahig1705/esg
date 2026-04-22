@@ -142,9 +142,11 @@ def build_esg_fact_graph(
     evidence: List[Dict[str, Any]],
     contradictions: List[Dict[str, Any]] | None = None,
     temporal_consistency: Dict[str, Any] | None = None,
+    normalized_sg_evidence: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     contradictions = contradictions or []
     temporal_consistency = temporal_consistency or {}
+    normalized_sg_evidence = normalized_sg_evidence or {}
 
     records = _extract_base_evidence(evidence if isinstance(evidence, list) else [])
     nodes: List[Dict[str, Any]] = []
@@ -251,6 +253,30 @@ def build_esg_fact_graph(
             edges.append({"from": claim_id, "to": node_id, "relation": "time_consistency_check", "weight": 0.8})
 
     verified_fact_count = sum(1 for f in facts if float(f.get("verifiability_score", 0)) >= 0.6)
+    sg_facts = normalized_sg_evidence.get("normalized_facts", []) if isinstance(normalized_sg_evidence, dict) else []
+    if isinstance(sg_facts, list):
+        for s_idx, row in enumerate(sg_facts[:160], start=1):
+            if not isinstance(row, dict):
+                continue
+            node_id = f"sg_fact_{s_idx}"
+            verifiability = 0.85 if row.get("evidence_state") == "verified_evidence" else 0.45
+            nodes.append(
+                {
+                    "id": node_id,
+                    "node_type": "normalized_fact",
+                    "pillar": "S" if row.get("pillar") == "social" else "G",
+                    "indicator_name": row.get("indicator_name"),
+                    "track": row.get("track"),
+                    "evidence_state": row.get("evidence_state"),
+                    "trust_level": row.get("trust_level"),
+                    "text": row.get("text", ""),
+                    "year": row.get("year"),
+                }
+            )
+            edges.append({"from": claim_id, "to": node_id, "relation": "normalized_support", "weight": verifiability})
+        verified_fact_count += sum(1 for row in sg_facts if isinstance(row, dict) and row.get("evidence_state") == "verified_evidence")
+        linked_count += sum(1 for row in sg_facts if isinstance(row, dict) and row.get("claim_linked"))
+    sg_summary = normalized_sg_evidence.get("summary", {}) if isinstance(normalized_sg_evidence.get("summary"), dict) else {}
     summary = {
         "fact_count": len(facts),
         "verified_fact_count": verified_fact_count,
@@ -258,8 +284,11 @@ def build_esg_fact_graph(
         "contradiction_fact_count": contradiction_count,
         "temporal_fact_count": temporal_flags,
         "coverage_by_pillar": pillar_counter,
+        "normalized_sg_fact_count": int(sg_summary.get("normalized_fact_count", 0) or 0),
+        "social_evidence_state": sg_summary.get("social_evidence_state", "insufficient_evidence"),
+        "governance_evidence_state": sg_summary.get("governance_evidence_state", "insufficient_evidence"),
         "graph_density": round(len(edges) / max(1, len(nodes)), 3),
-        "is_decision_ready": bool(verified_fact_count >= 4 and linked_count >= 1),
+        "is_decision_ready": bool(sg_summary.get("overall_ready", False)) if sg_summary else bool(verified_fact_count >= 4 and linked_count >= 1),
     }
 
     return {
@@ -270,4 +299,3 @@ def build_esg_fact_graph(
         "facts": facts,
         "summary": summary,
     }
-
