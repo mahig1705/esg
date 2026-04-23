@@ -478,6 +478,16 @@ class RiskScorer:
             weights["S"] = weights.get("S", 0.30) + 0.03
             notes.append("Social topic density increased Social weight.")
 
+        # Sector-Aware Proxy adjustments for low-disclosure/banks/tech
+        if industry == "banking":
+            if any(kw in combined_text for kw in ["financed emissions", "fossil fuel financing", "climate finance"]):
+                weights["E"] = weights.get("E", 0.35) + 0.05
+                notes.append("Bank's financed emissions proxy detected.")
+        elif industry in {"technology", "software", "e-commerce"}:
+            if any(kw in combined_text for kw in ["logistics", "supply chain", "data center", "renewable energy usage"]):
+                weights["E"] = weights.get("E", 0.35) + 0.04
+                notes.append("Tech/Logistics proxy emissions detected.")
+
         normalized = self._normalize_weight_triplet(weights)
         return {
             "industry": industry,
@@ -711,6 +721,10 @@ class RiskScorer:
         if not isinstance(governance_agent_output, dict):
             governance_agent_output = {}
 
+        industry = all_analyses.get("industry", "unknown")
+        base_risk = self.industry_baseline_risk.get(industry, {}).get("baseline", 50)
+        base_esg = 100 - base_risk
+
         # Calculate Environmental Score
         env_positive = sum(1 for kw in environmental_keywords if kw in combined_text)
         env_negative = sum(
@@ -720,7 +734,9 @@ class RiskScorer:
 
         # Contradictions should materially reduce ESG pillar scores.
         env_penalty = min(env_negative * 15, 60)
-        environmental_score = 50 + (env_positive * 10) - env_penalty
+        environmental_score = base_esg + (env_positive * 10) - env_penalty
+        if env_positive == 0 and env_negative == 0:
+            environmental_score = float(base_esg - 5) if not sg_adequacy.get("overall_ready", False) else float(base_esg + 5)
         environmental_score = max(0, min(100, environmental_score))
 
         print(f"   Environmental: {environmental_score:.1f}/100 (positive: {env_positive}, contradictions: {env_negative})")
@@ -740,7 +756,8 @@ class RiskScorer:
             social_score = fallback_social_score
 
         if soc_positive == 0 and soc_negative == 0 and not social_lane.get("track_scores"):
-            social_score = 35.0 if not sg_adequacy.get("social", {}).get("is_adequate", False) else 45.0
+            # Intelligent fallback scoring based on sector baseline
+            social_score = float(base_esg - 5) if not sg_adequacy.get("social", {}).get("is_adequate", False) else float(base_esg + 5)
 
         if not sg_adequacy.get("social", {}).get("is_adequate", False):
             # Pull social score toward conservative mid-low when evidence is not decision-grade.
@@ -779,7 +796,8 @@ class RiskScorer:
         if not governance_lane.get("track_scores"):
             governance_score = fallback_governance_score
         if gov_positive == 0 and gov_negative == 0 and not governance_lane.get("track_scores"):
-            governance_score = 38.0 if not sg_adequacy.get("governance", {}).get("is_adequate", False) else 48.0
+            # Intelligent fallback scoring based on sector baseline
+            governance_score = float(base_esg - 5) if not sg_adequacy.get("governance", {}).get("is_adequate", False) else float(base_esg + 5)
 
         if not sg_adequacy.get("governance", {}).get("is_adequate", False):
             # Pull governance score toward conservative mid-low when evidence is not decision-grade.

@@ -127,18 +127,18 @@ class CompanyReportFetcher:
         self.report_patterns = {
             "annual_report": [
                 r"annual.?report", r"integrated.?report", r"ar.?\d{4}",
-                r"\d{4}.?annual", r"yearly.?report"
+                r"\d{4}.?annual", r"yearly.?report", r"10-k", r"filings", r"proxy", r"annual"
             ],
             "sustainability_report": [
-                r"sustainab", r"esg.?report", r"csr.?report", r"corporate.?social",
-                r"environmental.?report", r"climate.?report", r"green.?report"
+                r"sustainab", r"esg", r"csr", r"corporate.?social",
+                r"environmental", r"climate", r"green", r"impact", r"responsibility"
             ],
             "brsr_report": [
                 r"brsr", r"business.?responsibility", r"sustainability.?reporting",
                 r"sebi.?brsr"
             ],
             "financial_report": [
-                r"financial.?statement", r"quarterly.?report", r"q\d.?\d{4}",
+                r"financial", r"quarterly", r"q\d",
                 r"earnings", r"10-k", r"10-q", r"20-f"
             ]
         }
