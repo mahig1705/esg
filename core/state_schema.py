@@ -4,6 +4,7 @@ Defines the data structure passed between agents
 """
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 import operator
+from core.enums import AgentStatus
 
 
 def _dedupe_agent_outputs(left: List[Dict], right: List[Dict]) -> List[Dict]:
@@ -91,9 +92,18 @@ class ESGState(TypedDict):
     research_telemetry: Optional[Dict[str, Any]]
     research_telemetry_path: Optional[str]
     
+    # NEW: Risk Scoring Overhaul — Five-variable GW formula inputs
+    claim_intensity: Optional[Dict[str, Any]]       # C: Claim Intensity Score from claim_intensity_scorer
+    controversy_risk: Optional[Dict[str, Any]]      # R: Controversy Risk Score from regulatory scanner
+    temporal_escalation: Optional[Dict[str, Any]]   # T: Temporal Escalation Score from temporal agent
+    
     # Final output
     final_verdict: Dict[str, Any]
     report: str
+    esg_score_lineage: Optional[Dict[str, Any]]  # NEW: Diagnostic breakdown of GW formula variables (C, P, R, D, T)
+    
+    # Pipeline status
+    pipeline_agent_statuses: Dict[str, AgentStatus]
 
 # Input state for user-facing API
 class InputState(TypedDict):

@@ -32,7 +32,7 @@ from .sentiment_analyzer import SentimentAnalyzer
 from .historical_analyst import HistoricalAnalyst
 from .risk_scorer import RiskScorer
 from .financial_analyst import FinancialAnalyst
-from .industry_comparator import IndustryComparator
+# IndustryComparator is deprecated.
 from .conflict_resolver import ConflictResolver
 from .confidence_scorer import ConfidenceScorer
 try:
@@ -57,7 +57,7 @@ __all__ = [
     'HistoricalAnalyst',
     'RiskScorer',
     'FinancialAnalyst',
-    'IndustryComparator',
+
     'ConflictResolver',
     'ConfidenceScorer',
     'RealTimeMonitor',

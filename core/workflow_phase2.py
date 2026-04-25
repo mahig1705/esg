@@ -50,52 +50,8 @@ def save_peer_to_database_node(state: ESGState) -> ESGState:
     print(f"\n{'🔵 SAVING TO PEER DATABASE':=^70}")
     
     try:
-        from agents.industry_comparator import IndustryComparator
-        
-        # Extract company info
-        company = state.get("company")
-        industry = state.get("industry")
-        
-        if not company or not industry:
-            print("⚠️ Missing company or industry - skipping database save")
-            return state
-        
-        # Get risk scorer output for ESG scores
-        agent_outputs = state.get("agent_outputs", [])
-        risk_scorer_outputs = [o for o in agent_outputs if o.get("agent") == "risk_scoring"]
-        
-        if not risk_scorer_outputs:
-            print("⚠️ No risk scorer output found - skipping database save")
-            return state
-        
-        risk_scorer_result = risk_scorer_outputs[-1].get("output", {})
-        pillar_scores = risk_scorer_result.get("pillar_scores", {})
-        
-        esg_score = pillar_scores.get("overall_esg_score")
-        rating = risk_scorer_result.get("rating_grade", "BBB")
-        
-        if esg_score is None:
-            print("⚠️ No ESG score available - skipping database save")
-            return state
-        
-        # Import comparator and save
-        comparator = IndustryComparator()
-        
-        success = comparator.save_company_to_peer_db(
-            company=company,
-            industry=industry,
-            esg_score=esg_score,
-            pillar_scores=pillar_scores,
-            rating=rating
-        )
-        
-        if success:
-            print(f"✅ {company} saved to peer database")
-            print(f"   ESG: {esg_score:.1f}, Rating: {rating}")
-            print(f"   Industry: {industry}")
-        else:
-            print(f"⚠️ Failed to save {company} to peer database")
-        
+        # IndustryComparator is deprecated.
+        print("⚠️ Peer database saving disabled (IndustryComparator deprecated).")
         print(f"{'='*70}")
     
     except Exception as e:

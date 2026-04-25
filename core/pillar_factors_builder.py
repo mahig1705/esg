@@ -6,11 +6,149 @@ data sources, and scores.  The weighted average of sub-indicator scores
 is guaranteed to reproduce the given pillar score (via rescaling).
 
 Industry-specific sub-indicators are added based on sector verticals.
+
+Risk Mitigation #1 — Strict Factor Contract:
+    Every factor MUST conform to the FactorResult schema.  If extraction
+    fails the schema, the factor gracefully degrades to 'No Disclosure'
+    rather than breaking the pipeline or hallucinating a score.
 """
 
 import re
 from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field, validator
 from core.safe_utils import safe_get, safe_number, parse_source_name, get_reliability_tier
+
+# ============================================================
+# FIX BUG2: Source-name → tier overrides for injected report
+# chunks.  get_reliability_tier() operates on URL only; chunks
+# from report_parser arrive with url="" so they default to
+# tier 4.  This map corrects that for known authoritative
+# source labels, pushing policy fallback 20 → 40.
+# ============================================================
+_SOURCENAME_TIER_OVERRIDES: Dict[str, int] = {
+    # Report parser default labels
+    "Primary ESG Report":    2,
+    "Company Annual Report": 2,
+    "Annual Report":         2,
+    "Proxy Statement":       1,
+    "ESG Report":            2,
+    "Integrated Report":     2,
+    "Sustainability Report": 2,
+    "TCFD Report":           2,
+    "Company Report (parsed)": 2,
+    # SEC DEF14A variants
+    "sec def14a":            1,
+    "sec_def14a":            1,
+    "def14a":                1,
+    "sec proxy":             1,
+    "sec filing":            1,
+    "edgar":                 1,
+    # CDP variants
+    "cdp":                   1,
+    "carbon disclosure project": 1,
+    "cdp report":            1,
+    "cdp climate change":    1,
+    "cdp climate change questionnaire": 1,
+    # GRI/SASB/TCFD
+    "gri":                   2,
+    "sasb":                  2,
+    "tcfd":                  2,
+}
+# ============================================================
+
+
+# =========================================================================
+# Pydantic FactorResult Contract  (Risk Mitigation #1)
+# =========================================================================
+
+class FactorResult(BaseModel):
+    """Strict contract for every scored factor.  Any extraction that cannot
+    populate these fields falls back to data_quality='No Disclosure'."""
+    name: str
+    score: Optional[float] = Field(None, ge=0, le=100)
+    weight: float = Field(..., ge=0, le=1)
+    data_source: str = "Insufficient data"
+    source_url: Optional[str] = None
+    data_year: Optional[int] = None
+    data_tier: int = Field(4, ge=1, le=4)
+    data_quality: str = "No Disclosure"  # Verified / Estimated / Unverified / No Disclosure
+    methodology: Optional[str] = None
+    raw_value: Optional[str] = None
+    unit: Optional[str] = None
+    verified: bool = False
+    primary_metric: Optional[str] = None
+    metric_source_hint: Optional[str] = None
+    gri_alignment: List[str] = Field(default_factory=list)
+    sasb_alignment: List[str] = Field(default_factory=list)
+    scoring_model: str = "keyword_heuristic_v1"
+    contribution: Optional[float] = None  # score * weight, filled after scoring
+
+    @validator("data_quality", always=True)
+    def _infer_data_quality(cls, v, values):
+        """If data_quality is not explicitly set, derive from data_tier."""
+        if v and v != "No Disclosure":
+            return v
+        tier = values.get("data_tier", 4)
+        return {1: "Verified", 2: "Estimated", 3: "Estimated", 4: "Unverified"}.get(tier, "No Disclosure")
+
+
+def _to_factor_result(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a raw factor dict through the Pydantic contract.
+    If validation fails, return a safe 'No Disclosure' fallback."""
+    try:
+        # Determine data_tier from the raw dict if not already set
+        tier = raw.get("data_tier")
+        if tier is None:
+            # Infer from source reliability
+            verified = raw.get("verified", False)
+            scoring_model = raw.get("scoring_model", "")
+            if verified and scoring_model == "structured_threshold_v1":
+                tier = 1
+            elif verified:
+                tier = 2
+            elif scoring_model == "structured_threshold_v1":
+                tier = 2
+            elif raw.get("score") is not None:
+                tier = 3
+            else:
+                tier = 4
+            raw["data_tier"] = tier
+
+        # Determine data_quality
+        if "data_quality" not in raw or raw["data_quality"] == "No Disclosure":
+            if raw.get("score") is None:
+                raw["data_quality"] = "No Disclosure"
+            else:
+                raw["data_quality"] = {1: "Verified", 2: "Estimated", 3: "Estimated", 4: "Unverified"}.get(tier, "Unverified")
+
+        # Fill contribution
+        if raw.get("score") is not None and raw.get("weight") is not None:
+            raw["contribution"] = round(raw["score"] * raw["weight"], 2)
+
+        result = FactorResult(**raw)
+        return result.dict()
+    except Exception:
+        # Graceful degradation — Risk Mitigation #1
+        return {
+            "name": raw.get("name", "Unknown Factor"),
+            "score": None,
+            "weight": raw.get("weight", 0.0),
+            "data_source": "Schema validation failed",
+            "source_url": None,
+            "data_year": None,
+            "data_tier": 4,
+            "data_quality": "No Disclosure",
+            "methodology": None,
+            "raw_value": None,
+            "unit": None,
+            "verified": False,
+            "primary_metric": None,
+            "metric_source_hint": None,
+            "gri_alignment": [],
+            "sasb_alignment": [],
+            "scoring_model": "fallback",
+            "contribution": None,
+        }
 
 
 # =========================================================================
@@ -20,10 +158,11 @@ from core.safe_utils import safe_get, safe_number, parse_source_name, get_reliab
 # Default sub-indicators per pillar (used when no industry-specific set applies)
 
 _DEFAULT_ENVIRONMENTAL = [
-    {"name": "GHG Emissions Intensity",           "weight": 0.30, "keywords": ["emission", "ghg", "co2", "carbon", "scope 1", "scope 2", "tco2"]},
-    {"name": "Renewable Energy Transition",        "weight": 0.25, "keywords": ["renewable", "solar", "wind", "clean energy", "green energy", "transition"]},
-    {"name": "Water Usage & Stress",               "weight": 0.20, "keywords": ["water", "water stress", "water consumption", "effluent", "wastewater"]},
-    {"name": "Biodiversity & Land Use",            "weight": 0.15, "keywords": ["biodiversity", "deforestation", "land use", "ecosystem", "habitat"]},
+    {"name": "GHG Emissions Intensity",           "weight": 0.25, "keywords": ["emission", "ghg", "co2", "carbon", "scope 1", "scope 2", "tco2"]},
+    {"name": "Scope 3 Coverage",                  "weight": 0.15, "keywords": ["scope 3", "value chain", "upstream", "downstream", "supply chain emission"]},
+    {"name": "Renewable Energy Transition",        "weight": 0.20, "keywords": ["renewable", "solar", "wind", "clean energy", "green energy", "transition"]},
+    {"name": "Water Usage & Stress",               "weight": 0.17, "keywords": ["water", "water stress", "water consumption", "effluent", "wastewater"]},
+    {"name": "Biodiversity & Land Use",            "weight": 0.13, "keywords": ["biodiversity", "deforestation", "land use", "ecosystem", "habitat"]},
     {"name": "Waste & Circular Economy",           "weight": 0.10, "keywords": ["waste", "recycling", "circular economy", "landfill", "hazardous waste"]},
 ]
 
@@ -320,7 +459,117 @@ _STRUCTURED_SCORING_RULES: Dict[str, Dict[str, Any]] = {
         "gri_alignment": ["GRI 405-1", "GRI 406-1"],
         "sasb_alignment": ["SASB SV-PS-330a.1", "SASB TC-SI-330a.1"],
     },
+    "Board Independence": {
+        "primary_metric": "Percentage of independent directors on board (%)",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 85.0,
+            "above_average": 70.0,
+            "average": 50.0,
+            "below_average": 33.0,
+        },
+        "metric_patterns": [
+            r"(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,60}(?:independent|non-executive)\s*(?:director|board)",
+            r"(?:independent|non-executive)\s*(?:director|board)[^.\n]{0,60}(\d{1,3}(?:\.\d+)?)\s*%",
+            r"(\d{1,2})\s+of\s+(\d{1,2})\s+(?:directors|board members)\s+(?:are\s+)?independent",
+            r"board independence[^.\n]{0,50}?(\d{1,3}(?:\.\d+)?)\s*%",
+        ],
+        "claim_keywords": ["board independence", "independent director", "non-executive", "outside director"],
+        "policy_keywords": ["corporate governance guidelines", "board charter", "independence criteria", "nyse listing"],
+        "source_hint": "Proxy statement / corporate governance guidelines / annual report",
+        "gri_alignment": ["GRI 2-9", "GRI 2-10"],
+        "sasb_alignment": ["SASB CG-AA-330a.1"],
+    },
+    "Anti-Corruption Policies": {
+        "primary_metric": "Anti-corruption policy coverage and training completion (%)",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 95.0,
+            "above_average": 80.0,
+            "average": 60.0,
+            "below_average": 40.0,
+        },
+        "metric_patterns": [
+            r"anti[- ]?corruption[^.\n]{0,80}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"ethics training[^.\n]{0,80}?(\d{1,3}(?:\.\d+)?)\s*%",
+            r"code of conduct[^.\n]{0,80}?(\d{1,3}(?:\.\d+)?)\s*%\s*(?:completion|compliance)",
+            r"(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,60}(?:employees?\s+)?(?:completed|trained)[^.\n]{0,40}(?:anti[- ]?corruption|ethics|compliance)",
+        ],
+        "claim_keywords": ["anti-corruption", "bribery", "corruption", "ethics", "compliance", "fcpa", "uk bribery act"],
+        "policy_keywords": ["anti-bribery", "code of conduct", "ethics policy", "zero tolerance", "compliance program"],
+        "source_hint": "Annual report governance section, code of conduct, ESG report",
+        "gri_alignment": ["GRI 205-1", "GRI 205-2", "GRI 205-3"],
+        "sasb_alignment": ["SASB FN-CB-510a.1", "SASB FN-CB-510a.2"],
+    },
+    "Whistleblower Mechanisms": {
+        "primary_metric": "Whistleblower/ethics hotline reports received per 1000 employees",
+        "metric_unit": "rate",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 15.0,
+            "above_average": 8.0,
+            "average": 3.0,
+            "below_average": 1.0,
+        },
+        "metric_patterns": [
+            r"(?:whistleblower|ethics\s*hotline|speak\s*up)[^.\n]{0,80}?(\d{1,6}(?:,\d{3})*(?:\.\d+)?)\s*(?:reports?|cases?|complaints?)",
+            r"(\d{1,6}(?:,\d{3})*(?:\.\d+)?)\s*(?:reports?|cases?|complaints?)[^.\n]{0,60}(?:whistleblower|ethics\s*hotline|speak\s*up)",
+            r"(?:grievance|reporting)[^.\n]{0,80}?(\d{1,6}(?:,\d{3})*(?:\.\d+)?)\s*(?:incidents?|cases?|matters?)",
+        ],
+        "claim_keywords": ["whistleblower", "grievance", "reporting mechanism", "speak up", "ethics hotline"],
+        "policy_keywords": ["whistleblower protection", "anonymous reporting", "non-retaliation", "ethics line", "hotline"],
+        "source_hint": "Annual report governance section, ethics/compliance report",
+        "gri_alignment": ["GRI 2-16", "GRI 2-26"],
+        "sasb_alignment": ["SASB FN-CB-510a.2"],
+    },
+    "Green Lending Ratio": {
+        "primary_metric": "Green/sustainable lending as share of total loan book (%)",
+        "metric_unit": "%",
+        "direction": "higher_better",
+        "thresholds": {
+            "top_decile": 25.0,
+            "above_average": 15.0,
+            "average": 8.0,
+            "below_average": 3.0,
+        },
+        "metric_patterns": [
+            r"(?:green|sustainable)\s*(?:loan|lending|finance|bond)[^.\n]{0,80}?[\$\u20ac\u00a3]?\s*(\d{1,4}(?:\.\d+)?)\s*(?:billion|bn|B)",
+            r"[\$\u20ac\u00a3]\s*(\d{1,4}(?:\.\d+)?)\s*(?:billion|bn|B)[^.\n]{0,60}(?:green|sustainable)\s*(?:loan|lending|finance|bond)",
+            r"(?:green|sustainable)\s*(?:loan|lending|finance)[^.\n]{0,60}?(\d{1,3}(?:\.\d+)?)\s*%",
+        ],
+        "claim_keywords": ["green loan", "green lending", "sustainable finance", "green bond", "sustainability bond"],
+        "policy_keywords": ["green bond framework", "sustainable lending policy", "climate finance target", "tcfd"],
+        "source_hint": "Annual report, sustainability report, TCFD disclosure, green bond framework",
+        "gri_alignment": ["GRI 203-1"],
+        "sasb_alignment": ["SASB FN-CB-410a.1", "SASB FN-CB-410a.2"],
+        "currency_match_score": 75.0,
+    },
+    "Climate Risk in Loan Book": {
+        "primary_metric": "Proportion of loan book exposed to climate-sensitive sectors (%)",
+        "metric_unit": "%",
+        "direction": "lower_better",
+        "thresholds": {
+            "top_decile": 5.0,
+            "above_average": 10.0,
+            "average": 20.0,
+            "below_average": 35.0,
+        },
+        "metric_patterns": [
+            r"(?:climate|transition)\s*risk[^.\n]{0,80}?(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,40}(?:loan|portfolio|exposure|book)",
+            r"(?:loan|portfolio|exposure|book)[^.\n]{0,60}?(\d{1,3}(?:\.\d+)?)\s*%[^.\n]{0,60}(?:climate|carbon|fossil)",
+            r"(?:fossil fuel|oil and gas|coal)[^.\n]{0,60}?[\$\u20ac\u00a3]?\s*(\d{1,4}(?:\.\d+)?)\s*(?:billion|bn|B)[^.\n]{0,40}(?:exposure|financing|lending)",
+        ],
+        "claim_keywords": ["climate risk", "transition risk", "physical risk", "stranded asset", "loan book"],
+        "policy_keywords": ["tcfd", "stress test", "climate scenario", "net zero banking", "nzba"],
+        "source_hint": "TCFD report, annual report risk section, pillar 3 disclosure",
+        "gri_alignment": ["GRI 201-2"],
+        "sasb_alignment": ["SASB FN-CB-410a.2"],
+        "currency_match_score": 75.0,
+    },
 }
+
 
 
 def _extract_data_year(ev: Dict[str, Any]) -> Optional[int]:
@@ -331,6 +580,77 @@ def _extract_data_year(ev: Dict[str, Any]) -> Optional[int]:
         if year_match:
             return int(year_match.group())
     return None
+
+
+def _evidence_source_name(ev: Dict[str, Any], default: str = "") -> str:
+    return str(ev.get("sourcename") or ev.get("source_name") or default)
+
+
+def _evidence_text(ev: Dict[str, Any]) -> str:
+    return " ".join(
+        str(ev.get(k, ""))
+        for k in ("title", "snippet", "content", "relevanttext", "relevant_text", "source", "sourcename", "source_name")
+    )
+
+
+def _evidence_tier(ev: Dict[str, Any]) -> int:
+    url = str(ev.get("url", ""))
+    tier = get_reliability_tier(url)
+    explicit_tier = ev.get("reliabilitytier")
+    if explicit_tier is None:
+        explicit_tier = ev.get("reliability_tier")
+    try:
+        if explicit_tier is not None:
+            tier = min(tier, int(explicit_tier))
+    except (TypeError, ValueError):
+        pass
+
+    source_name = _evidence_source_name(ev).strip()
+    sn_override = _SOURCENAME_TIER_OVERRIDES.get(source_name)
+    if sn_override is None:
+        sn_override = _SOURCENAME_TIER_OVERRIDES.get(source_name.lower())
+    if sn_override is not None:
+        tier = min(tier, sn_override)
+    return max(1, min(4, tier))
+
+
+def synthesize_sec_metric_evidence(external_benchmarks: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Create scannable SEC evidence snippets from parsed DEF 14A metrics."""
+    if not isinstance(external_benchmarks, dict):
+        return []
+
+    sec_metrics = external_benchmarks.get("sec_metrics", {})
+    if not isinstance(sec_metrics, dict) or not sec_metrics:
+        return []
+
+    snippets: List[str] = []
+    board_independence = sec_metrics.get("board_independence_pct")
+    if board_independence is not None:
+        snippets.append(f"{board_independence}% independent directors on board (DEF 14A)")
+
+    pay_ratio = sec_metrics.get("pay_ratio")
+    if pay_ratio is None:
+        pay_ratio = sec_metrics.get("executive_pay_ratio")
+    if pay_ratio is not None:
+        snippets.append(f"pay ratio {pay_ratio} to 1 CEO DEF 14A proxy statement")
+
+    if sec_metrics.get("has_anti_corruption_policy") is True:
+        snippets.append("anti-corruption policy code of conduct ethics training employees (DEF 14A)")
+
+    if sec_metrics.get("whistleblower_hotline") is True:
+        snippets.append("whistleblower ethics hotline speak up anonymous reporting mechanism")
+
+    return [
+        {
+            "title": "SEC DEF 14A governance metric",
+            "snippet": snippet,
+            "url": "https://www.sec.gov/cgi-bin/browse-edgar",
+            "sourcename": "sec def14a",
+            "reliabilitytier": 1,
+            "isprimarydocument": True,
+        }
+        for snippet in snippets
+    ]
 
 
 def _extract_best_metric_value(
@@ -347,13 +667,10 @@ def _extract_best_metric_value(
             continue
 
         url = str(ev.get("url", ""))
-        tier = get_reliability_tier(url)
-        source_name = parse_source_name(url) or ev.get("source_name", "Web evidence")
+        tier = _evidence_tier(ev)
+        source_name = (parse_source_name(url) if url else None) or _evidence_source_name(ev, "Web evidence")
         data_year = _extract_data_year(ev)
-        ev_text = " ".join(
-            str(ev.get(k, ""))
-            for k in ("title", "snippet", "content", "relevant_text", "source", "source_name")
-        )
+        ev_text = _evidence_text(ev)
 
         for pattern in metric_patterns:
             for match in re.finditer(pattern, ev_text, flags=re.IGNORECASE):
@@ -492,6 +809,43 @@ def _score_structured_indicator(
 
     metric_match = _extract_best_metric_value(rule, evidence_sources)
 
+    # ── Currency guard: $ commitments → flat score for banking indicators ──
+    _currency_flat = rule.get("currency_match_score")
+    if _currency_flat and not metric_match:
+        _currency_re = re.compile(
+            r"[\$€£]\s*\d[\d,.]*\s*(?:billion|bn|million|mn|B|M|trillion|tn|T)",
+            re.IGNORECASE,
+        )
+        for _ev in evidence_sources:
+            if not isinstance(_ev, dict):
+                continue
+            _blob = _evidence_text(_ev)
+            if _currency_re.search(_blob):
+                _claim_kws = [str(k).lower() for k in rule.get("claim_keywords", [])]
+                if any(kw in _blob.lower() for kw in _claim_kws):
+                    return {
+                        "name": name,
+                        "score": float(_currency_flat),
+                        "weight": indicator["weight"],
+                        "data_source": (parse_source_name(str(_ev.get("url", ""))) if _ev.get("url") else None) or _evidence_source_name(_ev, "Company disclosure"),
+                        "source_url": _ev.get("url"),
+                        "data_year": _extract_data_year(_ev) or 2024,
+                        "methodology": (
+                            f"Currency commitment detected for {rule.get('primary_metric')}. "
+                            f"Flat score {_currency_flat} assigned (quantitative % metric not extracted)."
+                        ),
+                        "raw_value": _blob[:120].strip(),
+                        "unit": rule.get("metric_unit", "%"),
+                        "data_tier": _evidence_tier(_ev),
+                        "verified": bool(_evidence_tier(_ev) <= 2),
+                        "primary_metric": rule.get("primary_metric"),
+                        "metric_source_hint": rule.get("source_hint"),
+                        "gri_alignment": rule.get("gri_alignment", []),
+                        "sasb_alignment": rule.get("sasb_alignment", []),
+                        "fallback_rule": "currency_commitment_guard",
+                        "scoring_model": "structured_threshold_v1",
+                    }
+
     thresholds = rule.get("thresholds", {})
     threshold_text = (
         f"100 if metric is top decile ({thresholds.get('top_decile')}), "
@@ -516,6 +870,7 @@ def _score_structured_indicator(
             "data_source": metric_match.get("source_name") or "Structured quantitative disclosure",
             "source_url": metric_match.get("url"),
             "data_year": metric_match.get("year") or 2024,
+            "data_tier": metric_match.get("tier", 4),
             "methodology": (
                 f"Structured threshold scoring using {rule.get('primary_metric')}. "
                 f"Buckets: {threshold_text}."
@@ -545,12 +900,9 @@ def _score_structured_indicator(
         if not isinstance(ev, dict):
             continue
         url = str(ev.get("url", ""))
-        tier = get_reliability_tier(url)
-        source_name = parse_source_name(url) or ev.get("source_name", "Web evidence")
-        ev_text = " ".join(
-            str(ev.get(k, ""))
-            for k in ("title", "snippet", "content", "relevant_text", "source", "source_name")
-        ).lower()
+        tier = _evidence_tier(ev)
+        source_name = (parse_source_name(url) if url else None) or _evidence_source_name(ev, "Web evidence")
+        ev_text = _evidence_text(ev).lower()
 
         claim_hit = any(kw in ev_text for kw in claim_keywords)
         policy_hit = any(kw in ev_text for kw in policy_keywords)
@@ -577,6 +929,36 @@ def _score_structured_indicator(
         fallback_source = "No relevant disclosure"
         verified = False
 
+    # === Banking factor stubs: limited_disclosure exclusion ===
+    _BANKING_FACTORS_REQUIRING_STUB = {
+        "Green Lending Ratio",
+        "Climate Risk in Loan Book",
+    }
+    if name in _BANKING_FACTORS_REQUIRING_STUB and not has_any_claim:
+        return {
+            "name": name,
+            "score": 0.0 if name == "Climate Risk in Loan Book" else None,
+            "weight": indicator["weight"],
+            "data_source": "No data source available",
+            "source_url": None,
+            "data_year": None,
+            "data_tier": 4,
+            "data_quality": "No Disclosure",
+            "methodology": None,
+            "raw_value": None,
+            "unit": rule.get("metric_unit"),
+            "verified": False,
+            "primary_metric": rule.get("primary_metric"),
+            "metric_source_hint": rule.get("source_hint"),
+            "gri_alignment": rule.get("gri_alignment", []),
+            "sasb_alignment": rule.get("sasb_alignment", []),
+            "limited_disclosure": True,
+            "quality_flag": "MISSING_BANKING_DATA",
+            "fallback_rule": "banking_factor_stub_limited_disclosure",
+            "scoring_model": "structured_threshold_v1",
+        }
+    # === END Banking factor stubs ===
+
     return {
         "name": name,
         "score": fallback_score,
@@ -584,6 +966,7 @@ def _score_structured_indicator(
         "data_source": fallback_source,
         "source_url": best_policy_url,
         "data_year": best_policy_year or 2024,
+        "data_tier": best_policy_tier if best_policy_tier <= 4 else 4,
         "methodology": (
             f"Structured threshold scoring with fallback. Primary metric: {rule.get('primary_metric')}. "
             f"Fallback applied: verified policy=40, unverified claim=20, no mention=0."
@@ -660,17 +1043,14 @@ def _score_indicator(
     for ev in evidence_sources:
         if not isinstance(ev, dict):
             continue
-        ev_text = " ".join(
-            str(ev.get(k, ""))
-            for k in ("title", "snippet", "content", "relevant_text", "source", "source_name")
-        ).lower()
+        ev_text = _evidence_text(ev).lower()
 
         hit_count = sum(1 for kw in keywords if kw in ev_text)
         if hit_count >= 1:
             matching_texts.append(ev_text[:300])
             url = ev.get("url", "")
-            tier = get_reliability_tier(url)
-            source_name = parse_source_name(url) or ev.get("source_name", "")
+            tier = _evidence_tier(ev)
+            source_name = (parse_source_name(url) if url else None) or _evidence_source_name(ev)
             matching_sources.append(source_name)
 
             if tier < best_tier:
@@ -685,8 +1065,8 @@ def _score_indicator(
                     data_year = int(year_match.group())
                     break
 
-            # Check if from primary disclosure
-            if tier == 1:
+            # Check if from primary disclosure or high-quality company disclosure.
+            if tier <= 2:
                 verified = True
 
     # Special handling for GHG-related indicators using carbon_data
@@ -745,6 +1125,7 @@ def _score_indicator(
         "data_source": data_source,
         "source_url": best_url,
         "data_year": data_year or 2024,
+        "data_tier": best_tier if best_tier <= 4 else 4,
         "methodology": methodology or f"Keyword-matched evidence scoring for {name.lower()}",
         "raw_value": raw_value,
         "unit": unit,
@@ -811,6 +1192,7 @@ def build_pillar_factors(
     evidence_sources: List[Dict],
     carbon_data: Optional[Dict],
     pillar_scores: Optional[Dict] = None,
+    external_benchmarks: Optional[Dict] = None,
 ) -> Dict[str, Any]:
     """Build structured pillar_factors with full sub-indicator breakdown.
 
@@ -820,6 +1202,7 @@ def build_pillar_factors(
         evidence_sources: List of evidence dicts from evidence retrieval
         carbon_data: Carbon extraction results dict
         pillar_scores: Dict with pillar scores (environmental_score, social_score, governance_score)
+        external_benchmarks: External ESG data containing SEC/WBA/WRI enrichment
 
     Returns:
         Dict with 'environmental', 'social', 'governance' keys, each containing
@@ -832,16 +1215,29 @@ def build_pillar_factors(
     if not isinstance(carbon_data, dict):
         carbon_data = {}
 
-    # Extract pillar target scores
-    env_score = safe_number(pillar_scores.get("environmental_score"), default=50.0)
-    soc_score = safe_number(pillar_scores.get("social_score"), default=50.0)
-    gov_score = safe_number(pillar_scores.get("governance_score"), default=50.0)
+    sec_evidence = synthesize_sec_metric_evidence(external_benchmarks)
+    if sec_evidence:
+        existing_snippets = {
+            str(ev.get("snippet", "")).strip()
+            for ev in evidence_sources
+            if isinstance(ev, dict) and ev.get("snippet")
+        }
+        evidence_sources = list(evidence_sources) + [
+            ev for ev in sec_evidence
+            if str(ev.get("snippet", "")).strip() not in existing_snippets
+        ]
+
+    # Extract pillar target scores or compute them if not provided
+    has_target = bool(pillar_scores)
+    env_score = safe_number(pillar_scores.get("environmental_score"), default=50.0) if has_target else None
+    soc_score = safe_number(pillar_scores.get("social_score"), default=50.0) if has_target else None
+    gov_score = safe_number(pillar_scores.get("governance_score"), default=50.0) if has_target else None
 
     # Gather all evidence text for scoring
     evidence_texts = []
     for ev in evidence_sources:
         if isinstance(ev, dict):
-            for k in ("snippet", "content", "relevant_text", "title"):
+            for k in ("snippet", "content", "relevanttext", "relevant_text", "title"):
                 txt = ev.get(k, "")
                 if txt:
                     evidence_texts.append(str(txt).lower())
@@ -851,39 +1247,82 @@ def build_pillar_factors(
     soc_indicators = _build_indicators_for_pillar("social", industry, _DEFAULT_SOCIAL)
     gov_indicators = _build_indicators_for_pillar("governance", industry, _DEFAULT_GOVERNANCE)
 
-    # Score each sub-indicator
+    # Score each sub-indicator and validate through Pydantic contract
     env_scored = [
-        _score_indicator(ind, evidence_texts, evidence_sources, carbon_data)
+        _to_factor_result(_score_indicator(ind, evidence_texts, evidence_sources, carbon_data))
         for ind in env_indicators
     ]
     soc_scored = [
-        _score_indicator(ind, evidence_texts, evidence_sources, carbon_data)
+        _to_factor_result(_score_indicator(ind, evidence_texts, evidence_sources, carbon_data))
         for ind in soc_indicators
     ]
     gov_scored = [
-        _score_indicator(ind, evidence_texts, evidence_sources, carbon_data)
+        _to_factor_result(_score_indicator(ind, evidence_texts, evidence_sources, carbon_data))
         for ind in gov_indicators
     ]
 
-    # Rescale to match pillar scores
-    env_scored = _rescale_scores_to_target(env_scored, env_score)
-    soc_scored = _rescale_scores_to_target(soc_scored, soc_score)
-    gov_scored = _rescale_scores_to_target(gov_scored, gov_score)
+    def _compute_coverage_adjusted(scored_indicators) -> float:
+        total_weight = 0.0
+        total_score = 0.0
+        for ind in scored_indicators:
+            if ind.get("score") is not None:
+                total_weight += ind["weight"]
+                total_score += ind["score"] * ind["weight"]
+        if total_weight > 0:
+            return total_score / total_weight
+        return 0.0
+
+    def _count_tier1(scored_indicators) -> int:
+        return sum(1 for ind in scored_indicators if ind.get("data_tier") == 1)
+
+    def _total_factors(scored_indicators) -> int:
+        return len(scored_indicators)
+
+    env_adj = _compute_coverage_adjusted(env_scored)
+    soc_adj = _compute_coverage_adjusted(soc_scored)
+    gov_adj = _compute_coverage_adjusted(gov_scored)
+
+    if not has_target:
+        env_score = env_adj
+        soc_score = soc_adj
+        gov_score = gov_adj
+    else:
+        # Rescale to match target pillar scores
+        env_scored = _rescale_scores_to_target(env_scored, env_score)
+        soc_scored = _rescale_scores_to_target(soc_scored, soc_score)
+        gov_scored = _rescale_scores_to_target(gov_scored, gov_score)
+
+    # Compute aggregate Performance Score (P) for the GW formula
+    # P is the materiality-weighted average across all three pillars
+    all_factors = env_scored + soc_scored + gov_scored
+    performance_score = _compute_coverage_adjusted(all_factors)
+
+    # Compute factor coverage stats for Disclosure Score (D)
+    tier1_count = _count_tier1(env_scored) + _count_tier1(soc_scored) + _count_tier1(gov_scored)
+    total_factor_count = _total_factors(env_scored) + _total_factors(soc_scored) + _total_factors(gov_scored)
 
     return {
         "environmental": {
             "score": round(env_score, 1),
+            "coverageadjustedscore": round(env_adj, 1),
             "weight": 0.40,
             "sub_indicators": env_scored,
         },
         "social": {
             "score": round(soc_score, 1),
+            "coverageadjustedscore": round(soc_adj, 1),
             "weight": 0.30,
             "sub_indicators": soc_scored,
         },
         "governance": {
             "score": round(gov_score, 1),
+            "coverageadjustedscore": round(gov_adj, 1),
             "weight": 0.30,
             "sub_indicators": gov_scored,
+        },
+        "performance_score": round(performance_score, 1),
+        "factor_coverage": {
+            "tier1_factors": tier1_count,
+            "total_factors": total_factor_count,
         },
     }

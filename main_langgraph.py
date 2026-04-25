@@ -8,9 +8,22 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import sys
 import argparse
 import threading
+import warnings
 from datetime import datetime
 from dotenv import load_dotenv
 import json
+
+# ── Suppress known dependency warning flood ─────────────────────────────
+# These are safe to ignore and pollute demo output.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="fitz")      # PyMuPDF
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pymupdf")
+warnings.filterwarnings("ignore", message=".*RequestsDependencyWarning.*")          # requests/urllib3
+warnings.filterwarnings("ignore", message=".*urllib3.*")
+warnings.filterwarnings("ignore", message=".*chardet.*")
+warnings.filterwarnings("ignore", category=FutureWarning, module="xgboost")
+warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow")
+warnings.filterwarnings("ignore", category=UserWarning, module="keras")
+# ────────────────────────────────────────────────────────────────────────
 
 
 def _configure_utf8_console() -> None:
@@ -256,6 +269,17 @@ class ESGGreenwashingDetectorLangGraph:
             except Exception as e:
                 print(f"⚠️ Skipped full debug JSON export: {e}")
         
+        # ── Lineage diagnostic dump (Step 4) ──────────────────────────────────
+        lineage = result.get("esg_score_lineage")
+        if lineage and isinstance(lineage, dict):
+            lineage_file = f"reports/debug_esg_lineage_{company_name.replace(' ', '_')}.json"
+            try:
+                with open(lineage_file, 'w', encoding='utf-8') as f:
+                    json.dump(lineage, f, indent=2, default=str)
+                print(f"\n🔬 Lineage saved → {lineage_file}")
+            except Exception as e:
+                print(f"⚠️ Lineage dump failed: {e}")
+
         print(f"\n💾 Reports saved:")
         print(f"   📄 {txt_file}")
         print(f"   📊 {json_file}")

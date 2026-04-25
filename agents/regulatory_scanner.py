@@ -155,7 +155,7 @@ def calculate_compliance_score(compliance_results: list[dict]) -> dict:
 
         if is_compliant:
             compliant += 1
-        if has_gap:
+        if has_gap and status_raw != "UNCERTAIN":
             regulations_with_gaps += 1
             concrete_gap_count += max(1, len(gap_details))
 
@@ -849,7 +849,17 @@ class RegulatoryHorizonScanner:
             critical_gap = True
 
         has_gap = len(gap_details) > 0
-        status = "GAP" if has_gap else "COMPLIANT"
+        # Distinguish confirmed violations from mere evidence absences.
+        # UNCERTAIN = gaps exist only from unverified requirements, no critical gap,
+        #             and no confirmed violation — i.e., the evidence is simply missing.
+        if has_gap and critical_gap:
+            status = "GAP"
+        elif has_gap and len(requirements_met) == 0 and not critical_gap:
+            status = "UNCERTAIN"
+        elif has_gap:
+            status = "GAP"
+        else:
+            status = "COMPLIANT"
         
         return {
             "regulation_id": reg_id,

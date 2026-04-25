@@ -82,6 +82,21 @@ class CarbonPathwayModeller:
 
         implied_cagr_required = pathway_decline
 
+        # ── IEA NZE ceiling ──────────────────────────────────────────────
+        # When carbon budgets are effectively exhausted, the mathematical
+        # required rate can spike to unrealistic values (100%+/yr).
+        # Cap at the maximum scientifically cited rate from IEA NZE 2050.
+        IEA_NZE_CAP = 45.0
+        raw_cagr_pct = round(implied_cagr_required * 100.0, 2)
+        budget_years = self._compute_budget_years(total_current, claimed_pathway)
+        capped = raw_cagr_pct > IEA_NZE_CAP or budget_years < 2.0
+        display_cagr_pct = min(raw_cagr_pct, IEA_NZE_CAP) if capped else raw_cagr_pct
+        alignment_note = (
+            "Budget effectively exhausted — IEA NZE ceiling applied"
+            if capped else ""
+        )
+        # ─────────────────────────────────────────────────────────────────
+
         return {
             "company": company,
             "industry": industry,
@@ -102,8 +117,10 @@ class CarbonPathwayModeller:
             "ipcc_budget_tco2e": round(ipcc_budget, 2),
             "projected_cumulative_emissions_tco2e": round(projected_cumulative_emissions, 2),
             "ipcc_budget_utilization_pct": round(budget_utilization_pct, 2),
-            "carbon_budget_remaining_yrs": self._compute_budget_years(total_current, claimed_pathway),
-            "implied_cagr_required": round(implied_cagr_required * 100.0, 2),
+            "carbon_budget_remaining_yrs": budget_years,
+            "implied_cagr_required": display_cagr_pct,
+            "required_annual_rate_raw": raw_cagr_pct,
+            "alignment_note": alignment_note,
             "company_implied_cagr": round(company_cagr * 100.0, 2),
             "production_plan": production_plan,
         }

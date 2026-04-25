@@ -67,8 +67,8 @@ def extract_run_metrics(
         "industry": state.get("industry"),
         "workflow_path": state.get("workflow_path"),
         "scores": {
-            "greenwashing_score": _safe_float(risk.get("greenwashing_risk_score"), 0.0),
-            "greenwashing_score_raw": _safe_float(risk.get("greenwashing_risk_score_raw"), 0.0),
+            "greenwashing_score": _safe_float(risk.get("greenwashingriskscore") or risk.get("greenwashing_risk_score"), 0.0),
+            "greenwashing_score_raw": _safe_float(risk.get("greenwashingscoreraw") or risk.get("greenwashing_risk_score_raw"), 0.0),
             "esg_score": _safe_float(risk.get("esg_score"), 0.0),
             "confidence": _safe_float(state.get("confidence"), 0.0),
             "confidence_penalty": _safe_float(risk.get("confidence_penalty"), 0.0),
@@ -76,10 +76,10 @@ def extract_run_metrics(
             "report_tier": risk.get("report_tier"),
         },
         "abstention": {
-            "abstain_recommended": bool(risk.get("abstain_recommended", False)),
+            "abstain_recommended": bool(risk.get("abstainrecommended", risk.get("abstain_recommended", False))),
             "decision_status": risk.get("decision_status"),
-            "abstention_reason": risk.get("abstention_reason"),
-            "trigger_count": len(risk.get("abstention_triggers", []) if isinstance(risk.get("abstention_triggers"), list) else []),
+            "abstention_reason": risk.get("abstentionreason") or risk.get("abstention_reason"),
+            "trigger_count": len(risk.get("abstentiontriggers") or risk.get("abstention_triggers", []) if isinstance(risk.get("abstentiontriggers") or risk.get("abstention_triggers"), list) else []),
         },
         "calibration": {
             "status": calibration.get("calibration_status"),
@@ -178,7 +178,7 @@ def summarize_runs(log_path: str = "reports/research_runs.jsonl") -> Dict[str, A
 
     for r in runs:
         abstains += 1 if bool((r.get("abstention", {}) or {}).get("abstain_recommended", False)) else 0
-        sum_gw += _safe_float(((r.get("scores", {}) or {}).get("greenwashing_score")), 0.0)
+        sum_gw += _safe_float(((r.get("scores", {}) or {}).get("greenwashingriskscore")), 0.0)
         sum_gsi += _safe_float(((r.get("disclosure_quality", {}) or {}).get("gsi_score")), 0.0)
         sum_bp += _safe_float(((r.get("disclosure_quality", {}) or {}).get("boilerplate_score")), 0.0)
         sum_arch += _safe_float(((r.get("historical_archive_quality", {}) or {}).get("archive_confidence")), 0.0)

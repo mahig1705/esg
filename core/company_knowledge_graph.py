@@ -325,7 +325,7 @@ def _extract_kpis(anchor_key: str, company: str, state: Dict[str, Any]) -> List[
             parsed = json.loads(report_json)
         except Exception:
             parsed = {}
-        pillar_factors = parsed.get("pillar_factors", {}) if isinstance(parsed, dict) else {}
+        pillar_factors = (parsed.get("pillarfactors") or parsed.get("pillar_factors", {})) if isinstance(parsed, dict) else {}
         env = pillar_factors.get("environmental", {}) if isinstance(pillar_factors, dict) else {}
         sub_indicators = env.get("sub_indicators", []) if isinstance(env, dict) else []
         for idx, item in enumerate(sub_indicators, start=1):

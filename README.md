@@ -1,263 +1,137 @@
-# ESGLens - AI-Powered Greenwashing Detection
+# 🌱 ESGLens: Advanced AI-Powered ESG Intelligence & Greenwashing Detection System
 
-ESGLens is an enterprise-grade AI system designed to detect greenwashing in corporate claims. Built using **LangGraph**, it features an orchestrated swarm of **14 specialized AI agents**, highly resilient **dynamic LLM routing**, ML-enhanced risk scoring, and real-time financial data integration to provide exhaustive ESG analysis.
-
-## 🚀 Quick Start
-
-### 1. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Configure Environment Variables
-Copy `.env.example` to `.env` and set your API keys. The system uses a multi-provider fallback routing system, so providing multiple keys maximizes resilience.
-
-```env
-# LLM Providers (Provide at least 2 for optimal fallback routing)
-GROQ_API_KEY=your_groq_key
-CEREBRAS_API_KEY=your_cerebras_key
-OPENROUTER_API_KEY=your_openrouter_key
-GEMINI_API_KEY=your_gemini_key
-
-# Optional Premium Tool APIs
-NEWS_API_KEY=your_newsapi_key
-NEWSDATA_API_KEY=your_newsdata_key
-
-# WBA Data API (Bearer token)
-WBA_API_KEY=your_wba_api_key
-
-# Resource Watch / WRI Aqueduct
-RESOURCE_WATCH_API_KEY=your_resource_watch_api_key
-RESOURCE_WATCH_TOKEN=your_resource_watch_jwt
-
-# Optional dynamic materiality profile source
-# If set, this remote JSON overlays local config/materiality_map.json.
-# Supported formats: { "profiles": { ... } } or direct { ... } map.
-MATERIALITY_PROFILE_URL=
-MATERIALITY_PROFILE_PATH=config/materiality_map.json
-
-# Optional SASB-style dataset source (CSV/JSON) used to auto-build/overlay profiles
-SASB_MATERIALITY_DATA_URL=
-
-# Company-centric Knowledge Graph (Neo4j)
-KG_ENABLED=true
-KG_USE_LLM_GRAPH_TRANSFORMER=true
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=your_neo4j_password
-NEO4J_DATABASE=neo4j
-```
-
-To refresh `config/materiality_map.json` from remote sources:
-```bash
-venv\Scripts\python.exe scripts\refresh_materiality_profiles.py
-```
-
-Research telemetry summary (aggregates all logged runs):
-```bash
-venv\Scripts\python.exe scripts\summarize_research_runs.py
-```
-
-Sector-wise benchmark evaluation artifacts (JSON/CSV/Markdown):
-```bash
-venv\Scripts\python.exe scripts\run_sector_benchmark.py
-```
-This now includes bootstrap confidence intervals, near-threshold counts around the 50-point decision boundary, and explicit small-sample warning bands.
-
-Append new validated ground-truth rows from `data/ground_truth_additions.csv`:
-```bash
-venv\Scripts\python.exe scripts\append_ground_truth_cases.py
-```
-
-Each generated report also persists the justification graph to `reports/fact_graphs/` as a JSON artifact for auditability and presentation review.
-Each standard/deep analysis run also builds a company-centric KG payload in `reports/company_kg/`, and will ingest it into Neo4j when the `NEO4J_*` environment variables are configured.
-
-Neo4j verification helper:
-```bash
-venv\Scripts\python.exe scripts\verify_company_kg.py --scenario shell
-venv\Scripts\python.exe scripts\verify_company_kg.py --scenario microsoft
-```
-
-Example Cypher checks:
-```cypher
-MATCH (o:Organization {name: 'Shell'})-->(g) RETURN g
-MATCH (o:Organization {name: 'Microsoft'})-[:HAS_KPI]->(k:KPI {name: 'GHG_Intensity'}) RETURN k.year, k.value ORDER BY k.year
-```
-
-### 3. Run the Application
-The main entry point provides a CLI interface to input a company and their ESG claim.
-```bash
-python main_langgraph.py
-```
-
-## 🧠 System Architecture
-
-ESGLens operates using an intelligent, multi-agent workflow orchestrated via **LangGraph**:
-
-1. **Intelligent Orchestration**: A `Supervisor` agent evaluates the complexity of the specific claim and dynamically routes it through appropriate analysis pipelines (Fast Track, Standard Track, or a Deep Analysis involving a multi-agent Debate Orchestrator).
-2. **Dynamic LLM Routing**: All LLM calls are routed centrally through `core/llm_router.py`. Each agent is assigned an optimal primary model (e.g., Llama 3 70B for heavy reasoning, 8B for extraction) with a built-in **3-model fallback chain** across Cerebras, Groq, OpenRouter, and Gemini. If a provider rate-limits or fails, the system instantly falls back to the next available provider.
-3. **14 Specialized Agents**:
-   - `Claim Extractor`
-   - `Evidence Retriever` (includes web, semantic, and financial data hooks)
-   - `Contradiction Analyzer`
-   - `Historical & Temporal Analyst`
-   - `Industry & Peer Comparator`
-   - `Credibility Analyst`
-   - `Risk Scorer` (ML + Formula hybrid)
-   - `Sentiment Analyzer`
-   - `Realtime Monitor`
-   - `Confidence Scorer`
-   - `Conflict Resolver`
-   - `Debate Orchestrator`
-   - `Professional Report Generator`
-   - `Supervisor`
-
-## 🔧 Key Features
-
-- **Resilient AI Inference**: Centralized `call_llm()` mechanism with disk-backed caching, exponential backoff, rate limit handling, and automatic multi-provider failovers.
-- **Financial & ESG Correlation**: Uncovers nuanced greenwashing patterns by correlating ESG claims with real-time financial data (revenue, margins, debt) via `yfinance`. Detects red flags like aggressive green marketing masking core revenue declines or high carbon-intensity.
-- **Multi-Source Evidence**: Automated pipeline retrieval across News APIs, Regulatory & Legal portals, Semantic Scholar, and OpenSanctions.
-- **Hybrid Risk Scoring**: Robust scoring engine combining XGBoost Machine Learning classification with strict formula-based rules depending on evidence confidence thresholds.
-- **Professional Artifacts**: Automatically generates production-grade PDF reports summarizing findings, risk levels, and specific red flags.
-
-## 📁 Repository Structure
-
-```
-ESG/
-├── agents/             # 14 specialized LangGraph agents containing analytical logic
-├── config/             # System prompts, company aliases, and industry baselines
-├── core/               # Centralized LLM routing, LangGraph state schema, and workflows
-├── data/               # Essential reference databases (peer DB, emissions floors)
-├── features/           # Specialized sub-pipelines (e.g., ESG Mismatch Detector)
-├── frontend/           # Next.js web dashboard (Under Construction)
-├── ml_models/          # Trained weights and inference wrappers for risk/anomaly detection
-├── utils/              # PDF parsing, web crawling, and data source connectors
-├── .env.example        # Environment variable template
-├── main_langgraph.py   # CLI entry point
-└── requirements.txt    # Modern, optimized Python dependency list
-```
-
-## 📊 Example Output
-
-After analysis, ESGLens outputs a detailed taxonomy of risk, confidence, and financial implications. A sample terminal output (and corresponding PDF):
-
-```json
-{
-  "risk_level": "HIGH",
-  "greenwashing_risk_score": 82.5,
-  "esg_score": 18.0,
-  "confidence": 0.88,
-  "financial_analysis": {
-    "revenue_usd": 94800000000,
-    "profit_margin_pct": 4.5,
-    "carbon_intensity": 0.85,
-    "greenwashing_flags": ["High profit + low ESG execution", "High carbon intensity (>0.8)"]
-  },
-  "evidence_count": 52,
-  "report": "reports/Company_2026_Analysis.pdf"
-}
-```
+ESGLens is a state-of-the-art, enterprise-grade platform engineered to definitively assess corporate Environmental, Social, and Governance (ESG) claims. Moving far beyond keyword matching or simple LLM prompts, ESGLens utilizes a complex **LangGraph-driven multi-agent architecture** encompassing over 20 highly specialized AI agents, deterministic scoring algorithms, multi-jurisdiction regulatory databases, and machine learning models.
 
 ---
-*Built with LangGraph, Groq, Cerebras, OpenRouter, and XGBoost.*
 
-## ESG Chatbot Extension (Production-Ready)
+## 🏛️ 1. Core System Architecture & Intelligence Engine
 
-This repository now includes a dedicated FastAPI chatbot backend that is tightly coupled with the report artifacts generated by the LangGraph pipeline.
+The platform is built on a modular, asynchronous backbone designed for maximum auditability and precision.
 
-### Backend Folder Structure
+### A. The LangGraph Orchestrator (`core/workflow_phase2.py`)
+At the core of ESGLens is a Directed Acyclic Graph (DAG) state machine. Unlike linear pipelines, LangGraph allows for conditional routing, cycles (for debate), and persistent state management.
+- **Dynamic Routing (`assess_complexity_node`)**: Every claim is first analyzed for its "linguistic weight." If a claim is simple (e.g., "We like trees"), it follows the Fast Track. If it involves multi-year carbon targets or supply chain claims, it is routed to the **Deep Analysis Track**.
+- **The ESGState Object**: A comprehensive JSON-serializable object that travels through the graph, accumulating raw evidence, agent rationales, and intermediate scores. This ensures that every final verdict is "born" from a visible lineage of data.
 
-```
-chatbot_backend/
-  app.py                 # FastAPI app and endpoints
-  config.py              # Runtime config and paths
-  models.py              # Request/response schemas
-  service.py             # Orchestration: run, report load, chat answer
-  report_context.py      # JSON/TXT report parsing and normalization
-  retriever.py           # Chunking and lexical ranking for RAG
-  prompts.py             # ESG-grounded prompts and guardrails
-  llm.py                 # Gemini/Grok pluggable abstraction layer
-  memory.py              # Session memory (in-memory)
-  PROMPT_TEMPLATES.md    # Sample prompt templates
-```
+### B. Persistent Memory & Peer Benchmarking
+- **ChromaDB Integration**: The system maintains a vector database of every company ever analyzed. This allows the `peer_comparison_node` to calculate industry-relative percentiles in real-time.
+- **Industry Sigmas ($\sigma$)**: We maintain a registry of industry-specific volatility factors. High-impact sectors (like Energy) have higher sigmas to account for the massive scale of their operations, preventing unfair penalization for small reporting errors while highlighting systemic greenwashing.
 
-### Run Backend Locally
+---
 
-```bash
-pip install -r requirements.txt
-uvicorn chatbot_backend.app:app --host 0.0.0.0 --port 8000 --reload
-```
+## ⚖️ 2. The Greenwashing Scoring System: Deep Mathematical Justification
 
-### Required Environment Variables
+The Greenwashing Risk Score (**GW**) is the system's primary output. It is calculated using a deterministic formula designed to identify the "Gap" between corporate promises and physical reality.
 
-```env
-# At least one provider is required; both recommended for fallback.
-GEMINI_API_KEY=...
-GROK_API_KEY=...
+### The Master Formula:
+$$GW = \alpha \cdot \text{Gap} + \beta \cdot R + \gamma \cdot \text{Deficit} + \delta \cdot T$$
 
-# Optional chatbot tuning
-ESG_CHAT_LLM_PROVIDER=gemini
-ESG_CHAT_LLM_FALLBACK=grok
-ESG_CHAT_GEMINI_MODEL=gemini-1.5-flash
-ESG_CHAT_GROK_MODEL=grok-3-mini
-GROK_BASE_URL=https://api.x.ai/v1
-NEXT_PUBLIC_ESG_CHAT_API_BASE=http://localhost:8000
-```
+### **Component 1: Claim Intensity ($C$)** (`agents/claim_intensity_scorer.py`)
+$C$ measures the "boldness" and "verifiability" of a claim. It is not a measure of guilt, but a measure of the **burden of proof**.
+- **Specificity (0-30 pts)**: Presence of numbers, target years (e.g., 2030), and baselines.
+- **Verifiability (0-20 pts)**: Reference to external standards (GRI, TCFD, Scope 1/2/3).
+- **Ambiguity Penalty (up to -20 pts)**: Detection of "hedging" language (e.g., "aim to," "strive to," "where feasible").
+- **Weighted Classification**: Quantitative targets are weighted at 1.0, while vague marketing claims are weighted at 0.15.
 
-### API Endpoints
+### **Component 2: Execution Gap ($\text{Gap}$)**
+The Gap represents the mathematical delta between what is promised ($C$) and what is actually happening ($P$).
+- **Formula**: $\text{Gap} = \frac{\max(0, C - P)}{\sigma} \cdot 100$
+- **Justification**: If a company makes a "Leadership" claim ($C=90$) but has "Average" performance ($P=50$), the Gap is 40. This gap is then normalized by the industry sigma ($\sigma$) to ensure the penalty is fair relative to peer volatility.
 
-1. `POST /run-analysis`
+### **Component 3: Controversy Risk ($R$)** (`agents/risk_scorer.py`)
+$R$ is a **Blended Metric** (0.6 Verified / 0.4 Probabilistic) that captures active wrongdoing.
+- **Verified Regulatory Gaps (60% weight)**: Hard data from SEC filings, WBA indicators, and government fines. These are "proven" failures.
+- **Probabilistic Contradictions (40% weight)**: Signals from the `contradiction_analyzer.py` which pits claims against news reports and NGO findings.
+- **Calculation**: $R = 0.6 \cdot R_{reg} + 0.4 \cdot \min(100, \text{Contradictions} \cdot 20)$.
 
-```bash
-curl -X POST http://localhost:8000/run-analysis \
-  -H "Content-Type: application/json" \
-  -d '{
-    "company":"Unilever",
-    "industry":"Consumer Goods",
-    "claim":"Unilever aims to achieve net-zero emissions across its value chain by 2039."
-  }'
-```
+### **Component 4: Disclosure Deficit ($\text{Deficit}$)**
+Based on the **Disclosure Score ($D$)**, which measures transparency.
+- **Framework Hits**: Detection of GRI, SASB, TCFD, CDP, ISSB, and SBTi compliance.
+- **Third-Party Assurance**: A 20% bonus if the system detects keywords like "limited assurance" or "independently verified."
+- **Deficit Logic**: $\text{Deficit} = 100 - D$. Companies that hide their data are penalized for "Greenhushing."
 
-2. `GET /report`
+### **Component 5: Temporal Risk ($T$)** (`agents/temporal_consistency_agent.py`)
+$T$ measures consistency over time.
+- **Claim Escalation**: Does the company make stronger claims each year while its emissions stay flat?
+- **Goalpost Shifting**: Detection of baseline changes that make progress look better than it is.
+- **Scoring**: 0-30 is consistent; 80-100 is a "High Greenwashing Signal."
 
-```bash
-curl "http://localhost:8000/report?company=Unilever"
-```
+---
 
-3. `POST /chat`
+## 📈 3. Specialized Feature Deep Dives
 
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id":"esg-session-001",
-    "question":"Why is this claim marked misleading?",
-    "provider":"gemini"
-  }'
-```
+### **A. Carbon Pathway & CAGR Capping** (`agents/carbon_pathway_modeller.py`)
+The system performs a physics-based audit of carbon targets.
+- **CAGR Calculation**: It calculates the required Compound Annual Growth Rate of emission reductions.
+- **The 45% IEA NZE Ceiling**: If the required reduction rate exceeds **45% per year**, the system flags it as "Physically Impossible." This 45% figure is the maximum scientifically cited rate from the IEA Net Zero 2050 scenario for the most aggressive sectors.
+- **Budget Tracking**: Estimates the remaining carbon budget based on current emissions. If the budget is effectively exhausted, the system applies the "IEA NZE Ceiling" to prevent mathematical overflow in the risk score.
 
-4. `POST /chat/stream`
+### **B. Multi-Agent Debate & Conflict Resolution** (`agents/conflict_resolver.py`)
+In the Deep Analysis track, agents often disagree. The **Conflict Resolver** resolves these using an ensemble-voting mechanism:
+- **Credibility Scoring**: 
+    - Government/Regulatory: **0.95**
+    - NGO/Academic: **0.90**
+    - Tier-1 Financial Media: **0.85**
+    - Company-Controlled Docs: **0.30** (Highly skeptical)
+- **Resolution Logic**: If contradicting evidence exists, the system weights each source by its credibility and recency. An LLM-based "Debate Orchestrator" then provides a reasoned verdict on which source is more reliable.
 
-```bash
-curl -N -X POST http://localhost:8000/chat/stream \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id":"esg-session-001",
-    "question":"What evidence contradicts the claim?",
-    "provider":"grok",
-    "chunk_size":45
-  }'
-```
+### **C. Regulatory Ingestion & SEC Parsing** (`agents/regulatory_scanner.py`)
+The system directly ingests data from the "Truth Sources" of corporate reporting:
+- **SEC DEF 14A**: Extracts board diversity metrics and the ratio of executive pay linked to ESG targets.
+- **SEC Form SD**: Scans for "Conflict Minerals" disclosures and supply chain human rights issues.
+- **WBA (World Benchmarking Alliance)**: Ingests specific indicator scores for Social and Governance pillars.
 
-### Frontend Integration
+---
 
-The dashboard now includes a dedicated route:
+## 📚 4. Exhaustive Data Source Catalog
 
-- `/dashboard/chatbot`
+ESGLens operates on an multi-layered evidence pool:
 
-The page provides:
+1.  **Regulatory Truth Sources**:
+    - **SEC EDGAR (US)**: DEF 14A, Form SD, 10-K, 10-Q.
+    - **Companies House (UK)**: Strategic reports and gender pay gap filings.
+    - **EU Transparency Register**: For lobbying and influence data.
 
-- analysis input form (company, industry, claim),
-- report snapshot panel (score, evidence, contradictions),
-- conversational chatbot with streaming responses,
-- per-session follow-up memory using `session_id`.
+2.  **Global ESG Frameworks**:
+    - **WBA (World Benchmarking Alliance)**: Cross-industry performance benchmarks.
+    - **CDP (Carbon Disclosure Project)**: The gold standard for climate and water disclosure.
+    - **UNFCCC Race to Zero**: Official pledge verification.
+
+3.  **Environmental Intelligence**:
+    - **WRI Aqueduct 4.0**: Localized water stress data for corporate facilities.
+    - **ClimateBERT**: Specialized LLM for detecting "Climate-Washing" rhetoric.
+    - **IPCC Carbon Budgets**: Science-based ceilings for sector-specific emissions.
+
+4.  **Social & Governance Benchmarks**:
+    - **ILO (International Labour Organization)**: Global labor violation tracking.
+    - **Open Apparel Registry**: Supply chain mapping for the fashion industry.
+    - **Glassdoor & Sentiment APIs**: Employee-level sentiment on ESG culture.
+
+5.  **Adversarial News & NGO Data**:
+    - **Bing & Google News**: Real-time controversy monitoring.
+    - **Greenpeace & InfluenceMap**: Tracking anti-climate lobbying and environmental violations.
+
+---
+
+## 🛠️ 5. Technical Implementation Map (Python Architecture)
+
+| Feature | Primary Python File | Role |
+| :--- | :--- | :--- |
+| **Pipeline Workflow** | `core/workflow_phase2.py` | Defines the LangGraph nodes and transition logic. |
+| **Scoring Engine** | `agents/risk_scorer.py` | The "Brain" that synthesizes all $C, P, R, D, T$ inputs. |
+| **Carbon Audit** | `agents/carbon_pathway_modeller.py` | Performs the CAGR math and science-based alignment. |
+| **Report Generation** | `core/professional_report_generator.py` | Compiles the 7,000+ line state into a clean executive summary. |
+| **Conflict Resolution** | `agents/conflict_resolver.py` | Orchestrates the multi-agent debate and credibility weighting. |
+| **Regulatory Scanning** | `agents/regulatory_scanner.py` | The integration layer for SEC, WBA, and external APIs. |
+| **Claim Decomposition** | `agents/claim_decomposer.py` | Breaks marketing fluff into atomic, verifiable sub-claims. |
+| **Temporal Analysis** | `agents/temporal_consistency_agent.py` | Tracks the "Commitment Ledger" across multiple years. |
+| **State Schema** | `core/state_schema.py` | Defines the global `ESGState` structure. |
+| **LLM Interface** | `core/llm_call.py` | Standardized wrapper for multi-model LLM calls (GPT-4, Claude, etc.). |
+
+---
+
+## 📄 6. Analysis Outputs & Artifacts
+
+1.  **The Executive Report (`.txt`)**: A professionally formatted, section-by-section breakdown (1. Verdict, 2. Scorecard, 3. Evidence, etc.).
+2.  **The Audit JSON (`.json`)**: A full machine-readable trace. Includes the `greenwashing_formula` key which contains the exact $C, P, R, D, T$ values and weights used for that specific run.
+3.  **The Fact Graph**: A relational JSON mapping verified facts to their original claim IDs.

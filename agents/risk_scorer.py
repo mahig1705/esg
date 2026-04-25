@@ -657,23 +657,233 @@ class RiskScorer:
 
         return environmental_score, social_score, governance_score, adjustments
 
+    # -----------------------------------------------------------------
+    # Disclosure Completeness Score (D) — Phase 7 of overhaul
+    # -----------------------------------------------------------------
+    def calculate_disclosure_score(
+        self,
+        pillar_factors: Dict[str, Any],
+        all_analyses: Dict[str, Any],
+    ) -> float:
+        """Compute Disclosure Completeness Score (D), 0-100.
+
+        D = (tier1_factors / total_factors) * 50
+          + (framework_hits / 7) * 30
+          + (has_third_party_assurance ? 20 : 0)
+
+        D feeds into the GW formula but NOT into ESG.
+        """
+        coverage = pillar_factors.get("factor_coverage", {})
+        tier1 = coverage.get("tier1_factors", 0)
+        total = coverage.get("total_factors", 1)
+
+        disclosure_base = (tier1 / max(total, 1)) * 50.0
+
+        # Framework hits detection
+        frameworks = ["gri", "sasb", "tcfd", "cdp", "issb", "sbti", "brsr"]
+        evidence_text = ""
+        for ev in (all_analyses.get("evidence", []) or []):
+            if isinstance(ev, dict):
+                for k in ("snippet", "content", "relevant_text", "title"):
+                    evidence_text += " " + str(ev.get(k, ""))
+        evidence_text = evidence_text.lower()
+        framework_hits = sum(1 for fw in frameworks if fw in evidence_text)
+        framework_score = (framework_hits / 7.0) * 30.0
+
+        # Third-party assurance detection
+        assurance_keywords = [
+            "third-party assurance", "independently verified",
+            "limited assurance", "reasonable assurance",
+            "assured by", "external audit", "verification statement",
+        ]
+        has_assurance = any(kw in evidence_text for kw in assurance_keywords)
+        assurance_score = 20.0 if has_assurance else 0.0
+
+        D = round(min(100.0, max(0.0, disclosure_base + framework_score + assurance_score)), 1)
+        return D
+
+    # -----------------------------------------------------------------
+    # Greenwashing Score (GW) — Phase 5 of overhaul
+    # -----------------------------------------------------------------
+
+    # Industry-specific weight profiles for the GW formula
+    _GW_WEIGHT_PROFILES: Dict[str, Dict[str, float]] = {
+        "oil_and_gas":      {"alpha": 0.45, "beta": 0.30, "gamma": 0.15, "delta": 0.10},
+        "energy":           {"alpha": 0.45, "beta": 0.30, "gamma": 0.15, "delta": 0.10},
+        "coal":             {"alpha": 0.45, "beta": 0.30, "gamma": 0.15, "delta": 0.10},
+        "mining":           {"alpha": 0.45, "beta": 0.30, "gamma": 0.15, "delta": 0.10},
+        "aviation":         {"alpha": 0.45, "beta": 0.30, "gamma": 0.15, "delta": 0.10},
+        "banking":          {"alpha": 0.30, "beta": 0.35, "gamma": 0.20, "delta": 0.15},
+        "insurance":        {"alpha": 0.30, "beta": 0.35, "gamma": 0.20, "delta": 0.15},
+        "asset_management": {"alpha": 0.30, "beta": 0.35, "gamma": 0.20, "delta": 0.15},
+        "financial_services":{"alpha": 0.30, "beta": 0.35, "gamma": 0.20, "delta": 0.15},
+        "retail":           {"alpha": 0.40, "beta": 0.25, "gamma": 0.25, "delta": 0.10},
+        "food_beverage":    {"alpha": 0.40, "beta": 0.25, "gamma": 0.25, "delta": 0.10},
+        "consumer_goods":   {"alpha": 0.40, "beta": 0.25, "gamma": 0.25, "delta": 0.10},
+        "fast_fashion":     {"alpha": 0.40, "beta": 0.25, "gamma": 0.25, "delta": 0.10},
+        "technology":       {"alpha": 0.35, "beta": 0.20, "gamma": 0.30, "delta": 0.15},
+        "software":         {"alpha": 0.35, "beta": 0.20, "gamma": 0.30, "delta": 0.15},
+        "healthcare":       {"alpha": 0.35, "beta": 0.20, "gamma": 0.30, "delta": 0.15},
+    }
+    _GW_DEFAULT_WEIGHTS = {"alpha": 0.35, "beta": 0.25, "gamma": 0.25, "delta": 0.15}
+
+    def _get_industry_sigma(self, industry: str) -> float:
+        """Risk Mitigation #3: Use global_cross_sector_sigma when peer count < 5."""
+        import json
+        try:
+            with open("data/peer_database.json", "r") as f:
+                db = json.load(f)
+            peers_dict = db.get("peers", {})
+
+            # Collect ESG scores for the specific industry
+            norm_industry = industry.lower().replace("_", " ")
+            industry_peers = peers_dict.get(norm_industry, [])
+
+            if len(industry_peers) >= 5:
+                scores = [p.get("esg_score", 50) for p in industry_peers]
+                import statistics
+                return max(5.0, statistics.stdev(scores))
+
+            # Fallback: global cross-sector sigma
+            all_scores = []
+            for sector_peers in peers_dict.values():
+                for p in sector_peers:
+                    s = p.get("esg_score")
+                    if s is not None:
+                        all_scores.append(s)
+            if len(all_scores) >= 3:
+                import statistics
+                return max(5.0, statistics.stdev(all_scores))
+        except Exception:
+            pass
+        return 20.0  # Ultimate fallback
+
+    def calculate_greenwashing_score(
+        self,
+        C: float,
+        P: float,
+        R: float,
+        D: float,
+        T: float,
+        industry: str,
+        *,
+        applied_hard_caps: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Compute Greenwashing Risk Score (GW), 0-100.
+
+        GW = alpha * gap_term + beta * R + gamma * (1 - D/100) * 100 + delta * T
+
+        Where gap_term = min(100, max(0, C - P) / industry_sigma * 100)
+
+        This score is INDEPENDENT of the ESG Performance Score.
+        """
+        if applied_hard_caps is None:
+            applied_hard_caps = []
+
+        # Resolve weights
+        norm_ind = industry.lower().replace(" ", "_").replace("&", "and")
+        weights = self._GW_WEIGHT_PROFILES.get(norm_ind, self._GW_DEFAULT_WEIGHTS)
+
+        # Risk Mitigation #2: If T is based on insufficient data, set to 0 and redistribute delta
+        t_effective = T
+        alpha = weights["alpha"]
+        beta = weights["beta"]
+        gamma = weights["gamma"]
+        delta = weights["delta"]
+
+        if T == 0.0:
+            # Redistribute delta proportionally to alpha and gamma
+            alpha += delta * 0.6
+            gamma += delta * 0.4
+            delta = 0.0
+
+        # Gap term
+        sigma = self._get_industry_sigma(industry)
+        raw_gap = max(0.0, C - P)
+        gap_term = min(100.0, (raw_gap / sigma) * 100.0)
+
+        # Disclosure deficit
+        disclosure_deficit = (1.0 - D / 100.0) * 100.0
+
+        # Compute GW
+        GW = (
+            alpha * gap_term
+            + beta * R
+            + gamma * disclosure_deficit
+            + delta * t_effective
+        )
+        GW = round(max(0.0, min(100.0, GW)), 1)
+
+        return {
+            "greenwashing_score": GW,
+            "formula_components": {
+                "C": round(C, 1),
+                "P": round(P, 1),
+                "R": round(R, 1),
+                "D": round(D, 1),
+                "T": round(T, 1),
+                "gap_term": round(gap_term, 1),
+                "disclosure_deficit": round(disclosure_deficit, 1),
+                "industry_sigma": round(sigma, 1),
+            },
+            "weights": {
+                "alpha": round(alpha, 3),
+                "beta": round(beta, 3),
+                "gamma": round(gamma, 3),
+                "delta": round(delta, 3),
+            },
+            "industry_profile": norm_ind,
+            "applied_hard_caps": applied_hard_caps,
+        }
+
     def calculate_pillar_scores(self, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
         """
         Calculate Environmental, Social, and Governance pillar scores (0-100)
-
-        Args:
-            all_analyses: Dict containing all agent outputs
-
-        Returns:
-            Dict with environmental_score, social_score, governance_score
+        Now driven directly by structured pillar factors to ensure UI matches math.
         """
-
         print(f"\n📊 Calculating ESG Pillar Scores...")
 
-        # Get evidence and contradictions
-        evidence = all_analyses.get('evidence', [])
-        sg_adequacy = self._resolve_sg_adequacy(all_analyses)
-        sg_pack = self._get_sg_evidence_pack(all_analyses)
+        company = all_analyses.get("company", "Unknown")
+        industry = self._identify_industry(company, all_analyses)
+        
+        evidence_list = all_analyses.get("evidence", [])
+        if not isinstance(evidence_list, list):
+            evidence_list = []
+        external_payload = all_analyses.get("external_benchmarks", {})
+        if isinstance(external_payload, dict):
+            extra_evidence = (
+                external_payload.get("supplemental_evidence")
+                or external_payload.get("supplementalevidence")
+                or []
+            )
+            if isinstance(extra_evidence, list) and extra_evidence:
+                evidence_list = evidence_list + extra_evidence
+                print(f"  [supplemental_evidence] +{len(extra_evidence)} items merged into evidence_list "
+                      f"(total: {len(evidence_list)})")
+            else:
+                print(f"  [supplemental_evidence] WARNING: no supplemental items found in external_payload "
+                      f"(keys present: {list(external_payload.keys())[:10]})")
+        
+        carbon_data_for_factors = all_analyses.get("carbon_extraction") or all_analyses.get("carbon_results") or {}
+
+        # 1. Build Pillar Factors as the TRUE source of computation (No rescaling passed)
+        pillar_factors = build_pillar_factors(
+            company=company,
+            industry=industry,
+            evidence_sources=evidence_list,
+            carbon_data=carbon_data_for_factors,
+            pillar_scores=None,  # Explicitly None to prevent backwards rescaling
+            external_benchmarks=external_payload,
+        )
+
+        # 2. Extract mathematically pure scores (Coverage-adjusted natively by the builder)
+        environmental_score = float(pillar_factors.get("environmental", {}).get("coverageadjustedscore", 50.0))
+        social_score = float(pillar_factors.get("social", {}).get("coverageadjustedscore", 50.0))
+        governance_score = float(pillar_factors.get("governance", {}).get("coverageadjustedscore", 50.0))
+
+        print(f"   Base Pillar Factors (Coverage-Adjusted) -> Environmental: {environmental_score:.1f}, Social: {social_score:.1f}, Governance: {governance_score:.1f}")
+
+        # 3. Apply Cross-pillar contradiction penalties
         contradiction_payload = all_analyses.get('contradiction_analysis', [])
         contradictions = []
         if isinstance(contradiction_payload, dict):
@@ -686,183 +896,53 @@ class RiskScorer:
         elif isinstance(contradiction_payload, list):
             contradictions = contradiction_payload
 
-        # Flatten all text content for keyword analysis
-        all_text = []
-        for ev in evidence:
-            if isinstance(ev, dict):
-                all_text.append(ev.get('snippet', '').lower())
-                all_text.append(ev.get('relevant_text', '').lower())
-                for e in ev.get('evidence', []):
-                    if isinstance(e, dict):
-                        all_text.append(e.get('relevant_text', '').lower())
-
-        combined_text = ' '.join(all_text)
-
-        # Define pillar keywords
-        environmental_keywords = [
-            "carbon", "emissions", "climate", "renewable", "waste",
-            "water", "biodiversity", "pollution", "energy", "environmental"
-        ]
-
-        social_keywords = [
-            "labor", "diversity", "community", "human rights", "employee",
-            "safety", "stakeholder", "workers", "social", "equity"
-        ]
-
-        governance_keywords = [
-            "board", "ethics", "compliance", "transparency", "corruption",
-            "disclosure", "audit", "governance", "accountability", "integrity"
-        ]
-
-        social_agent_output = all_analyses.get("social_analysis", {})
-        if not isinstance(social_agent_output, dict):
-            social_agent_output = {}
-        governance_agent_output = all_analyses.get("governance_analysis", {})
-        if not isinstance(governance_agent_output, dict):
-            governance_agent_output = {}
-
-        industry = all_analyses.get("industry", "unknown")
-        base_risk = self.industry_baseline_risk.get(industry, {}).get("baseline", 50)
-        base_esg = 100 - base_risk
-
-        # Calculate Environmental Score
-        env_positive = sum(1 for kw in environmental_keywords if kw in combined_text)
-        env_negative = sum(
-            1 for c in contradictions
-            if any(kw in str(c).lower() for kw in environmental_keywords)
-        )
-
-        # Contradictions should materially reduce ESG pillar scores.
-        env_penalty = min(env_negative * 15, 60)
-        environmental_score = base_esg + (env_positive * 10) - env_penalty
-        if env_positive == 0 and env_negative == 0:
-            environmental_score = float(base_esg - 5) if not sg_adequacy.get("overall_ready", False) else float(base_esg + 5)
-        environmental_score = max(0, min(100, environmental_score))
-
-        print(f"   Environmental: {environmental_score:.1f}/100 (positive: {env_positive}, contradictions: {env_negative})")
-
-        # Calculate Social Score
-        soc_positive = sum(1 for kw in social_keywords if kw in combined_text)
-        soc_negative = sum(
-            1 for c in contradictions
-            if any(kw in str(c).lower() for kw in social_keywords)
-        )
-
-        soc_penalty = min(soc_negative * 15, 60)
-        # MSCI-like conservative baseline: sparse disclosure should not default to 0 or 100.
-        fallback_social_score = max(0, min(100, 30 + (soc_positive * 7) - soc_penalty))
-        social_score, social_lane = self._score_normalized_sg_pillar("social", sg_pack, sg_adequacy.get("social", {}))
-        if not social_lane.get("track_scores"):
-            social_score = fallback_social_score
-
-        if soc_positive == 0 and soc_negative == 0 and not social_lane.get("track_scores"):
-            # Intelligent fallback scoring based on sector baseline
-            social_score = float(base_esg - 5) if not sg_adequacy.get("social", {}).get("is_adequate", False) else float(base_esg + 5)
-
-        if not sg_adequacy.get("social", {}).get("is_adequate", False):
-            # Pull social score toward conservative mid-low when evidence is not decision-grade.
-            social_score = round((social_score * 0.50) + (35.0 * 0.50), 1)
-            print("   ⚠️ Social pillar confidence-limited due to insufficient free-source evidence")
-
-        social_agent_score = social_agent_output.get("social_score")
-        if isinstance(social_agent_score, (int, float)):
-            before_blend = social_score
-            social_score = round((social_score * 0.75) + (float(social_agent_score) * 0.25), 1)
-            print(f"   Social agent blend: {before_blend:.1f} -> {social_score:.1f}")
-
-        social_flags = social_agent_output.get("rule_flags", {}) if isinstance(social_agent_output.get("rule_flags"), dict) else {}
-        if social_flags.get("supply_chain_disclosure_missing"):
-            social_score = min(social_score, 35.0)
-            print("   ⚠️ Social rule applied: missing supply-chain labor disclosures")
-        if social_flags.get("diversity_without_pay_gap"):
-            social_score = min(social_score, 45.0)
-            print("   ⚠️ Social rule applied: diversity claim without pay-gap disclosure")
-        if social_flags.get("award_claim_weak_evidence"):
-            social_score = max(0.0, social_score - 6.0)
-            print("   ⚠️ Social rule applied: award claim has weak third-party evidence")
-
-        print(f"   Social: {social_score:.1f}/100 (positive: {soc_positive}, contradictions: {soc_negative})")
-
-        # Calculate Governance Score
-        gov_positive = sum(1 for kw in governance_keywords if kw in combined_text)
-        gov_negative = sum(
-            1 for c in contradictions
-            if any(kw in str(c).lower() for kw in governance_keywords)
-        )
-
-        gov_penalty = min(gov_negative * 15, 60)
-        fallback_governance_score = max(0, min(100, 35 + (gov_positive * 7) - gov_penalty))
-        governance_score, governance_lane = self._score_normalized_sg_pillar("governance", sg_pack, sg_adequacy.get("governance", {}))
-        if not governance_lane.get("track_scores"):
-            governance_score = fallback_governance_score
-        if gov_positive == 0 and gov_negative == 0 and not governance_lane.get("track_scores"):
-            # Intelligent fallback scoring based on sector baseline
-            governance_score = float(base_esg - 5) if not sg_adequacy.get("governance", {}).get("is_adequate", False) else float(base_esg + 5)
-
-        if not sg_adequacy.get("governance", {}).get("is_adequate", False):
-            # Pull governance score toward conservative mid-low when evidence is not decision-grade.
-            governance_score = round((governance_score * 0.50) + (38.0 * 0.50), 1)
-            print("   ⚠️ Governance pillar confidence-limited due to insufficient free-source evidence")
-
-        # SEC Metrics Integration
-        external = all_analyses.get("external_benchmarks", {})
-        sec_metrics = external.get("sec_metrics", {}) if isinstance(external, dict) else {}
-        if sec_metrics:
-            print(f"   🏛️ SEC Governance Metrics detected:")
-            if sec_metrics.get("board_diversity_pct") is not None:
-                div = sec_metrics["board_diversity_pct"]
-                print(f"      - Board Diversity: {div}%")
-                if div > 30: governance_score = min(100, governance_score + 5)
-            if sec_metrics.get("executive_pay_ratio") is not None:
-                ratio = sec_metrics["executive_pay_ratio"]
-                print(f"      - CEO Pay Ratio: {ratio}:1")
-                if ratio > 300: governance_score = max(0, governance_score - 5)
-            if sec_metrics.get("executive_comp_esg_links"):
-                print(f"      - Executive Compensation linked to ESG: YES")
-                governance_score = min(100, governance_score + 3)
-            
-            if sec_metrics.get("conflict_minerals_human_rights"):
-                print(f"      - Conflict Minerals Human Rights Controls: YES")
-                social_score = min(100, social_score + 4)
-        governance_agent_score = governance_agent_output.get("governance_score")
-        if isinstance(governance_agent_score, (int, float)):
-            before_blend = governance_score
-            governance_score = round((governance_score * 0.75) + (float(governance_agent_score) * 0.25), 1)
-            print(f"   Governance agent blend: {before_blend:.1f} -> {governance_score:.1f}")
-
-        governance_flags = governance_agent_output.get("rule_flags", {}) if isinstance(governance_agent_output.get("rule_flags"), dict) else {}
-        if governance_flags.get("board_independence_below_40"):
-            governance_score = min(governance_score, 45.0)
-            print("   ⚠️ Governance rule applied: board independence below 40%")
-        if governance_flags.get("esg_claim_with_zero_lti"):
-            governance_score = min(governance_score, 35.0)
-            print("   ⚠️ Governance rule applied: ESG claim with 0% LTI tied to ESG")
-        if governance_flags.get("ethical_claim_with_fines"):
-            governance_score = min(governance_score, 35.0)
-            print("   ⚠️ Governance rule applied: ethical culture claim contradicted by fines")
-
-        # Cross-pillar contradiction and regulatory gap penalties.
         high_severity_count = sum(
             1 for c in contradictions
-            if str(c.get("severity", "")).upper() == "HIGH"
+            if isinstance(c, dict) and str(c.get("severity", "")).upper() == "HIGH"
         )
         reg_payload = all_analyses.get("regulatory_scanning") or all_analyses.get("regulatory_compliance") or {}
         if isinstance(reg_payload, dict):
             reg_results = reg_payload.get("compliance_results", []) or []
+            # reg_gaps: total count (kept for resolve_materiality_profile downstream)
             reg_gaps = sum(1 for r in reg_results if isinstance(r, dict) and (r.get("gap_details") or []))
         else:
+            reg_results = []
             reg_gaps = 0
 
-        if high_severity_count > 0 or reg_gaps > 0:
-            environmental_score = max(0, environmental_score - min(35, high_severity_count * 6 + reg_gaps * 2))
-            social_score = max(0, social_score - min(30, high_severity_count * 5 + reg_gaps * 2))
-            governance_score = max(0, governance_score - min(40, high_severity_count * 7 + reg_gaps * 3))
+        # confirmed_gaps: only items with actual gap_details AND not explicitly cleared.
+        # UNCERTAIN status = evidence absence, not a confirmed violation.
+        confirmed_gaps = sum(
+            1 for r in reg_results
+            if isinstance(r, dict)
+            and len(r.get("gap_details") or []) > 0
+            and r.get("status", "gap").upper() not in ("COMPLIANT", "ADEQUATE", "MET", "UNCERTAIN")
+        )
 
-        # Avoid pathological pillar collapse from evidence sparsity alone.
-        if soc_negative == 0 and not social_flags.get("supply_chain_disclosure_missing"):
-            social_score = max(12.0, social_score)
-        if gov_negative == 0 and not governance_flags.get("ethical_claim_with_fines"):
-            governance_score = max(15.0, governance_score)
+        # Snapshot pre-penalty scores for the display track.
+        _pre_penalty_e = environmental_score
+        _pre_penalty_s = social_score
+        _pre_penalty_g = governance_score
+
+        # Proportional penalty — only high-severity contradictions affect pillars;
+        # reg_gaps are handled separately via Controversy Risk (R) in the GW formula.
+        if high_severity_count > 0:
+            e_pct = min(0.50, high_severity_count * 0.10)
+            s_pct = min(0.50, high_severity_count * 0.08)
+            g_pct = min(0.50, high_severity_count * 0.12)
+            environmental_score = round(environmental_score * (1.0 - e_pct), 1)
+            social_score = round(social_score * (1.0 - s_pct), 1)
+            governance_score = round(governance_score * (1.0 - g_pct), 1)
+            print(f"   ⚠️ Proportional penalty applied: E-{e_pct:.0%}, S-{s_pct:.0%}, G-{g_pct:.0%} (high_severity={high_severity_count}, confirmed_gaps={confirmed_gaps})")
+
+        # 4. External Benchmark Adjustments
+        sg_adequacy = self._resolve_sg_adequacy(all_analyses)
+        sg_pack = self._get_sg_evidence_pack(all_analyses)
+        
+        social_lane = {}
+        governance_lane = {}
+        if hasattr(self, '_score_normalized_sg_pillar'):
+            _, social_lane = self._score_normalized_sg_pillar("social", sg_pack, sg_adequacy.get("social", {}))
+            _, governance_lane = self._score_normalized_sg_pillar("governance", sg_pack, sg_adequacy.get("governance", {}))
 
         (
             environmental_score,
@@ -885,52 +965,51 @@ class RiskScorer:
                     f"({adj.get('source')}, weight={adj.get('weight')})"
                 )
 
-        print(f"   Governance: {governance_score:.1f}/100 (positive: {gov_positive}, contradictions: {gov_negative})")
+        # Removed the industry triple-dip penalty from environmental score here!
 
-        # Apply industry baseline adjustment
-        industry = self._identify_industry(all_analyses.get('company', 'Unknown'), all_analyses)
-        industry_data = self.industry_baseline_risk.get(industry, self.industry_baseline_risk.get('unknown'))
-        industry_baseline = industry_data.get('baseline', 50)
-
-        # Industry adjustment (light-touch): applied mainly to Environmental pillar and reduced for low-footprint sectors.
-        industry_penalty = (industry_baseline - 50) * 0.10  # 10% of baseline deviation (calibrated down)
-        sector_env_multiplier = {
-            "oil_and_gas": 1.0,
-            "coal": 1.0,
-            "mining": 0.9,
-            "aviation": 0.8,
-            "banking": 0.3,
-            "consumer_goods": 0.5,
-            "food_beverage": 0.6,
-            "technology": 0.4,
-            "software": 0.3,
-        }.get(industry, 0.6)
-
-        environmental_score = max(0, min(100, environmental_score - (industry_penalty * sector_env_multiplier)))
-
-        if industry_penalty != 0:
-            print(f"   Industry Adjustment ({industry}): {-industry_penalty:+.1f} points")
+        # --- Two-track display score ---
+        # display_esg_score = coverage-adjusted + external-adjusted, WITHOUT contradiction penalties.
+        # Apply the same external adjustment deltas to the pre-penalty snapshot.
+        _disp_e = _pre_penalty_e + (environmental_score - _pre_penalty_e) if high_severity_count == 0 else _pre_penalty_e
+        _disp_s = _pre_penalty_s + (social_score - _pre_penalty_s) if high_severity_count == 0 else _pre_penalty_s
+        _disp_g = _pre_penalty_g + (governance_score - _pre_penalty_g) if high_severity_count == 0 else _pre_penalty_g
+        # When penalties were applied, the external adjustments ran on penalized scores.
+        # Re-derive the display scores by applying external adjustment proportions to pre-penalty base.
+        if high_severity_count > 0 and external_adjustments:
+            for adj in external_adjustments:
+                pillar = adj.get("pillar")
+                weight = adj.get("weight", 0.0)
+                ext_val = adj.get("external", 0.0)
+                if pillar == "environmental":
+                    _disp_e = ((1.0 - weight) * _pre_penalty_e) + (weight * ext_val)
+                elif pillar == "social":
+                    _disp_s = ((1.0 - weight) * _pre_penalty_s) + (weight * ext_val)
+                elif pillar == "governance":
+                    _disp_g = ((1.0 - weight) * _pre_penalty_g) + (weight * ext_val)
 
         materiality_profile = self._resolve_materiality_profile(
             industry=industry,
-            combined_text=combined_text,
+            combined_text="",  # not needed as deeply now
             all_analyses=all_analyses,
             reg_gaps=reg_gaps,
             contradictions=contradictions,
         )
 
-        # Master weighting required by product policy.
         w_e, w_s, w_g = 0.35, 0.30, 0.35
         overall_esg = (environmental_score * w_e) + (social_score * w_s) + (governance_score * w_g)
+        display_esg = round((_disp_e * w_e) + (_disp_s * w_s) + (_disp_g * w_g), 1)
 
         print(f"   Overall ESG: {overall_esg:.1f}/100 (E×{w_e:.2f} + S×{w_s:.2f} + G×{w_g:.2f})")
+        if abs(display_esg - overall_esg) > 0.05:
+            print(f"   📊 Display ESG (pre-penalty): {display_esg:.1f}/100")
 
         return {
             "environmental_score": round(environmental_score, 1),
             "social_score": round(social_score, 1),
             "governance_score": round(governance_score, 1),
             "overall_esg_score": round(overall_esg, 1),
-            "industry_adjustment": round(industry_penalty, 1),
+            "displayesgscore": display_esg,
+            "industry_adjustment": 0.0, # Removed triple-dip
             "pillar_weighting": {"E": w_e, "S": w_s, "G": w_g},
             "materiality_profile": materiality_profile,
             "data_adequacy": sg_adequacy,
@@ -939,6 +1018,7 @@ class RiskScorer:
             "normalized_sg_fact_count": int(sg_pack.get("summary", {}).get("normalized_fact_count", 0) or 0),
             "external_benchmark_adjustments": external_adjustments,
             "external_benchmarks_used": bool(external_adjustments),
+            "pillarfactorsraw": pillar_factors # Save raw factors for later
         }
 
     def calculate_final_score(self, company: str, all_analyses: Dict[str, Any]) -> Dict[str, Any]:
@@ -989,8 +1069,10 @@ class RiskScorer:
 
         # Step 0.5: Convert ESG score to MSCI-style rating (PRIMARY METHOD)
         rating_grade, risk_level = self.esg_score_to_rating(overall_esg_score)
-        base_greenwashing_risk = 100 - overall_esg_score
-        greenwashing_risk = base_greenwashing_risk
+        # NOTE: Greenwashing risk is NO LONGER derived from ESG. It will be
+        # computed independently via calculate_greenwashing_score() after
+        # pillar_factors are built.  We initialise to 50 as a placeholder.
+        greenwashing_risk = 50.0
 
         print(f"\n⭐ MSCI-Style Rating from ESG Score:")
         print(f"   ESG Score: {overall_esg_score}/100")
@@ -1003,20 +1085,11 @@ class RiskScorer:
         scoring_methodology = "Canonical Multi-Signal"
         confidence = 0.85
 
-        # Step 0.5: Primary signal determination (Pillar-based)
         environmental_score = pillar_scores.get("environmental_score")
         social_score = pillar_scores.get("social_score")
         governance_score = pillar_scores.get("governance_score")
+        
         if all(s is not None for s in [environmental_score, social_score, governance_score]):
-            overall_esg_score = (
-                float(environmental_score) * 0.35
-                + float(social_score) * 0.30
-                + float(governance_score) * 0.35
-            )
-            overall_esg_score = round(max(0.0, min(100.0, overall_esg_score)), 1)
-            greenwashing_risk = round(100.0 - overall_esg_score, 1)
-            base_greenwashing_risk = greenwashing_risk
-            rating_grade, risk_level = self.esg_score_to_rating(overall_esg_score)
             risk_source = "Pillar Primary Signal"
             # ML is suppressed for high/low extremes to ensure stability
             use_ml_lockout = overall_esg_score >= 75 or overall_esg_score < 50
@@ -1050,8 +1123,8 @@ class RiskScorer:
             confidence_penalties.append(0.12)
             print("   ⚠️ S/G decision confidence reduced (insufficient social/governance evidence coverage)")
 
-        confidence_penalty_total = min(0.25, sum(confidence_penalties))
-        confidence = max(0.55, confidence - confidence_penalty_total)
+        confidence_penalty_total = min(0.40, sum(confidence_penalties))
+        confidence = max(0.10, confidence - confidence_penalty_total)
 
         # Step 1: Detect best-in-class or significant concerns
         if overall_esg_score >= 85:
@@ -1133,21 +1206,15 @@ class RiskScorer:
             for key, weight in self.weights.items()
         )
 
-        industry_adjustment = (industry_baseline - 50) * 0.3
-        adjusted_risk = base_risk + industry_adjustment
-
-        # Apply industry-specific risk multipliers for high-carbon sectors
-        industry_multiplier = self.INDUSTRY_RISK_MULTIPLIERS.get(industry, 1.0)
-        if industry_multiplier > 1.0:
-            print(f"Industry penalty applied: {industry.replace('_', ' ').title()} × {industry_multiplier}")
-            adjusted_risk = adjusted_risk * industry_multiplier
+        industry_adjustment = 0.0 # Handled at the very end to avoid triple dipping
+        adjusted_risk = base_risk
 
         peer_modifier = self._calculate_peer_modifier(all_analyses, industry)
         debate_penalty = 10.0 if all_analyses.get("debate_activated") else 0.0
 
         # Canonical component score (before override/non-override arbitration).
         base_risk_score = max(0, min(100, round(base_risk, 1)))
-        final_score = max(0, min(100, round(base_risk_score + industry_adjustment + peer_modifier + debate_penalty, 1)))
+        final_score = max(0, min(100, round(base_risk_score + peer_modifier, 1)))
         greenwashing_risk_formula = final_score
 
         print(f"   Formula Risk: {greenwashing_risk_formula:.1f}/100 (for component analysis)")
@@ -1302,8 +1369,7 @@ class RiskScorer:
 
         # Step 6.6: Cap stacked adjustments to prevent unrealistic collapses
         risk_adjustment = max(-10.0, min(35.0, risk_adjustment))
-        if not use_ml_lockout:
-            greenwashing_risk = max(0.0, min(100.0, base_greenwashing_risk + risk_adjustment))
+        # NOTE: greenwashing_risk will be recalculated independently below
 
         # Step 7: Anomaly Detection (flagging only)
         anomaly_result = None
@@ -1407,42 +1473,9 @@ class RiskScorer:
                     print(f"   Adjusted score: 70/100 (HIGH threshold)")
                     greenwashing_risk = 70
 
-        # Step 8.5: Final greenwashing score arbitration
-        # Override path blends pillar and component signals so one source cannot fully wash out the other.
-        pillar_greenwashing = round(100 - esg_score, 1)
-
-        if use_ml_lockout:
-            component_greenwashing = base_risk_score
-            blended_score = (
-                (pillar_greenwashing * 0.60) +
-                (component_greenwashing * 0.40)
-            )
-
-            final_score = blended_score + industry_adjustment + debate_penalty
-            final_score = round(min(100, max(0, final_score)), 1)
-
-            logger.info(
-                "Canonical assessment path for %s: "
-                "pillar=%.1f component=%.1f blend=%.1f "
-                "industry_adj=%.1f debate_penalty=%.1f final=%.1f",
-                company,
-                pillar_greenwashing,
-                component_greenwashing,
-                blended_score,
-                industry_adjustment,
-                debate_penalty,
-                final_score
-            )
-        else:
-            final_score = max(pillar_greenwashing, base_risk_score)
-            final_score = round(
-                min(100, max(0, final_score + industry_adjustment + debate_penalty)), 1
-            )
-
-        # Keep risk-level mapping aligned with final score regardless of earlier branch decisions.
-        greenwashing_risk = final_score
-        risk_level = self._risk_level_from_greenwashing_score(final_score, company)
-        esg_score = round(100.0 - greenwashing_risk, 1)
+        # Step 8.5: ESG score is independent — it comes ONLY from pillar performance.
+        esg_score = round(overall_esg_score, 1)
+        # Greenwashing will be computed independently below after pillar_factors exist.
 
         # Step 9: Generate insights
         top_reasons = self._generate_top_reasons(
@@ -1528,29 +1561,28 @@ class RiskScorer:
             "base_risk_score": round(base_risk, 1),
             "industry_adjustment": round(industry_adjustment, 1),
             "peer_adjustment": round(peer_modifier, 1),
-            "greenwashing_score": final_score_recalibrated,
-            "greenwashing_risk_score": final_score_recalibrated,
-            "greenwashing_risk_score_raw": final_score,
-            "greenwashing_risk_label": self._greenwashing_label(final_score_recalibrated),
+            "greenwashingriskscore": final_score_recalibrated,
+            "greenwashingscoreraw": final_score,
+            "greenwashingrisklabel": self._greenwashing_label(final_score_recalibrated),
             "esg_score": round(esg_score, 1),
-            "risk_level": final_risk_level,
-            "rating_grade": rating_grade,
+            "risklevel": final_risk_level,
+            "ratinggrade": rating_grade,
             "component_scores": components,
-            "pillar_scores": pillar_scores,
+            "pillarscores": pillar_scores,
             "explainability_top_3_reasons": top_reasons,
             "actionable_insights": insights,
-            "confidence_level": round(confidence * 100, 1),
+            "confidencelevel": round(confidence * 100, 1),
             "positive_esg_boost": round(positive_boost, 1),
             "confidence_penalty": round(confidence_penalty, 1),
             "confidence_penalty_applied": round(confidence_penalty_total * 100, 1),
             "social_governance_decision_ready": bool(sg_adequacy.get("overall_ready", False)),
             "report_tier": report_tier,
             "score_disclaimer": score_disclaimer,
-            "abstain_recommended": abstention["abstain_recommended"],
+            "abstainrecommended": abstention["abstain_recommended"],
             "decision_status": abstention["decision_status"],
-            "abstention_reason": abstention["reason"],
-            "abstention_triggers": abstention["triggers"],
-            "top_contradictions": top_contradictions,
+            "abstentionreason": abstention["reason"],
+            "abstentiontriggers": abstention["triggers"],
+            "topcontradictions": top_contradictions,
             "recommended_due_diligence": due_diligence,
             "high_carbon_greenwashing_flag": high_carbon_greenwashing_flag,
             "esg_override_active": use_ml_lockout,
@@ -1570,17 +1602,10 @@ class RiskScorer:
                 "available": bool(fact_graph_summary),
                 "summary": fact_graph_summary,
             },
-            "score_modifier_ledger": [
+            "scoremodifierledger": [
                 {"label": "Base ESG from pillars", "value": round(overall_esg_score, 2)},
-                {"label": "Confidence penalty applied", "value": round(confidence_penalty_total * -100, 2)},
-                {"label": "ESG Score (final)", "value": round(esg_score, 1)},
-                {"label": "Base greenwashing (100 - ESG)", "value": round(100.0 - esg_score, 1)},
-                {"label": "Industry baseline adjustment", "value": round(industry_adjustment, 1)},
-                {"label": "Peer adjustment", "value": round(peer_modifier, 1)},
-                {"label": "Debate penalty", "value": round(debate_penalty, 1)},
-                {"label": "Greenwashing risk raw", "value": round(final_score, 1)},
-                {"label": "Calibration delta", "value": round(final_score_recalibrated - final_score, 1)},
-                {"label": "Greenwashing risk final", "value": round(final_score_recalibrated, 1)},
+                {"label": "ESG Score (final, independent)", "value": round(esg_score, 1)},
+                {"label": "GW formula pending", "value": "(computed after pillar_factors)"},
             ],
         }
         if score_disclaimer:
@@ -1593,22 +1618,32 @@ class RiskScorer:
                 evidence_list = []
             external_payload = all_analyses.get("external_benchmarks", {})
             if isinstance(external_payload, dict):
-                extra_evidence = external_payload.get("supplemental_evidence", [])
+                extra_evidence = (
+                    external_payload.get("supplemental_evidence")
+                    or external_payload.get("supplementalevidence")
+                    or []
+                )
                 if isinstance(extra_evidence, list) and extra_evidence:
                     evidence_list = evidence_list + extra_evidence
+                    print(f"  [supplemental_evidence] +{len(extra_evidence)} items merged into evidence_list "
+                          f"(total: {len(evidence_list)})")
+                else:
+                    print(f"  [supplemental_evidence] WARNING: no supplemental items found in external_payload "
+                          f"(keys present: {list(external_payload.keys())[:10]})")
             carbon_data_for_factors = all_analyses.get("carbon_extraction") or all_analyses.get("carbon_results") or {}
-            result["pillar_factors"] = build_pillar_factors(
+            result["pillarfactors"] = build_pillar_factors(
                 company=company,
                 industry=industry,
                 evidence_sources=evidence_list,
                 carbon_data=carbon_data_for_factors,
                 pillar_scores=pillar_scores,
+                external_benchmarks=external_payload,
             )
             # Keep the calibrated pillar-primary scores authoritative.
             canonical_pillar_scores = {
-                "environmental_score": float(result["pillar_scores"].get("environmental_score", 0.0) or 0.0),
-                "social_score": float(result["pillar_scores"].get("social_score", 0.0) or 0.0),
-                "governance_score": float(result["pillar_scores"].get("governance_score", 0.0) or 0.0),
+                "environmental_score": float(result["pillarscores"].get("environmental_score", 0.0) or 0.0),
+                "social_score": float(result["pillarscores"].get("social_score", 0.0) or 0.0),
+                "governance_score": float(result["pillarscores"].get("governance_score", 0.0) or 0.0),
             }
 
             # Back-populate raw_signal_normalized and points_contributed for explainability only.
@@ -1618,7 +1653,7 @@ class RiskScorer:
                 "governance": "governance_score",
             }
             for pillar_name, score_key in pillar_key_map.items():
-                pillar_block = result["pillar_factors"].get(pillar_name, {})
+                pillar_block = result["pillarfactors"].get(pillar_name, {})
                 factors = pillar_block.get("sub_indicators", []) if isinstance(pillar_block, dict) else []
                 if not isinstance(factors, list):
                     continue
@@ -1638,64 +1673,198 @@ class RiskScorer:
                 canonical_total = round(max(0.0, min(100.0, canonical_pillar_scores.get(score_key, explainability_total))), 1)
                 pillar_block["score"] = canonical_total
                 pillar_block["explainability_reconstructed_score"] = explainability_total
-                result["pillar_scores"][score_key] = canonical_total
+                result["pillarscores"][score_key] = canonical_total
 
             # Keep final ESG/risk synchronized with the canonical pillar-primary totals.
             e = float(canonical_pillar_scores.get("environmental_score", 0.0) or 0.0)
             s = float(canonical_pillar_scores.get("social_score", 0.0) or 0.0)
             g = float(canonical_pillar_scores.get("governance_score", 0.0) or 0.0)
-            materiality_weights = result["pillar_scores"].get("pillar_weighting", {"E": 0.35, "S": 0.35, "G": 0.30})
+            materiality_weights = result["pillarscores"].get("pillar_weighting", {"E": 0.35, "S": 0.35, "G": 0.30})
             w_e_sync = float(materiality_weights.get("E", 0.35) or 0.35)
             w_s_sync = float(materiality_weights.get("S", 0.35) or 0.35)
             w_g_sync = float(materiality_weights.get("G", 0.30) or 0.30)
             overall_esg = round(max(0.0, min(100.0, e * w_e_sync + s * w_s_sync + g * w_g_sync)), 1)
-            result["pillar_scores"]["overall_esg_score"] = overall_esg
+            result["pillarscores"]["overall_esg_score"] = overall_esg
+            result["pillarscores"]["weighting_source"] = "materiality_profile"
+            # Preserve displayesgscore through re-sync — it must survive to the report.
+            result["pillarscores"]["displayesgscore"] = result["pillarscores"].get("displayesgscore", overall_esg)
             result["esg_score"] = overall_esg
+            print(f"   🔗 Re-sync weights: E={w_e_sync:.2f}, S={w_s_sync:.2f}, G={w_g_sync:.2f} (source=materiality_profile)")
 
-            # Keep final score synchronized to the final pillar-derived ESG score.
-            pillar_greenwashing_synced = round(100 - overall_esg, 1)
-            if use_ml_lockout:
-                blended_score_synced = (
-                    (pillar_greenwashing_synced * 0.60) +
-                    (base_risk_score * 0.40)
-                )
-                final_score = round(
-                    min(100, max(0, blended_score_synced + industry_adjustment + debate_penalty)), 1
-                )
-            else:
-                final_score = round(
-                    min(100, max(0, max(pillar_greenwashing_synced, base_risk_score) + industry_adjustment + debate_penalty)), 1
-                )
+            # ============================================================
+            # INDEPENDENT GREENWASHING SCORE via five-variable formula
+            # GW = α·gap_term + β·R + γ·(1-D/100) + δ·T
+            # ESG and GW are now FULLY DECOUPLED.
+            # ============================================================
+            print(f"\n📐 Computing independent Greenwashing Score...")
 
-            greenwashing_risk = final_score
+            # Build applied_hard_caps ledger (Risk Mitigation #4)
+            applied_hard_caps = []
+
+            # Extract C (Claim Intensity) from all_analyses
+            ci_data = all_analyses.get("claim_intensity", {})
+            if not isinstance(ci_data, dict):
+                ci_data = {}
+            C = float(ci_data.get("claim_intensity_score", 0.0) or 0.0)
+
+            # Extract P (Performance) from pillarfactors
+            P = float(result.get("pillarfactors", {}).get("performance_score", overall_esg) or overall_esg)
+
+            # Extract R (Controversy Risk) from all_analyses
+            # Step 1: Get the regulatory-based R from the controversy_risk state dict
+            cr_data = all_analyses.get("controversy_risk", {})
+            if not isinstance(cr_data, dict):
+                cr_data = {}
+            regulatory_R = float(cr_data.get("score", 0.0) or 0.0)
+
+            # Step 2: Get independent contradiction signals (not already in reg gaps)
+            controversy_raw = int(all_analyses.get("controversy_signals", 0) or 0)
+            reggaps = int(all_analyses.get("reg_gap_count", 0) or 0)
+            independent_contradictions = max(0, controversy_raw - reggaps)
+
+            # Step 3: Blend — 0.6 regulatory (verified), 0.4 contradiction (probabilistic)
+            R = min(100.0,
+                regulatory_R * 0.6 +
+                min(100.0, independent_contradictions * 20.0) * 0.4
+            )
+            print(f"   📊 R breakdown: regulatory_R={regulatory_R:.1f}, controversy_raw={controversy_raw}, "
+                  f"reggaps={reggaps}, independent={independent_contradictions}, blended_R={R:.1f}")
+
+            # Compute D (Disclosure Completeness) from pillarfactors
+            D = self.calculate_disclosure_score(
+                result.get("pillarfactors", {}),
+                all_analyses,
+            )
+
+            # Extract T (Temporal Escalation) from all_analyses
+            te_data = all_analyses.get("temporal_escalation", {})
+            if not isinstance(te_data, dict):
+                te_data = {}
+            T = float(te_data.get("temporal_escalation_score", 0.0) or 0.0)
+
+            # DOMAIN FLOOR: net-zero / carbon-neutral claims
+            claim_payload = all_analyses.get("claim", {})
+            claim_payload_text = claim_payload.get("claim_text", "") if isinstance(claim_payload, dict) else ""
+            _claim_text_raw = (
+                claim_payload_text
+                or all_analyses.get("claim_text", "")
+                or all_analyses.get("claim_analyzed", "")
+                or ""
+            )
+            _claim_text = str(_claim_text_raw).lower()
+            _NET_ZERO_FLOOR_KEYWORDS = [
+                "net zero", "net-zero", "carbon neutral", "carbon-neutral",
+                "paris aligned", "paris-aligned", "climate neutral", "net zero emissions",
+            ]
+            if any(kw in _claim_text for kw in _NET_ZERO_FLOOR_KEYWORDS):
+                _C_FLOOR = 60.0
+                if C < _C_FLOOR:
+                    applied_hard_caps.append({
+                        "cap": "net_zero_claim_intensity_floor",
+                        "original_C": round(C, 1),
+                        "floored_C": _C_FLOOR,
+                        "reason": (
+                            f"Claim text matches net-zero/carbon-neutral family. "
+                            f"Domain knowledge floor applied: C raised from {C:.1f} to {_C_FLOOR}. "
+                            f"Matched keyword in: '{_claim_text[:80]}'"
+                        ),
+                    })
+                    C = _C_FLOOR
+                    print(f"  [C-floor] net-zero claim detected - C raised {round(applied_hard_caps[-1]['original_C'], 1)} -> {_C_FLOOR}")
+
+            if high_carbon_greenwashing_flag:
+                applied_hard_caps.append({
+                    "cap": "high_carbon_greenwashing_flag",
+                    "effect": "GW floor at 70",
+                    "reason": "Oil & Gas sector + green claims + low ESG",
+                })
+
+            # Compute GW score
+            gw_result = self.calculate_greenwashing_score(
+                C=C, P=P, R=R, D=D, T=T,
+                industry=industry,
+                applied_hard_caps=applied_hard_caps,
+            )
+            greenwashing_risk = gw_result["greenwashing_score"]
+            self._last_lineage = gw_result
+
+            # Apply domain override caps AFTER formula computation
+            if high_carbon_greenwashing_flag and greenwashing_risk < 70:
+                applied_hard_caps.append({
+                    "cap": "domain_override_floor",
+                    "effect": f"GW raised from {greenwashing_risk} to 70",
+                    "reason": "High-carbon sector domain knowledge override",
+                })
+                greenwashing_risk = 70.0
+                gw_result["greenwashing_score"] = greenwashing_risk
+                gw_result["applied_hard_caps"] = applied_hard_caps
+
+            final_score = greenwashing_risk
             recalibration = recalibrate_greenwashing_score(final_score, sector=industry)
             final_score_recalibrated = float(recalibration.get("recalibrated_score", final_score))
             risk_level = self._risk_level_from_greenwashing_score(final_score_recalibrated, company)
 
-            result["greenwashing_score"] = final_score_recalibrated
-            result["greenwashing_risk_score"] = final_score_recalibrated
-            result["greenwashing_risk_score_raw"] = final_score
+            print(f"   C (Claim Intensity):        {C}/100")
+            print(f"   P (Performance):            {P}/100")
+            print(f"   R (Controversy Risk):       {R}/100")
+            print(f"   D (Disclosure Completeness): {D}/100")
+            print(f"   T (Temporal Escalation):    {T}/100")
+            print(f"   Industry sigma:             {gw_result['formula_components']['industry_sigma']}")
+            print(f"   Gap term:                   {gw_result['formula_components']['gap_term']}")
+            print(f"   GW Score (raw):             {greenwashing_risk}/100")
+            print(f"   GW Score (recalibrated):    {final_score_recalibrated}/100")
+
+            result["greenwashingriskscore"] = final_score_recalibrated
+            result["greenwashingscoreraw"] = final_score
             result["recalibration"] = recalibration
-            result["rating_grade"], _ = self.esg_score_to_rating(overall_esg)
-            result["risk_level"] = self._risk_level_from_greenwashing_score(final_score_recalibrated, company)
+            result["ratinggrade"], _ = self.esg_score_to_rating(overall_esg)
+            result["risklevel"] = self._risk_level_from_greenwashing_score(final_score_recalibrated, company)
+
+            # Store full GW formula trace for auditability
+            result["greenwashingformula"] = gw_result
+
+            # Rebuild score_modifier_ledger with the new formula trace
+            result["scoremodifierledger"] = [
+                {"label": "ESG Score (independent, from pillars)", "value": round(overall_esg, 1)},
+                {"label": "C (Claim Intensity)", "value": round(C, 1)},
+                {"label": "P (Performance Score)", "value": round(P, 1)},
+                {"label": "Gap (C - P)", "value": round(max(0, C - P), 1)},
+                {"label": "R (Controversy Risk)", "value": round(R, 1)},
+                {"label": "D (Disclosure Completeness)", "value": round(D, 1)},
+                {"label": "T (Temporal Escalation)", "value": round(T, 1)},
+                {"label": "α (gap weight)", "value": gw_result["weights"]["alpha"]},
+                {"label": "β (controversy weight)", "value": gw_result["weights"]["beta"]},
+                {"label": "γ (disclosure weight)", "value": gw_result["weights"]["gamma"]},
+                {"label": "δ (temporal weight)", "value": gw_result["weights"]["delta"]},
+                {"label": "GW Score (formula)", "value": round(greenwashing_risk, 1)},
+                {"label": "GW Score (recalibrated)", "value": round(final_score_recalibrated, 1)},
+                {"label": "Applied hard caps", "value": len(applied_hard_caps)},
+            ]
             print(f"   ✅ Pillar factors populated with sub-indicator breakdown")
+            result["scoremodifierledger"].extend(
+                {
+                    "label": str(cap.get("cap", "hard_cap")),
+                    "value": cap.get("floored_C") or cap.get("floor") or cap.get("effect", "applied"),
+                }
+                for cap in applied_hard_caps
+                if isinstance(cap, dict)
+            )
         except Exception as pf_err:
             print(f"   ⚠️ Pillar factors build failed: {pf_err}")
-            result["pillar_factors"] = {}
+            result["pillarfactors"] = {}
 
         # Apply structural penalties from new cross-agent features after pillar synchronization.
         structural = self._compute_structural_penalties(all_analyses)
         structural_penalty = float(structural.get("total_penalty", 0.0) or 0.0)
         if structural_penalty > 0:
-            final_score = round(min(100.0, max(0.0, float(result.get("greenwashing_risk_score_raw", final_score)) + structural_penalty)), 1)
+            final_score = round(min(100.0, max(0.0, float(result.get("greenwashingscoreraw", final_score)) + structural_penalty)), 1)
             recalibration = recalibrate_greenwashing_score(final_score, sector=industry)
             final_score_recalibrated = float(recalibration.get("recalibrated_score", final_score))
             risk_level = self._risk_level_from_greenwashing_score(final_score_recalibrated, company)
 
-            result["greenwashing_score"] = final_score_recalibrated
-            result["greenwashing_risk_score"] = final_score_recalibrated
-            result["greenwashing_risk_score_raw"] = final_score
-            result["risk_level"] = risk_level
+            result["greenwashingriskscore"] = final_score_recalibrated
+            result["greenwashingscoreraw"] = final_score
+            result["risklevel"] = risk_level
             result["recalibration"] = recalibration
             result["structural_penalties"] = structural
             print(
@@ -1751,8 +1920,8 @@ class RiskScorer:
             }
 
         print(f"\n✅ Final Risk Assessment:")
-        print(f"   Greenwashing Risk: {result.get('greenwashing_risk_score', greenwashing_risk):.1f}/100 ({risk_source})")
-        print(f"   Raw Risk Before Recalibration: {result.get('greenwashing_risk_score_raw', greenwashing_risk):.1f}/100")
+        print(f"   Greenwashing Risk: {result.get('greenwashingriskscore', greenwashing_risk):.1f}/100 ({risk_source})")
+        print(f"   Raw Risk Before Recalibration: {result.get('greenwashingscoreraw', greenwashing_risk):.1f}/100")
         print(f"   ESG Score: {esg_score:.1f}/100 (Grade: {rating_grade})")
         print(f"   Risk Level: {risk_level}")
         print(f"   Methodology: {'ESG Pillar Primary' if not use_ml_prediction else 'Pillar + ML Refinement'}")
@@ -2779,3 +2948,9 @@ Industry:"""
         except Exception as e:
             print(f"⚠️  Could not extract anomaly features: {e}")
             return None
+
+    def get_score_lineage(self) -> Dict[str, Any]:
+        """Return the pre-aggregation lineage state for the most recently computed score."""
+        if hasattr(self, '_last_lineage'):
+            return getattr(self, '_last_lineage')
+        return {}
