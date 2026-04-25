@@ -218,13 +218,24 @@ async def fetch_newsdata(query: str, cap: int = NEWSDATA_FETCH_CAP) -> list[dict
 
 
 def fetch_duckduckgo(query: str, cap: int = DUCKDUCKGO_FETCH_CAP) -> list[dict]:
-    """Fetches fresh web/news results from DuckDuckGo."""
+    """Fetches fresh web/news results from DuckDuckGo with fallback."""
     try:
         from ddgs import DDGS
+        import time
 
         results = []
         with DDGS() as ddgs:
-            search_results = ddgs.news(query, max_results=cap)
+            # Sometime ddgs.news throws decode errors. Try news first, then text.
+            search_results = []
+            for func in [ddgs.news, ddgs.text]:
+                try:
+                    search_results = list(func(query, max_results=cap))
+                    if search_results:
+                        break
+                except Exception as e:
+                    logger.debug("DuckDuckGo fetch func failed: %s", e)
+                    time.sleep(1)
+            
             for item in search_results:
                 url = item.get("url", "") or item.get("href", "")
                 if is_blocked(url):

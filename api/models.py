@@ -1,0 +1,190 @@
+"""
+api/models.py
+-------------
+Pydantic response models for the ESGLens REST API.
+Mapped from the actual pipeline JSON output (ESG_Report_*.json).
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
+
+
+# ── Sub-models ────────────────────────────────────────────────────────────────
+
+class PillarScore(BaseModel):
+    score: float
+    coverage_adjusted_score: Optional[float] = None
+    weight: float
+    positive_signals: int = 0
+    contradictions: int = 0
+
+
+class CarbonData(BaseModel):
+    scope1: float = 0.0          # tCO2e
+    scope2: float = 0.0
+    scope3: float = 0.0
+    total: float = 0.0
+    net_zero_target: str = "Unknown"
+    data_quality: int = 0        # 0-100
+    iea_nze_gap_pct: Optional[float] = None
+    budget_years_remaining: Optional[float] = None
+
+    # Validation fields
+    scope2_status: str = "UNKNOWN"
+    scope3_status: str = "UNKNOWN"
+    target_status: str = "UNKNOWN"
+
+
+class Contradiction(BaseModel):
+    id: str
+    severity: str                 # HIGH / MEDIUM / LOW
+    claim_text: str
+    evidence_text: str
+    source: str
+    source_url: Optional[str] = None
+    year: Optional[int] = None
+    impact: str = ""
+
+
+class EvidenceItem(BaseModel):
+    id: str
+    source_name: str
+    source_url: Optional[str] = None
+    credibility: float = 0.0     # 0-1
+    stance: str                  # SUPPORTING / CONTRADICTING / NEUTRAL
+    excerpt: str = ""
+    year: Optional[int] = None
+    source_type: str = "Unknown"
+    archive_verified: bool = False
+
+
+class RegulatoryItem(BaseModel):
+    framework: str
+    compliance_score: int = 0
+    status: str                  # COMPLIANT / PARTIAL / NON-COMPLIANT
+    jurisdiction: str = "Global"
+    key_gap: str = ""
+
+
+class GreenwashingData(BaseModel):
+    overall_score: float = 0.0
+    greenwishing_score: float = 0.0
+    greenhushing_score: float = 0.0
+    selective_disclosure: bool = False
+    temporal_escalation: str = "LOW"
+    carbon_tunnel_vision: bool = False
+    linguistic_risk: float = 0.0
+    gsi_score: float = 0.0
+    boilerplate_score: float = 0.0
+    climatebert_relevance: float = 0.0
+    climatebert_risk: str = "LOW"
+
+
+class RiskDriver(BaseModel):
+    name: str
+    impact: str
+    direction: str = "increases_risk"
+    shap_value: Optional[float] = None
+
+
+class PipelineAgent(BaseModel):
+    name: str
+    status: str                  # queued / running / completed / error
+    duration_ms: Optional[int] = None
+    result_summary: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+# ── Main report model ─────────────────────────────────────────────────────────
+
+class ESGReport(BaseModel):
+    # Identity
+    id: str
+    company: str
+    ticker: str = ""
+    sector: str = ""
+    claim: str = ""
+    analysis_date: str           # ISO string
+
+    # Scores
+    esg_score: float
+    rating_grade: str = "B"
+    risk_level: str              # HIGH / MODERATE / LOW
+    confidence: float = 0.0     # 0-100
+
+    # Pillars
+    environmental: PillarScore
+    social: PillarScore
+    governance: PillarScore
+
+    # Sub-analyses
+    carbon: CarbonData
+    greenwashing: GreenwashingData
+    contradictions: List[Contradiction] = []
+    evidence: List[EvidenceItem] = []
+    regulatory: List[RegulatoryItem] = []
+
+    # Pipeline meta
+    agents_total: int = 0
+    agents_successful: int = 0
+    pipeline_duration_seconds: float = 0.0
+
+    # Text outputs
+    ai_verdict: str = ""
+    executive_summary: str = ""
+
+    # Explainability
+    top_risk_drivers: List[RiskDriver] = []
+
+    # Temporal
+    temporal_score: int = 0
+    temporal_risk: str = "LOW"
+    claim_trend: str = ""
+    environmental_trend: str = ""
+
+    # Validation fields
+    contradiction_flag: bool = False
+    validation_notes: List[str] = []
+
+
+# ── Request models ────────────────────────────────────────────────────────────
+
+class AnalysisRequest(BaseModel):
+    company: str
+    claim: str
+    industry: Optional[str] = None
+    focus_areas: Optional[List[str]] = []
+    uploaded_file_ids: Optional[List[str]] = []
+
+
+# ── History entry (lightweight) ───────────────────────────────────────────────
+
+class HistoryEntry(BaseModel):
+    id: str
+    company: str
+    ticker: str = ""
+    sector: str = ""
+    risk_level: str
+    esg_score: float
+    rating_grade: str = "B"
+    greenwashing_risk: float = 0.0
+    confidence: float = 0.0
+    analysis_date: str           # ISO string
+    claim: str = ""
+    ai_verdict_short: str = ""   # first 120 chars of verdict
+    contradictions_count: int = 0
+    agents_run: int = 0
+    duration_seconds: float = 0.0
+
+
+# ── WebSocket pipeline update ─────────────────────────────────────────────────
+
+class PipelineUpdate(BaseModel):
+    analysis_id: str
+    agent_name: str
+    status: str                  # queued / running / completed / error
+    result_summary: Optional[str] = None
+    progress_pct: float = 0.0   # 0-100
+    elapsed_seconds: float = 0.0
+    partial_results: Optional[Dict[str, Any]] = None

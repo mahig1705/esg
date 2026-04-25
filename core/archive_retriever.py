@@ -33,7 +33,7 @@ USER_AGENT = (
     "https://github.com/mahig1705/esg; research-use)"
 )
 _HEADERS = {"User-Agent": USER_AGENT}
-_REQUEST_TIMEOUT = 5  # seconds
+_REQUEST_TIMEOUT = 15  # seconds
 _RATE_LIMIT_SLEEP = 0.5  # seconds between archive calls
 
 
