@@ -20,7 +20,7 @@ export type ReportData = {
   carbonBudgetYears: number;
   ieaGapPct?: number;
   claim: string;
-  verdict: "CONTRADICTED" | "SUPPORTED" | "UNVERIFIABLE";
+  verdict: "CONTRADICTED" | "SUPPORTED" | "UNVERIFIABLE" | "INCONCLUSIVE";
   summary: string;
   topFindings: { kind: "red" | "amber" | "green"; text: string }[];
   contradictions: { severity: string; claim: string; evidence: string; source: string; impact: string; kind: string }[];
