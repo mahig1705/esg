@@ -87,7 +87,7 @@ def get_report_pdf(report_id: str):
 
     try:
         from api.pdf_generator import build_pdf
-        pdf_bytes = build_pdf(report_dict)
+        pdf_bytes = build_pdf(report_dict, raw)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
