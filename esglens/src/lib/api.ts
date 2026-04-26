@@ -5,11 +5,11 @@
  * All URLs come from import.meta.env — no hardcoded localhost:PORT in components.
  *
  * Backend (ESGLens API):  http://localhost:8000   (proxied via Vite as /api)
- * Chatbot backend:        http://localhost:8001
+ * Chatbot:                http://localhost:8000   (proxied via Vite as /chatbot)
  */
 
 const BASE_URL = "/api"; // proxied by Vite → http://localhost:8000/api
-const CHATBOT_URL = import.meta.env.VITE_CHATBOT_URL ?? "http://localhost:8001";
+const CHATBOT_URL = "/chatbot"; // proxied by Vite → http://localhost:8000/chatbot
 const WS_BASE = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000";
 
 // ── Analysis ─────────────────────────────────────────────────────────────────
