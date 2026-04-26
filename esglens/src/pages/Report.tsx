@@ -202,7 +202,7 @@ export default function Report() {
               <Flag className="h-3 w-3" /> {flaggedCount} flagged
             </span>
           )}
-          <ExportMenu report={R} />
+          <ExportMenu report={R} reportId={id ?? undefined} />
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px_1fr] gap-8 items-center">
           <div>

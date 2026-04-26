@@ -1,10 +1,9 @@
 import { useState } from "react";
-import { Download, FileText, FileJson, FileType2, Package } from "lucide-react";
+import { Download, FileText, FileJson, FileType2, Package, Loader2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import jsPDF from "jspdf";
 import { ReportData } from "@/data/demo";
 
-export function ExportMenu({ report: R }: { report: ReportData }) {
+export function ExportMenu({ report: R, reportId }: { report: ReportData; reportId?: string }) {
 
 function downloadBlob(content: string, filename: string, type: string) {
   const blob = new Blob([content], { type });
@@ -129,13 +128,40 @@ function downloadBlob(content: string, filename: string, type: string) {
     doc.save(`ESGLens_${R.ticker}_${executiveOnly ? "ExecSummary" : "Full"}.pdf`);
   }
 
+  async function downloadAuditPDF() {
+    if (!reportId) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/reports/${reportId}/pdf`);
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ESGLens_${R.company.replace(/ /g, "_")}_${reportId}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("PDF download failed", e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
   const opts = [
-    { icon: FileType2, label: "Executive Summary (PDF)", size: "~80 KB", run: () => exportPDF(true) },
-    { icon: FileText, label: "Full Report (PDF)", size: "~250 KB", run: () => exportPDF(false) },
-    { icon: FileText, label: "Plain Text (TXT)", size: "~20 KB", run: () => downloadBlob(buildReportText(), `ESGLens_${R.ticker}.txt`, "text/plain") },
-    { icon: FileJson, label: "Raw Data (JSON)", size: "~12 KB", run: () => downloadBlob(JSON.stringify(R, null, 2), `ESGLens_${R.ticker}.json`, "application/json") },
-    { icon: Package, label: "Evidence Pack (JSON)", size: "~6 KB", run: () => downloadBlob(JSON.stringify(R.evidence, null, 2), `ESGLens_${R.ticker}_evidence.json`, "application/json") },
+    {
+      icon: FileType2,
+      label: "Audit-Ready Report (PDF)",
+      size: "~150 KB",
+      badge: "PROFESSIONAL",
+      run: () => downloadAuditPDF(),
+      disabled: !reportId,
+    },
+    { icon: FileText,  label: "Plain Text (TXT)",      size: "~20 KB",  badge: "", run: () => downloadBlob(buildReportText(), `ESGLens_${R.ticker}.txt`, "text/plain"), disabled: false },
+    { icon: FileJson,  label: "Raw Data (JSON)",        size: "~12 KB",  badge: "", run: () => downloadBlob(JSON.stringify(R, null, 2), `ESGLens_${R.ticker}.json`, "application/json"), disabled: false },
+    { icon: Package,   label: "Evidence Pack (JSON)",   size: "~6 KB",   badge: "", run: () => downloadBlob(JSON.stringify(R.evidence, null, 2), `ESGLens_${R.ticker}_evidence.json`, "application/json"), disabled: false },
   ];
   return (
     <div className="relative">
@@ -158,11 +184,13 @@ function downloadBlob(content: string, filename: string, type: string) {
             {opts.map((o) => (
               <button
                 key={o.label}
+                disabled={o.disabled || loading}
                 onMouseDown={(e) => { e.preventDefault(); o.run(); setOpen(false); }}
-                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-teal-bright/10 transition border-b border-bg-border last:border-0"
+                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-teal-bright/10 transition border-b border-bg-border last:border-0 disabled:opacity-40"
               >
-                <o.icon className="h-4 w-4 text-teal-bright shrink-0" />
+                {loading && o.label.includes("PDF") ? <Loader2 className="h-4 w-4 text-teal-bright animate-spin shrink-0" /> : <o.icon className="h-4 w-4 text-teal-bright shrink-0" />}
                 <span className="flex-1 text-sm text-text-primary">{o.label}</span>
+                {o.badge && <span className="font-mono text-[9px] bg-teal-bright/20 text-teal-bright px-1.5 py-0.5 rounded">{o.badge}</span>}
                 <span className="font-mono text-[10px] text-text-muted">{o.size}</span>
               </button>
             ))}
