@@ -13,14 +13,15 @@ from reportlab.platypus import (
     Table, TableStyle, HRFlowable, PageBreak,
 )
 from reportlab.graphics.shapes import Drawing, Rect, String
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
 
 NAVY = colors.HexColor("#0A1628")
 TEAL = colors.HexColor("#00D4AA")
 AMBER = colors.HexColor("#F59E0B")
 RED = colors.HexColor("#EF4444")
 GREEN = colors.HexColor("#10B981")
-GREY = colors.HexColor("#94A3B8")
-LGREY = colors.HexColor("#1E2D40")
+GREY = colors.HexColor("#64748B") # Darker grey for light background
+LGREY = colors.HexColor("#F8FAFC") # Light background
 WHITE = colors.white
 W, H = A4
 M = 18 * mm
@@ -30,12 +31,12 @@ def _sf(v, d=0.0):
     except: return d
 
 # --- Styles ---
-H1 = ParagraphStyle("h1", fontName="Helvetica-Bold", fontSize=22, textColor=WHITE, spaceAfter=6)
-H2 = ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=12, textColor=TEAL, spaceAfter=4, spaceBefore=8)
-H3 = ParagraphStyle("h3", fontName="Helvetica-Bold", fontSize=10, textColor=WHITE, spaceAfter=3, spaceBefore=5)
-BD = ParagraphStyle("bd", fontName="Helvetica", fontSize=8.5, textColor=GREY, spaceAfter=3, leading=13)
+H1 = ParagraphStyle("h1", fontName="Helvetica-Bold", fontSize=22, textColor=NAVY, spaceAfter=6)
+H2 = ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=12, textColor=TEAL, spaceAfter=4, spaceBefore=12)
+H3 = ParagraphStyle("h3", fontName="Helvetica-Bold", fontSize=10, textColor=NAVY, spaceAfter=3, spaceBefore=8)
+BD = ParagraphStyle("bd", fontName="Helvetica", fontSize=8.5, textColor=NAVY, spaceAfter=3, leading=13)
 WN = ParagraphStyle("wn", fontName="Helvetica-Bold", fontSize=8, textColor=AMBER, spaceAfter=3)
-MN = ParagraphStyle("mn", fontName="Courier", fontSize=7.5, textColor=WHITE, spaceAfter=2)
+MN = ParagraphStyle("mn", fontName="Courier", fontSize=7.5, textColor=NAVY, spaceAfter=2)
 SP = Spacer(1, 3*mm)
 
 def _tbl(headers, rows, cw=None):
@@ -43,10 +44,10 @@ def _tbl(headers, rows, cw=None):
     cw = cw or [aw/len(headers)]*len(headers)
     t = Table([headers]+rows, colWidths=cw)
     t.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),TEAL), ("TEXTCOLOR",(0,0),(-1,0),NAVY),
+        ("BACKGROUND",(0,0),(-1,0),TEAL), ("TEXTCOLOR",(0,0),(-1,0),WHITE),
         ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"), ("FONTSIZE",(0,0),(-1,-1),7.5),
-        ("TEXTCOLOR",(0,1),(-1,-1),GREY), ("ROWBACKGROUNDS",(0,1),(-1,-1),[NAVY,LGREY]),
-        ("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#1E3A5F")),
+        ("TEXTCOLOR",(0,1),(-1,-1),NAVY), ("ROWBACKGROUNDS",(0,1),(-1,-1),[WHITE,LGREY]),
+        ("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#E2E8F0")),
         ("TOPPADDING",(0,0),(-1,-1),3), ("BOTTOMPADDING",(0,0),(-1,-1),3),
         ("LEFTPADDING",(0,0),(-1,-1),4),
     ]))
@@ -57,9 +58,9 @@ def _kvtbl(rows):
     t = Table(rows, colWidths=cw)
     t.setStyle(TableStyle([
         ("FONTNAME",(0,0),(-1,-1),"Helvetica"), ("FONTSIZE",(0,0),(-1,-1),8),
-        ("TEXTCOLOR",(0,0),(0,-1),GREY), ("TEXTCOLOR",(1,0),(1,-1),WHITE),
-        ("BACKGROUND",(0,0),(-1,-1),NAVY), ("ROWBACKGROUNDS",(0,0),(-1,-1),[NAVY,LGREY]),
-        ("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#1E3A5F")),
+        ("TEXTCOLOR",(0,0),(0,-1),GREY), ("TEXTCOLOR",(1,0),(1,-1),NAVY),
+        ("BACKGROUND",(0,0),(-1,-1),WHITE), ("ROWBACKGROUNDS",(0,0),(-1,-1),[WHITE,LGREY]),
+        ("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#E2E8F0")),
         ("TOPPADDING",(0,0),(-1,-1),3), ("BOTTOMPADDING",(0,0),(-1,-1),3),
         ("LEFTPADDING",(0,0),(-1,-1),5),
     ]))
@@ -73,15 +74,35 @@ def _badge(label, value, sub, color):
     d.add(String(52,10,sub,fontName="Helvetica",fontSize=6.5,fillColor=GREY,textAnchor="middle"))
     return d
 
+def _bar_chart(data, names):
+    d = Drawing(400, 80)
+    chart = HorizontalBarChart()
+    chart.x = 40
+    chart.y = 10
+    chart.height = 60
+    chart.width = 300
+    chart.data = [data]
+    chart.categoryAxis.categoryNames = names
+    chart.categoryAxis.labels.fontName = "Helvetica-Bold"
+    chart.categoryAxis.labels.fontSize = 8
+    chart.categoryAxis.labels.fillColor = NAVY
+    chart.bars[0].fillColor = TEAL
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.valueMax = 100
+    chart.valueAxis.labels.fontName = "Helvetica"
+    chart.valueAxis.labels.fontSize = 8
+    d.add(chart)
+    return d
+
 def _sec(title):
-    return [HRFlowable(width="100%",thickness=0.5,color=TEAL,spaceAfter=3), Paragraph(title, H2)]
+    return [Spacer(1, 6*mm), HRFlowable(width="100%",thickness=0.5,color=TEAL,spaceAfter=3), Paragraph(title, H2)]
 
 def _on_page(c, doc):
     c.saveState()
-    c.setFillColor(NAVY); c.rect(0,0,W,H,fill=1,stroke=0)
+    c.setFillColor(WHITE); c.rect(0,0,W,H,fill=1,stroke=0)
     c.setFillColor(LGREY); c.rect(0,H-16*mm,W,16*mm,fill=1,stroke=0)
     c.setFillColor(TEAL); c.rect(0,H-17*mm,W,1*mm,fill=1,stroke=0)
-    c.setFillColor(WHITE); c.setFont("Helvetica-Bold",7.5)
+    c.setFillColor(NAVY); c.setFont("Helvetica-Bold",7.5)
     c.drawString(M,H-11*mm, getattr(doc,'_company',''))
     c.setFillColor(GREY); c.setFont("Helvetica",6.5)
     c.drawRightString(W-M,H-11*mm, f"ESG GREENWASHING RISK ASSESSMENT | {getattr(doc,'_rid','')}")
@@ -107,9 +128,7 @@ def _get_pathway(raw):
 def _get_deception(raw):
     kf = _get_agent(raw, "adversarial_audit")
     adv = (raw.get("scores") or {}).get("adversarial_audit") or {}
-    # merge
     merged = {**kf, **adv}
-    # also pull greenwishing agent
     gw = _get_agent(raw, "greenwishing_detection")
     if isinstance(gw, dict):
         merged.update(gw)
@@ -151,7 +170,7 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
     s.append(Paragraph("ESG GREENWASHING", H1))
     s.append(Paragraph("RISK ASSESSMENT", ParagraphStyle("c2",fontName="Helvetica-Bold",fontSize=26,textColor=TEAL,spaceAfter=5)))
     s.append(Spacer(1,5*mm))
-    s.append(Paragraph(co, ParagraphStyle("cn",fontName="Helvetica-Bold",fontSize=18,textColor=WHITE,spaceAfter=3)))
+    s.append(Paragraph(co, ParagraphStyle("cn",fontName="Helvetica-Bold",fontSize=18,textColor=NAVY,spaceAfter=3)))
     s.append(Paragraph(f"Ticker: {tk} | Industry: {sec} | Version: 4.0", BD))
     s.append(Paragraph(f"Report ID: {rid}", MN))
     s.append(Paragraph(f"Date: {gd} | Confidence: {conf:.0f}%", BD))
@@ -177,26 +196,22 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
     exec_sum = report.get("executive_summary") or report.get("ai_verdict") or ""
     if exec_sum:
         s.append(Paragraph(f"<b>Summary:</b> {exec_sum[:600]}", BD))
-    # Key findings
     if drivers:
         s.append(Paragraph("<b>Key findings at a glance:</b>", BD))
         for d in drivers[:5]:
             imp = d.get("impact","")
             icon = "[!]" if imp.upper()=="HIGH" else "[~]"
             s.append(Paragraph(f"  {icon} {imp.upper()} — {d.get('name','')}", BD))
-    s.append(PageBreak())
 
     # === EXECUTIVE SUMMARY ===
     s += _sec("SECTION 3: EXECUTIVE SUMMARY")
     s.append(Paragraph(exec_sum or f"Assessment of {co} using multi-agent evidence retrieval and calibrated ESG risk scoring.", BD))
-    s.append(PageBreak())
 
     # === CLAIM BREAKDOWN ===
     s += _sec("SECTION 3B: CLAIM BREAKDOWN")
     s.append(Paragraph(f"The claim is broken down into key components for evaluation:", BD))
     s.append(Paragraph(f"• {claim} (strategic claim)", BD))
     s.append(Paragraph(f"• Implicit verification requirement: comparative baseline, scope, and mechanism evidence required.", BD))
-    s.append(SP)
 
     # === EVIDENCE CITATIONS ===
     s += _sec("SECTION 4: EVIDENCE CITATIONS TABLE")
@@ -205,11 +220,16 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
     if evid:
         rows = [[str(i+1), e.get("source_name","")[:35], e.get("source_type",""), "Yes" if e.get("archive_verified") else "No", e.get("stance","")] for i,e in enumerate(evid[:15])]
         s.append(_tbl(["#","Source","Type","Verified","Role"], rows, [8*mm,75*mm,38*mm,18*mm,25*mm]))
-    s.append(PageBreak())
 
     # === SCORE DERIVATION ===
     s += _sec("SECTION 5: SCORE DERIVATION (E / S / G)")
     s.append(Paragraph(f"Overall greenwashing risk: {gw:.1f}/100 → Rating: {rating} → Band: {risk}", BD))
+    
+    # Add Bar chart for pillar scores
+    s.append(Spacer(1, 4*mm))
+    s.append(_bar_chart([env_p.get("score",0), soc_p.get("score",0), gov_p.get("score",0)], ["ENVIRONMENTAL", "SOCIAL", "GOVERNANCE"]))
+    s.append(Spacer(1, 4*mm))
+
     pf = raw.get("pillarfactors") or {}
     for pname, pkey, pillar in [("ENVIRONMENTAL", "environmental", env_p), ("SOCIAL", "social", soc_p), ("GOVERNANCE", "governance", gov_p)]:
         sc = pillar.get("score", 0) or 0
@@ -228,14 +248,12 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
                 rows.append([nm, ssc_str, f"{wt*100:.0f}%", f"{contrib:.2f}", dq])
             s.append(_tbl(["Factor","Score","Weight","Contribution","Data Quality"], rows, [62*mm,28*mm,18*mm,28*mm,28*mm]))
         s.append(SP)
-    # External benchmarks
     eb = raw.get("external_benchmarks") or {}
     if eb.get("enabled"):
         s.append(Paragraph("<b>External Benchmark Integration (WBA / WRI)</b>", H3))
         adjs = eb.get("adjustments") or []
         for a in adjs:
             s.append(Paragraph(f"  • {a.get('pillar','')}: {_sf(a.get('before',0)):.1f} → {_sf(a.get('after',0)):.1f} via WBA (weight={_sf(a.get('weight',0)):.2f})", BD))
-    s.append(PageBreak())
 
     # === KEY RISK DRIVERS ===
     s += _sec("SECTION 6: KEY RISK DRIVERS")
@@ -244,7 +262,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
             s.append(Paragraph(f"  {i}. {d.get('name','')} | Impact: {d.get('impact','')} | Direction: {d.get('direction','')}", BD))
     else:
         s.append(Paragraph("No structured risk drivers extracted.", BD))
-    s.append(PageBreak())
 
     # === CONTRADICTIONS & REGULATORY ===
     s += _sec("SECTION 7: CONTRADICTIONS & REGULATORY ALERTS")
@@ -259,7 +276,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
     if regs:
         rows = [[r.get("framework","")[:45], r.get("jurisdiction",""), r.get("status",""), f"{_sf(r.get('compliance_score',0)):.0f}/100"] for r in regs[:12]]
         s.append(_tbl(["Framework","Jurisdiction","Status","Score"], rows, [90*mm,28*mm,30*mm,22*mm]))
-    s.append(PageBreak())
 
     # === CARBON EMISSIONS ===
     s += _sec("SECTION 8: CARBON EMISSIONS & CLIMATE DATA")
@@ -282,7 +298,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
     ]))
     if not s2:
         s.append(Paragraph("⚠ WARNING: Scope 2 not disclosed — net-zero claim cannot be quantitatively verified.", WN))
-    s.append(SP)
 
     # === CARBON PATHWAY ===
     s += _sec("SECTION 8B: CARBON PATHWAY ALIGNMENT")
@@ -304,7 +319,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
         ]))
     else:
         s.append(Paragraph("Carbon pathway data not available for this analysis run.", BD))
-    s.append(PageBreak())
 
     # === DECEPTION PATTERN ===
     s += _sec("SECTION 9: DECEPTION PATTERN ANALYSIS")
@@ -325,7 +339,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
     cbr = gw_d.get("climatebert_risk","N/A")
     cbrel = _sf(gw_d.get("climatebert_relevance",0))
     s.append(Paragraph(f"<b>ClimateBERT NLP:</b> Climate Relevance: {cbrel*100:.1f}% | Risk: {cbr}", BD))
-    s.append(PageBreak())
 
     # === CALIBRATION & CONFIDENCE ===
     s += _sec("SECTION 10: CALIBRATION & CONFIDENCE")
@@ -340,7 +353,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
         ["Agents Run", f"{report.get('agents_successful',0)}/{report.get('agents_total',0)}"],
         ["Duration", f"{report.get('pipeline_duration_seconds',0):.0f}s"],
     ]))
-    s.append(PageBreak())
 
     # === LIMITATIONS ===
     s += _sec("SECTION 11: LIMITATIONS")
@@ -354,7 +366,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
         if isinstance(qw, str): lims.append(qw)
     for l in lims:
         s.append(Paragraph(f"  • {l}", BD))
-    s.append(SP)
 
     # === COMMITMENT TIMELINE ===
     s += _sec("SECTION 11B: COMMITMENT TIMELINE")
@@ -368,7 +379,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
                 s.append(Paragraph(f"  • {pledge} — {status}", BD))
     else:
         s.append(Paragraph("No commitment timeline data available.", BD))
-    s.append(PageBreak())
 
     # === ESG MISMATCH ===
     s += _sec("SECTION 12: ESG MISMATCH DETECTOR")
@@ -376,7 +386,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
     mm_sum = mm_data.get("Executive Summary") or ""
     s.append(Paragraph(f"Mismatch Risk Level: {mm_risk}", H3))
     s.append(Paragraph(mm_sum or "Insufficient data for mismatch assessment.", BD))
-    s.append(PageBreak())
 
     # === APPENDIX A ===
     s += _sec("APPENDIX A: VALIDATION & CALIBRATION STATUS")
@@ -387,7 +396,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
         ["Contradiction Database", "22 verified regulatory actions"],
         ["Data Sources", "UK ASA, Dutch Courts, US FTC, US SEC, InfluenceMap, ClientEarth"],
     ]))
-    s.append(SP)
 
     # === APPENDIX B ===
     s += _sec("APPENDIX B: TEMPORAL ESG CONSISTENCY")
@@ -401,7 +409,6 @@ def build_pdf(report: Dict[str, Any], raw: Dict[str, Any] = None) -> bytes:
         ["Claim Trend", ct],
         ["Environmental Trend", et],
     ]))
-    s.append(SP)
 
     # === APPENDIX C ===
     s += _sec("APPENDIX C: EVIDENCE & OFFSET INTEGRITY")
